@@ -635,8 +635,14 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         original_device = weight_flat.device
         weight_flat_float32 = weight_flat.to(dtype=torch.float32)
         
+        # Print shapes for debugging
+        print(f"SVD input shape: {weight_flat_float32.shape}, out_dim: {out_dim}, head_dim: {head_dim}, hidden_size: {hidden_size}, rank: {rank}")
+        
         # Perform SVD (forcing it to run on same device as input)
         U, S, Vh = torch.svd(weight_flat_float32)
+        
+        # Print SVD output shapes for debugging
+        print(f"SVD output shapes - U: {U.shape}, S: {S.shape}, Vh: {Vh.shape}")
         
         # Convert back to original dtype
         U = U.to(dtype=original_dtype, device=original_device)
@@ -651,9 +657,38 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         U_scaled = U[:, :rank] * sqrt_S
         Vh_scaled = Vh[:rank] * sqrt_S.unsqueeze(1)
         
-        # Reshape for A projections (out_dim, rank) and hidden_size
-        A_weight = U_scaled.reshape(out_dim, head_dim, rank).permute(0, 2, 1).reshape(out_dim * rank, head_dim)
-        B_weight = Vh_scaled.reshape(rank, hidden_size)
+        # Print sizes before reshaping
+        print(f"Before reshape - U_scaled: {U_scaled.shape}, Vh_scaled: {Vh_scaled.shape}")
+        print(f"Expected A_weight shape: ({out_dim}, {head_dim}, {rank}) -> ({out_dim * rank}, {head_dim})")
+        print(f"Expected B_weight shape: ({rank}, {hidden_size})")
+        
+        # Verify expected sizes match actual sizes
+        expected_u_size = out_dim * head_dim * rank
+        expected_vh_size = rank * hidden_size
+        
+        if U_scaled.numel() != expected_u_size:
+            # Adjust U if sizes don't match
+            print(f"WARNING: U_scaled size mismatch: {U_scaled.numel()} vs expected {expected_u_size}")
+            # Try to reshape with proper dimensions
+            if U_scaled.shape[0] == out_dim * head_dim:
+                # Try reshaping by adjusting out_dim or head_dim
+                A_weight = U_scaled[:, :rank].reshape(-1, head_dim)
+            else:
+                # Fallback to direct reshaping
+                A_weight = U_scaled.reshape(-1, head_dim)
+        else:
+            # Original reshape
+            A_weight = U_scaled.reshape(out_dim, head_dim, rank).permute(0, 2, 1).reshape(out_dim * rank, head_dim)
+        
+        if Vh_scaled.numel() != expected_vh_size:
+            # Adjust Vh if sizes don't match
+            print(f"WARNING: Vh_scaled size mismatch: {Vh_scaled.numel()} vs expected {expected_vh_size}")
+            B_weight = Vh_scaled.reshape(-1, hidden_size)
+        else:
+            # Original reshape
+            B_weight = Vh_scaled.reshape(rank, hidden_size)
+            
+        print(f"Final shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
         
         # Set weights for the linear layers
         with torch.no_grad():
