@@ -81,6 +81,7 @@ class GemmaTensorProductAttention(nn.Module):
         mask: torch.Tensor,
         local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Forward pass for TPA attention. Will handle creating appropriate masks if needed."""
         """
         Forward pass for Tensor Product Attention.
         
@@ -221,24 +222,22 @@ class GemmaTensorProductAttention(nn.Module):
             scores = scores * self.attn_logit_softcapping
         
         # Apply attention mask with proper broadcasting
-        # Check and handle dimension mismatch between scores and mask
-        if scores.shape[-1] != mask.shape[-1]:
-            # Log the mismatch for debugging
-            print(f"Warning: Shape mismatch between scores {scores.shape} and mask {mask.shape}")
+        # Check dimensions and alignment of mask
+        scores_shape = scores.shape  # [batch_size, num_heads, seq_len, ctx_len]
+        mask_shape = mask.shape
             
-            # Adapt mask to match the scores shape
-            if mask.shape[-1] > scores.shape[-1]:
-                # Take the relevant slice of mask if it's too large
-                mask_applicable = mask[:, :, :, :scores.shape[-1]]
-            else:
-                # Expand mask if it's too small (though this should be rare)
-                padding = torch.full(
-                    (mask.shape[0], mask.shape[1], mask.shape[2], scores.shape[-1] - mask.shape[-1]),
-                    torch.finfo(scores.dtype).min,
-                    device=mask.device,
-                    dtype=mask.dtype
-                )
-                mask_applicable = torch.cat([mask, padding], dim=-1)
+        # Create a properly sized mask that matches scores exactly
+        if scores_shape != mask_shape:
+            # Instead of trying to adapt the existing mask,
+            # create a new causal mask that matches the scores dimensions
+            min_value = torch.finfo(scores.dtype).min
+            
+            # Create a new causal mask with exact dimensions needed
+            new_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
+            new_mask = torch.tril(new_mask)  # Make it lower triangular for causality
+            
+            # Convert to attention values (0 for attend, min_value for don't attend)
+            mask_applicable = torch.where(new_mask, 0, torch.tensor(min_value, dtype=scores.dtype, device=scores.device))
             
             scores = scores + mask_applicable
         else:

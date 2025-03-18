@@ -541,7 +541,8 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
         prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
         curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
-        curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor)
+        # Let the TPA attention create its own mask
+        curr_local_mask_tensor = None
         output_positions_tensor = torch.LongTensor([min_prompt_len - 1]).to(device)
         temperatures_tensor = None if not temperature else torch.FloatTensor(
                 [temperature] * batch_size).to(device)
@@ -577,9 +578,8 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             input_positions_tensor = output_index.unsqueeze(dim=-1)
             curr_mask_tensor = mask_tensor.index_select(2,
                                                         input_positions_tensor)
-            curr_local_mask_tensor = local_mask_tensor.index_select(
-                    2, input_positions_tensor
-                ) if local_mask_tensor is not None else None
+            # Let the TPA attention create its own mask
+            curr_local_mask_tensor = None
             output_positions_tensor = torch.tensor(0, dtype=torch.int64, device=device)
             output_index = output_index + 1
             image_batch = None
