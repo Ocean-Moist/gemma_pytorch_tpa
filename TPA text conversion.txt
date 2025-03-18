@@ -1,0 +1,5718 @@
+Tensor Product Attention Is All You Need
+Yifan Zhang
+∗ ⋄1,2
+Yifeng Liu
+∗ 3
+Huizhuo Yuan
+3
+Zhen Qin
+4
+Yang Yuan
+1,2
+Quanquan Gu
+3
+Andrew Chi-Chih Yao
+1,2†
+1
+IIIS, Tsinghua University
+2
+Shanghai Qi Zhi Institute
+3
+University of California, Los Angeles
+4
+TapTap
+Abstract
+Scaling language models to handle longer input sequences typically necessitates
+large key-value (KV) caches, resulting in substantial memory overhead during
+inference. In this paper, we propose Tensor Product Attention (TPA), a novel
+attention mechanism that uses tensor decompositions to represent queries, keys,
+and values compactly, significantly shrinking KV cache size at inference time. By
+factorizing these representations into contextual low-rank components (contex-
+tual factorization) and seamlessly integrating with RoPE, TPA achieves improved
+model quality alongside memory efficiency. Based on TPA, we introduce the
+Tensor ProducT ATTenTion Transformer (T6), a new model architecture for se-
+quence modeling. Through extensive empirical evaluation of language modeling
+tasks, we demonstrate that T6 exceeds the performance of standard Transformer
+baselines including MHA, MQA, GQA, and MLA across various metrics, includ-
+ing perplexity and a range of renowned evaluation benchmarks. Notably, TPA’s
+memory efficiency enables the processing of significantly longer sequences under
+fixed resource constraints, addressing a critical scalability challenge in modern
+language models. The code is available at https://github.com/tensorgi/T6.
+1 Introduction
+Large language models (LLMs) have revolutionized natural language processing, demonstrating ex-
+ceptional performance across tasks (Brown et al., 2020; Chowdhery et al., 2023; Touvron et al.,
+2023; Bubeck et al., 2023). As these models evolve, their ability to process longer contexts be-
+comes increasingly important for sophisticated applications such as document analysis, complex
+reasoning, and code completions. However, managing longer sequences during inference poses sig-
+nificant computational and memory challenges, particularly due to the storage of key-value (KV)
+caches (Zhang et al., 2023c; Liu et al., 2024c). Because memory consumption grows linearly with
+sequence length, the maximum context window is limited by practical hardware constraints.
+A variety of solutions have been explored to address this memory bottleneck. Some approaches com-
+press or selectively prune cached states through sparse attention patterns (Child et al., 2019) or token
+eviction strategies (Zhang et al., 2023c; Xiao et al., 2024; Ribar et al., 2024), though such methods
+risk discarding tokens that may later prove important. Other work proposes off-chip storage of key-
+value states (He & Zhai, 2024), at the expense of increased I/O latency. Attention variants like
+multi-query attention (MQA) (Shazeer, 2019) and grouped-query attention (GQA) (Ainslie et al.,
+2023) reduce per-token cache requirements by sharing keys and values across heads, but often com-
+promise flexibility or require significant architectural modifications. Meanwhile, low-rank weight
+factorization methods such as LoRA (Hu et al., 2022) effectively reduce fine-tuning memory, yet
+do not address the KV cache overhead that dominates runtime. The recently introduced Multi-head
+Latent Attention (MLA) in Deepseek-V2 (Liu et al., 2024a) caches compressed key-value repre-
+∗
+Equal contribution; ⋄ Tech lead; † Corresponding author.
+arXiv:2501.06425v2 [cs.CL] 7 Feb 2025
+
+RoPE
+Scale
+Linear
+Scaled Dot-Product Attention
+Concat
+Linear
+A
+Q
+B
+Q
+RoPE
+Scale
+Linear
+A
+K
+Scale
+Linear
+A
+V
+h
+R
+Q
+1
+B
+V
+R
+K
+1
+R
+V
+1
+Linear Linear
+B
+K
+Linear
+Figure 1: Tensor Product Attention (TPA) in the Tensor ProducT ATTenTion Transformer (T6).
+Different from multi-head attention, in each layer, firstly the hidden state goes through different lin-
+ear layers to get the latent factor matrices A
+(·)
+’s and B
+(·)
+’s for query, key, and value. We additionally
+apply RoPE to B
+Q
+and B
+K
+for query and key. Then the multi-head query, key, and value vectors
+are attained by the tensor product of A
+(·)
+and B
+(·)
+. Finally, the output of TPA is produced by scaled
+dot-product attention followed by linear projection of concatenated results of multiple heads.
+sentations but needs additional position-encoded parameters per head due to incompatibility with
+Rotary Position Embedding (RoPE) efficiently (Su et al., 2024).
+In order to overcome the limitations of existing approaches, we introduce Tensor Product Atten-
+tion (TPA), as illustrated in Figure 1, a novel architecture that uses higher-order tensors to factorize
+queries (Q), keys (K), and values (V) during attention computation. By dynamically factorizing
+activations rather than static weights (e.g., LoRA), TPA constructs low-rank, contextual represen-
+tations that substantially reduce KV cache memory usage with improved representational capacity.
+In practice, TPA can reduce the memory overhead by an order of magnitude compared to stan-
+dard multi-head attention (MHA) with lower pretraining validation loss (perplexity) and improved
+downstream performance.
+A key advantage of TPA is its native compatibility with rotary positional embeddings (RoPE) (Su
+et al., 2024), enabling a straightforward drop-in replacement for multi-head attention (MHA) layers
+in modern LLM architectures such as LLaMA (Touvron et al., 2023) and Gemma (Team et al.,
+2024).
+Our primary contributions are summarized as follows:
+• We propose Tensor Product Attention (TPA), A mechanism that factorizes Q, K, and V activa-
+tions using contextual tensor-decompositions to achieve 10× or more reduction in inference-time
+KV cache size relative to standard attention mechanism (Vaswani et al., 2017) with improved per-
+formance compared to previous methods such as MHA, MQA, GQA, and MLA. In addition, we
+unify existing attention mechanisms by revealing that MHA, MQA, and GQA all arise naturally
+as non-contextual variants of TPA.
+• We introduce the Tensor ProducT ATTenTion Transformer (T6), a new TPA-based model ar-
+chitecture for sequence modeling. On language modeling experiments, T6 consistently improves
+validation perplexity and downstream evaluation performance with reduced KV cache size.
+• We show TPA integrates seamlessly with RoPE (Su et al., 2024), facilitating easy adoption in
+popular foundation model architectures such as LLaMA and Gemma.
+2
+
+2 Background
+In this section, we review two classical forms of attention: Scaled Dot-Product Attention, and Multi-
+Head Attention (MHA) (Vaswani et al., 2017). More types of attention are detailed in the Ap-
+pendix E, including Multi-Query Attention (MQA) (Shazeer, 2019), and Grouped Query Attention
+(GQA) (Ainslie et al., 2023), as well as a recent method called Multi-head Latent Attention (MLA)
+used in DeepSeek-V2 (Liu et al., 2024a) and DeepSeek-V3 (Liu et al., 2024b). We also introduce
+Rotary Position Embedding (RoPE, Su et al. (2024)), which is commonly used in recent works of
+large language models.
+Notations. We use bold uppercase letters (e.g., X, Q) for matrices, bold lowercase (e.g., a, b) for
+vectors, and italic uppercase (e.g., W
+Q
+i
+) for learnable parameter matrices. We denote by [n] the set
+{1, . . . , n} for some positive integer n. We use ⊤ to denote the transpose of a vector or a matrix. Let
+d
+model
+be the embedding dimension, h the number of attention heads, d
+h
+the dimension per head,
+x
+t
+∈ R
+d
+the input for the t-th token at a given attention layer, X ∈ R
+T ×d
+model
+denotes the input
+embeddings for T tokens, and Q, K, V ∈ R
+T ×h×d
+h
+denote the queries, keys, and values of h heads
+for T tokens. With a little abuse of notation, Q
+i
+, K
+i
+, V
+i
+∈ R
+T ×d
+h
+denote the i-th head of queries,
+keys, and values, and Q
+t
+, K
+t
+, V
+t
+∈ R
+h×d
+h
+denote the heads of the query, key, and value for t-th
+token.
+Throughout the paper, W
+Q
+, W
+K
+, W
+V
+denote projection matrices for queries, keys, and values, re-
+spectively. In multi-head attention, each head is associated with its own set of W
+Q
+i
+, W
+K
+i
+, W
+V
+i
+, and
+each has dimension W
+Q
+i
+, W
+K
+i
+, W
+V
+i
+∈ R
+d
+model
+×d
+k
+, where d
+k
+is typically set to d
+h
+, the dimension of
+each head.
+5
+Similarly, we have an output projection matrix W
+O
+∈ R
+(h·d
+h
+)×d
+model
+. For methods like
+MQA and GQA, some of these are shared or partially shared across heads, but their shapes remain
+consistent.
+We define the tensor product of two vectors as follows: for vectors a ∈ R
+m
+, b ∈ R
+n
+, the tensor
+product of a and b is:
+a ⊗ b = C ∈ R
+m×n
+, with C
+ij
+= a
+i
+b
+j
+,
+where a
+i
+and b
+j
+are the i-th and j-th elements of a and b respectively, and C
+ij
+is the (i, j)-th entry
+of C. We also define the vectorization of a matrix C ∈ R
+m×n
+by:
+vec(C) = d ∈ R
+mn
+, with d
+i·n+j
+= C
+ij
+,
+where d
+i·n+j
+is the (i · n + j)-th element of d.
+2.1 Scaled Dot-Product Attention
+Scaled dot-product attention (Vaswani et al., 2017) determines how to focus on different parts of an
+input sequence by comparing queries (Q) and keys (K). It produces a weighted combination of the
+values (V). Formally, the attention output is:
+Attention(Q, K, V) = Softmax
+
+QK
+⊤
+√
+d
+k
+
+V,
+where each of Q, K, V is an (n × d
+k
+) matrix for n tokens and key dimension d
+k
+. The division by
+√
+d
+k
+stabilizes training by controlling the scale of the inner products.
+2.2 Multi-Head Attention (MHA)
+Multi-Head Attention (MHA) extends scaled dot-product attention by dividing the model’s internal
+representation into several heads. Each head learns different projections for queries, keys, and
+values, allowing the model to attend to different types of information. For each token embedding
+x
+t
+∈ R
+d
+model
+, MHA computes each head i as follows:
+Q
+t,i
+= (W
+Q
+i
+)
+⊤
+x
+t
+∈ R
+d
+h
+,
+K
+t,i
+= (W
+K
+i
+)
+⊤
+x
+t
+∈ R
+d
+h
+,
+V
+t,i
+= (W
+V
+i
+)
+⊤
+x
+t
+∈ R
+d
+h
+,
+head
+i
+= Attention
+
+Q
+i
+, K
+i
+, V
+i
+
+,
+5
+Often, one sets h × d
+h
+= d
+model
+, so each head has query/key/value dimension d
+h
+.
+3
+
+where W
+Q
+i
+, W
+K
+i
+, W
+V
+i
+∈ R
+d
+model
+×d
+h
+are learnable projection matrices for the i-th head,
+Q
+i
+, K
+i
+, V
+i
+∈ R
+T ×d
+h
+. After computing each head’s attention, the outputs are concatenated and
+mapped back to the original dimension via another matrix W
+O
+∈ R
+hd
+h
+×d
+model
+:
+MHA(Q, K, V) = Concat
+
+head
+1
+, . . . , head
+h
+
+W
+O
+.
+MHA can capture a rich set of dependencies while each head focuses on different subspaces.
+2.3 Rotary Position Embedding (RoPE)
+Many recent LLMs use rotary position embedding (RoPE; Su et al., 2024) to encode positional
+information in the query/key vectors. Specifically, let RoPE
+t
+denote the rotation operator T
+t
+∈
+R
+d
+h
+×d
+h
+corresponding to the t-th position. T
+t
+is a block-diagonal matrix, which consists of block-
+diagonal matrix
+
+cos(tθ
+j
+) − sin(tθ
+j
+)
+sin(tθ
+j
+) cos(tθ
+j
+)
+
+, j ∈ {1, · · · , d
+h
+/2}, where {θ
+j
+} are pre-defined frequency
+parameters, e.g., θ
+j
+= 1/10000
+2j/d
+h
+. Then we define
+RoPE (Q
+t
+) ≜ Q
+t
+T
+t
+, where Q
+t
+∈ R
+h×d
+h
+.
+A fundamental property is that
+T
+t
+T
+⊤
+s
+= T
+t−s
+, (2.1)
+which ensures that relative positions (t − s) are preserved, thereby providing a form of translation
+invariance in the rotary position embedding.
+3 Tensor Product Attention
+In this section, we provide a detailed description of our proposed Tensor Product Attention (TPA),
+which allows contextual low-rank factorization for queries, keys, and values. First, we explain how
+TPA factorizes queries, keys, and values with explicit tensor shapes. Next, we describe how TPA
+can be integrated into the multi-head attention framework and how it reduces memory consumption
+in KV caching at inference time. Finally, we show how RoPE can seamlessly integrate with TPA
+(including a pre-rotated variant).
+3.1 Tensor Factorization of Queries, Keys, and Values
+Let x
+t
+∈ R
+d
+model
+for t = 1, . . . , T be the hidden-state vector corresponding to the t-th token in a
+sequence of length T . A typical multi-head attention block has h heads, each of dimension d
+h
+,
+satisfying d
+model
+= h × d
+h
+. Standard attention projects the entire sequence into three tensors,
+Q, K, V ∈ R
+T ×h×d
+h
+, where Q
+t
+, K
+t
+, V
+t
+∈ R
+h×d
+h
+denote the slices for the t-th token.
+Contextual Factorization (CF). Instead of forming each head’s query, key, or value via a single
+linear map, TPA factorizes each Q
+t
+, K
+t
+, V
+t
+into a sum of (contextual) tensor products whose ranks
+are R
+q
+, R
+k
+, and R
+v
+, respectively and may differ. Specifically, for each token t, with a small abuse
+of notation, we define:
+Q
+t
+=
+1
+R
+Q
+R
+Q
+X
+r=1
+a
+Q
+r
+(x
+t
+) ⊗ b
+Q
+r
+(x
+t
+), (3.1)
+K
+t
+=
+1
+R
+K
+R
+K
+X
+r=1
+a
+K
+r
+(x
+t
+) ⊗ b
+K
+r
+(x
+t
+), (3.2)
+V
+t
+=
+1
+R
+V
+R
+V
+X
+r=1
+a
+V
+r
+(x
+t
+) ⊗ b
+V
+r
+(x
+t
+), (3.3)
+where a
+Q
+r
+(x
+t
+), a
+K
+r
+(x
+t
+), a
+V
+r
+(x
+t
+) ∈ R
+h
+, b
+Q
+r
+(x
+t
+), b
+K
+r
+(x
+t
+), b
+V
+r
+(x
+t
+) ∈ R
+d
+h
+. Hence, for queries, each
+tensor product a
+Q
+r
+(x
+t
+)⊗b
+Q
+r
+(x
+t
+) : R
+h
+×R
+d
+h
+→ R
+h×d
+h
+adds up to form the query slice Q
+t
+∈ R
+h×d
+h
+.
+Similarly, analogous definitions apply to key slice K
+t
+and value slice V
+t
+.
+4
+
+Latent Factor Maps. Each factor in the tensor product depends on the token’s hidden state x
+t
+. For
+example, for queries, we can write:
+a
+Q
+r
+(x
+t
+) = W
+a
+Q
+r
+x
+t
+∈ R
+h
+, b
+Q
+r
+(x
+t
+) = W
+b
+Q
+r
+x
+t
+∈ R
+d
+h
+,
+and similarly for keys and values.
+One often merges the rank index into a single output dimension. For instance, for queries:
+a
+Q
+(x
+t
+) = W
+a
+Q
+x
+t
+∈ R
+R
+q
+·h
+, b
+Q
+(x
+t
+) = W
+b
+Q
+x
+t
+∈ R
+R
+q
+·d
+h
+,
+which are then reshaped into A
+Q
+(x
+t
+) ∈ R
+R
+q
+×h
+and B
+Q
+(x
+t
+) ∈ R
+R
+q
+×d
+h
+. Summing over R
+q
+and
+scaled by
+1
+R
+q
+yields
+Q
+t
+=
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+B
+Q
+(x
+t
+) ∈ R
+h×d
+h
+.
+Repeating for all tokens reconstitutes Q ∈ R
+T ×h×d
+h
+. Similar procedures can be applied to obtain
+K and V with ranks R
+k
+and R
+v
+, respectively.
+Scaled Dot-Product Attention. Once Q, K, V are factorized, multi-head attention proceeds as in
+standard Transformers. For each head i ∈ {1, . . . , h}:
+head
+i
+= Softmax
+
+1
+√
+d
+h
+Q
+i
+(K
+i
+)
+⊤
+
+V
+i
+, (3.4)
+where Q
+i
+, K
+i
+, V
+i
+∈ R
+T ×d
+h
+are the slices along the head dimension. Concatenating these h heads
+along the last dimension yields an R
+T ×(h·d
+h
+)
+tensor, which is projected back to R
+T ×d
+model
+by an
+output weight matrix W
+O
+∈ R
+(h·d
+h
+)×d
+model
+:
+TPA(Q, K, V) = Concat
+
+head
+1
+, . . . , head
+h
+
+W
+O
+. (3.5)
+Parameter Initialization. We initialize the weight matrices W
+a
+Q
+r
+, W
+a
+K
+r
+, W
+a
+V
+r
+, W
+b
+Q
+r
+, W
+b
+K
+r
+,
+W
+b
+V
+r
+using Xavier initialization (Glorot & Bengio, 2010). Specifically, each entry of the weight ma-
+trix is drawn from a uniform distribution with bounds [−
+p
+6/(n
+in
++ n
+out
+),
+p
+6/(n
+in
++ n
+out
+)], where
+n
+in
+and n
+out
+are the input and output dimensions of the respective weight matrices. This initialization
+strategy helps maintain the variance of activations and gradients across the network.
+3.2 RoPE Compatibility and Acceleration
+In a typical workflow of adding RoPE to standard multi-head attention, one first computes Q
+t
+, K
+s
+∈
+R
+h×d
+h
+of the t-th token and s-th token and then applies:
+Q
+t
+7
+
+→
+f
+Q
+t
+= RoPE
+t
+(Q
+t
+), K
+s
+7
+
+→
+f
+K
+s
+= RoPE
+s
+(K
+s
+).
+Direct Integration. A useful optimization is to integrate RoPE directly into the TPA factorization.
+For example, one can pre-rotate the token-dimension factors:
+e
+B
+K
+(x
+t
+) ←− RoPE
+t
+
+B
+K
+(x
+t
+)
+
+, (3.6)
+yielding a pre-rotated key representation:
+e
+K
+t
+=
+1
+R
+K
+R
+K
+X
+r=1
+a
+K
+(r)
+(x
+t
+) ⊗ RoPE
+t
+
+b
+K
+(s)
+(x
+t
+)
+
+=
+1
+R
+K
+A
+K
+(x
+t
+)
+⊤
+RoPE
+t
+
+B
+K
+(x
+t
+)
+
+.
+Thus, each K
+t
+is already rotated before caching, removing the need for explicit rotation at the
+decoding time and accelerating autoregressive inference. Depending on hardware and performance
+requirements, one can also adopt different RoPE integration approaches for training and inference.
+5
+
+Theorem 1 (RoPE’s Compatibility with TPA). Let Q
+t
+be factorized by TPA as
+Q
+t
+=
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+B
+Q
+(x
+t
+) ∈ R
+h×d
+h
+,
+where A
+Q
+(x
+t
+) ∈ R
+R
+Q
+×h
+and B
+Q
+(x
+t
+) ∈ R
+R
+Q
+×d
+h
+. Then we have:
+RoPE(Q
+t
+) =
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+e
+B
+Q
+(x
+t
+), (3.7)
+where
+e
+B
+Q
+(x
+t
+) = RoPE
+t
+
+B
+Q
+(x
+t
+)
+
+. In addition, assume Q
+t
+and K
+s
+are factorized by TPA and then
+rotated by RoPE
+t
+, RoPE
+s
+. Let
+e
+Q
+t
+= RoPE
+t
+(Q
+t
+) and
+e
+K
+s
+= RoPE
+s
+(K
+s
+). Then we have
+RoPE
+t−s
+(Q
+t
+)K
+⊤
+s
+=
+e
+Q
+t
+e
+K
+⊤
+s
+,
+Focusing on individual heads i, the above matrix equality implies:
+RoPE
+t−s
+
+q
+t,i
+
+⊤
+k
+s,i
+=
+e
+q
+⊤
+t,i
+e
+k
+s,i
+.
+where q
+t,i
+∈ R
+d
+h
+is the i-th query head of t-th token, and k
+s,i
+∈ R
+d
+h
+is the j-th key head of s-th
+token, and
+e
+q
+t,i
+= RoPE(q
+t,i
+) = T
+t
+q
+t,i
+∈ R
+d
+h
+e
+k
+s,i
+= RoPE(k
+s,i
+) = T
+s
+k
+s,i
+∈ R
+d
+h
+.
+Theorem 1 indicates that TPA does not break RoPE’s relative translational property. We prove
+Theorem 1 in Appendix C.1. In short, RoPE
+t
+acts as a block-diagonal orthogonal transform (i.e., a
+matrix T
+t
+) on B
+Q
+(x
+t
+). Consequently, A
+Q
+(x
+t
+) remains unchanged, while each column of B
+Q
+(x
+t
+)
+is rotated appropriately, preserving the TPA structure.
+3.3 KV Caching and Memory Reduction
+In autoregressive decoding, standard attention caches K
+t
+, V
+t
+∈ R
+h×d
+h
+for each past token t. This
+accumulates to R
+T ×h×d
+h
+for keys and R
+T ×h×d
+h
+for values, i.e., 2 T h d
+h
+total.
+TPA Factorized KV Caching. Instead of storing the full K
+t
+and V
+t
+, TPA stores only their factor-
+ized ranks. Specifically, we keep
+A
+K
+(x
+t
+),
+e
+B
+K
+(x
+t
+) and A
+V
+(x
+t
+), B
+V
+(x
+t
+),
+where A
+K
+(x
+t
+) ∈ R
+R
+K
+×h
+,
+e
+B
+K
+(x
+t
+) ∈ R
+R
+K
+×d
+h
+, A
+V
+(x
+t
+) ∈ R
+R
+V
+×h
+, B
+V
+(x
+t
+) ∈ R
+R
+V
+×d
+h
+.
+Hence, the memory cost per token is
+R
+K
+(h + d
+h
+)
+|
+{z }
+for K
++ R
+V
+(h + d
+h
+)
+| {z }
+for V
+= ( R
+K
++ R
+V
+)
+
+h + d
+h
+
+.
+Compared to the standard caching cost of 2 h d
+h
+, the ratio is:
+(R
+K
++ R
+V
+) (h + d
+h
+)
+2 h d
+h
+.
+For large h and d
+h
+(typically d
+h
+= 64 or 128), setting R
+K
+, R
+V
+≪ h (e.g., rank 1 or 2) often yields
+10× or more reduction.
+3.4 Unifying MHA, MQA, and GQA as Non-contextual TPA
+3.4.1 MHA as Non-contextual TPA
+Standard multi-head attention (MHA) can be viewed as a specific instance of TPA in which: 1)
+the rank is set equal to the number of heads; 2) the head dimension factor is non-contextual (i.e.,
+independent of the t-th token embedding x
+t
+∈ R
+d
+model
+); 3) the token dimension factor is a linear
+function of x
+t
+.
+To match MHA with TPA, let R
+Q
+= R
+K
+= R
+V
+= h. Focusing on Q
+t
+:
+6
+
+Table 1: Comparison of different attention mechanisms. Here, R
+Q
+, R
+K
+, and R
+V
+denote the ranks
+for queries, keys, and values in TPA, respectively. Variants of TPA, such as TPA (KVonly), TPA
+(Non-contextual A), and TPA (Non-contextual B), are detailed in Section F. For MLA, d
+R
+h
+and d
+h
+are the dimensions for RoPE and non-RoPE parts; d
+′
+c
+and d
+c
+are the dimensions of compressed
+vectors for query and key-value, respectively.
+METHOD KV CACHE # PARAMETERS # QUERY HEADS # KV HEADS
+MHA 2hd
+h
+4d
+2
+model
+h h
+MQA 2d
+h
+(2 + 2/h)d
+2
+model
+h 1
+GQA 2gd
+h
+(2 + 2g/h)d
+2
+model
+h g
+MLA
+d
+c
++ d
+R
+h
+d
+′
+c
+(d
+model
++ hd
+h
++ hd
+R
+h
+)
++d
+model
+d
+R
+h
++ d
+c
+(d
+model
++ 2hd
+h
+)
+h h
+TPA (R
+K
++ R
+V
+)(h + d
+h
+) d
+model
+(R
+Q
++ R
+K
++ R
+V
+)(h + d
+h
+) + d
+model
+hd
+h
+h h
+TPA (KVonly) (R
+K
++ R
+V
+)(h + d
+h
+) d
+model
+(R
+K
++ R
+V
+)(h + d
+h
+) + 2d
+model
+hd
+h
+h h
+TPA (Non-contextual A) (R
+K
++ R
+V
+)d
+h
+(R
+Q
++ R
+K
++ R
+V
+)(d
+model
+d
+h
++ h) + d
+model
+hd
+h
+h h
+TPA (Non-contextual B) (R
+K
++ R
+V
+)h (R
+Q
++ R
+K
++ R
+V
+)(d
+model
+h + d
+h
+) + d
+model
+hd
+h
+h h
+(a) Non-contextual head factors. Define
+a
+Q
+i
+= R
+Q
+e
+i
+∈ R
+h
+, (3.8)
+where e
+i
+∈ R
+h
+is the i-th standard basis vector, so that e
+i
+⊗ · corresponds to the i-th head of
+Q
+t
+.
+(b) Contextual token factors. Define
+b
+Q
+i
+(x
+t
+) = (W
+Q
+i
+)
+⊤
+x
+t
+∈ R
+d
+h
+, (3.9)
+where W
+Q
+i
+∈ R
+d
+model
+×d
+h
+is the per-head query projection defined before, hence b
+Q
+i
+(x
+t
+) depen-
+dent on x
+t
+.
+Substituting (3.8)–(3.9) into (3.1) gives:
+Q
+t
+=
+h
+X
+i=1
+h
+e
+i
+⊗
+
+(W
+Q
+i
+)
+⊤
+x
+t
+
+i
+∈ R
+h×d
+h
+. (3.10)
+Each term e
+i
+⊗
+
+(W
+Q
+i
+)
+⊤
+x
+t
+
+in (3.10) contributes only to the i-th row, reconstituting the usual
+MHA form of Q
+t
+. Analogous constructions hold for K
+t
+and V
+t
+using W
+K
+i
+, W
+V
+i
+. Thus, MHA is a
+non-contextual, full-rank variant of TPA.
+TPA with Non-contextual A. More broadly, TPA can use non-contextual head-dimension factors
+a
+Q
+r
+, a
+K
+r
+, a
+V
+r
+∈ R
+h
+(i.e., independent of x
+t
+), while allowing b
+Q
+r
+(x
+t
+), b
+K
+r
+(x
+t
+), b
+V
+r
+(x
+t
+) to remain
+context-dependent. Then, for keys:
+K
+t
+=
+1
+R
+K
+R
+K
+X
+r=1
+a
+K
+r
+⊗ b
+K
+r
+(x
+t
+),
+and similarly for queries/values. This reduces per-token computations and can be effective when
+head-dimension relationships are relatively stable across all tokens.
+MQA and GQA as Non-Contextual TPA. Multi-Query Attention (MQA) (Shazeer, 2019) and
+Grouped Query Attention (GQA) (Ainslie et al., 2023)
+6
+also emerge naturally from TPA by restrict-
+ing the head-dimension factors to be non-contextual and low-rank:
+• MQA as Rank-1 TPA. In MQA, all heads share a single set of keys/values, corresponding to
+R
+K
+= R
+V
+= 1 along the head dimension. Concretely,
+K
+t
+= (1, . . . , 1)
+⊤
+⊗ b
+K
+(x
+t
+),
+V
+t
+= (1, . . . , 1)
+⊤
+⊗ b
+V
+(x
+t
+),
+forces every head to use the same K
+t
+, V
+t
+. Each head retains a distinct query projection, matching
+the MQA design.
+6
+The original definitions of MQA and GQA are presented in Appendix E.1 and E.2, respectively.
+7
+
+• GQA as Grouped Rank-1 TPA. GQA partitions h heads into G groups, each sharing keys/values
+within that group. In TPA form, each group g has a dedicated non-contextual factor pair a
+K
+g
+, a
+V
+g
+∈
+R
+h
+, which acts as a “mask” for the heads in that group. Varying G from 1 to h interpolates from
+MQA to standard MHA.
+Hence, by constraining TPA’s head-dimension factors to be constant masks (one for MQA; multiple
+for GQA), these popular variants are recovered as special cases.
+3.5 Computational Cost.
+For a detailed analysis of the computational cost of TPA, please refer to Appendix A, which shows
+that the training and inference flops of TPA with optimized implementation (without materializing
+Q, K, and V) are smaller than MHA, GQA, and MLA. Specifically, when we set R
+q
+= 6, R
+k
+=
+R
+v
+= 2 (our default setting), TPA is 10× or more faster on calculating QK
+⊤
+than MLA during
+inference (see Appendix A.8).
+3.6 Model Architectures
+We propose a new architecture called Tensor ProducT ATTenTion Transformer (T6), which uses
+our Tensor Product Attention (TPA) in place of standard MHA (multi-head attention) or GQA
+(grouped-query attention). Building upon the query, key, and value tensors Q, K, V ∈ R
+T ×h×d
+h
+defined in Section 3.1, T6 utilize the overall architecture of LLaMA (Touvron et al., 2023) while
+changing the self-attention block to our TPA-based version. The feed-forward network (FFN) adopts
+a SwiGLU layer, as in (Shazeer, 2020; Touvron et al., 2023).
+TPA QKV Factorization. Let each token’s hidden-state vector be x
+t
+∈ R
+d
+model
+, and we fol-
+low Section 3.1 to project the entire sequence into three tensors Q, K, V ∈ R
+T ×h×d
+h
+,
+where Q
+t
+, K
+t
+, V
+t
+∈ R
+h×d
+h
+denote the slices for the t-th token. The factor components
+a
+Q
+r
+(x
+t
+), b
+Q
+r
+(x
+t
+), a
+K
+r
+(x
+t
+), b
+K
+r
+(x
+t
+), a
+V
+r
+(x
+t
+), b
+V
+r
+(x
+t
+) are produced by linear transformations on x
+t
+.
+For instance, letting W
+a
+Q
+r
+∈ R
+h×d
+model
+and W
+b
+Q
+r
+∈ R
+d
+h
+×d
+model
+, we have:
+a
+Q
+r
+(x
+t
+) = W
+a
+Q
+r
+x
+t
+, b
+Q
+r
+(x
+t
+) = W
+b
+Q
+r
+x
+t
+.
+In practice, we merge all ranks r into a single dimension of the output, reshape, and sum over rank
+indices; see Section 3.1 for details. The factorization for K and V follows the same pattern.
+Rotary Positional Embedding (RoPE). As discussed in Section 3.2, RoPE (Su et al., 2024) is
+applied to the Q and K. Within TPA, we pre-rotate the factor b
+Q
+t
+(x
+t
+) and b
+K
+s
+(x
+s
+) directly, so that
+each K
+s
+is already rotated prior to caching, see (3.6) and Theorem 1.
+Attention Step and Output Projection. Once we have Q, K, V factorized per token with RoPE
+applied on Q and K, the attention step proceeds for each head i ∈ {1, . . . , h} using (3.4). Finally,
+concatenating these h heads and then projecting them back using an output weight matrix gives the
+final attention result, as shown in (3.5).
+SwiGLU Feed-Forward Network. Following Shazeer (2020); Touvron et al. (2023), our T6 uses
+a SwiGLU-based Feed-Forward Network (FFN): FFN(x) =
+
+σ(x W
+1
+) ⊙ (x W
+2
+)
+
+W
+3
+, where σ
+is the SiLU (a.k.a., swish) nonlinearity, ⊙ is element-wise product, and W
+1
+, W
+2
+, W
+3
+are learnable
+parameters. Note that other activation functions can also be used.
+Overall T6 Block Structure. Putting everything together, one T6 block consists of:
+x ← x + TPA
+
+RMSNorm(x)
+
+,
+x ← x + SwiGLU-FFN
+
+RMSNorm(x)
+
+.
+We place norm layers (e.g., RMSNorm) before each sub-layer. Stacking L such blocks yields a T6
+model architecture with L layers.
+8
+
+4 Experiments
+4.1 Language Modeling Tasks
+All experiments reported in this paper are implemented on the nanoGPT code base (Karpathy, 2022),
+using the FineWeb-Edu 100B dataset (Lozhkov et al., 2024). The dataset contains 100 billion tokens
+for training and 0.1 billion tokens for validation. We compare T6 against the baseline Llama archi-
+tecture (Touvron et al., 2023) with SwiGLU activation (Shazeer, 2020) and RoPE embeddings (Su
+et al., 2024), as well as Llama variants that replace Multi-Head Attention (MHA; Vaswani et al.,
+2017) with Multi-Query Attention (MQA; Shazeer, 2019), Grouped Query Attention (GQA; Ainslie
+et al., 2023), or Multi-head Latent Attention (MLA; Liu et al., 2024a). In our experiments, the num-
+ber of heads h is adjusted for each attention mechanism to ensure that all attention mechanisms have
+the same number of parameters as the standard Multi-Head Attention (MHA), which has 4d
+2
+model
+parameters per attention layer. We train models at four scales: small (124M parameters), medium
+(353M), large (773M), and XL (1.5B). Details on architecture hyperparameters and training hard-
+ware are shown in Appendix G.1.
+Training Setup. We follow the nanoGPT training configuration. In particular, we use the
+AdamW (Loshchilov, 2017) optimizer with (β
+1
+, β
+2
+) = (0.9, 0.95), a weight decay of 0.1, and
+gradient clipping at 1.0. We follow the same setting as nanoGPT that the learning rate is managed
+by a cosine annealing scheduler (Loshchilov & Hutter, 2016) with 2,000 warmup steps and a (total)
+global batch size of 480. For the small, medium, large and XL models, we set maximum learning
+rates of 6 × 10
+−4
+, 3 × 10
+−4
+, 2 × 10
+−4
+, and 1 × 10
+−4
+(respectively), and minimum learning rates of
+3 × 10
+−5
+, 6 × 10
+−5
+, 1 × 10
+−5
+, and 1 × 10
+−5
+(respectively).
+Training & Validation Curves. Figures 2 and 3 compare training and validation loss curves for
+the medium (353M), large (773M), and XL (1.5B) models on FineWeb-Edu-100B. Overall, TPA
+(red curves) and its simpler variant TPA-KVonly (pink curves) (see F) converge as fast as or faster
+than the baselines (MHA, MQA, GQA, MLA) while also achieving visibly lower final losses. For
+instance, in Figure 3(b), TPA and TPA-KVonly remain below the MHA baseline in terms of valida-
+tion loss at nearly all training stages. Meanwhile, Multi-Head Latent Attention (MLA) (Liu et al.,
+2024a) (blue curves) generally trains more slowly and yields higher losses.
+Validation Perplexity. Figure 4 (in the Appendix) shows the validation perplexities of the
+medium- and large-scale models. Mirroring the loss curves, TPA and TPA-KVonly steadily outper-
+form MHA, MQA, GQA, and MLA over the course of training. By the end of pretraining (around
+49B tokens), TPA-based approaches achieve the lowest perplexities in most configurations.
+Downstream Evaluation. We evaluate zero-shot and two-shot performance on standard bench-
+marks, including ARC (Yadav et al., 2019), BoolQ (Clark et al., 2019), HellaSwag (Zellers et al.,
+2019), OBQA (Mihaylov et al., 2018), PIQA (Bisk et al., 2020), WinoGrande (Sakaguchi et al.,
+2020) and MMLU (Hendrycks et al., 2021), using the lm-evaluation-harness codebase (Gao
+et al., 2024). For ARC-E, ARC-C, HellaSwag, OBQA, PIQA, and SciQ, we report accuracy norm;
+for other tasks, we report standard accuracy. Due to the page limitation, we only display the zero-
+shot evaluation results of medium and large models here in Tables 2 and 3. Zero-shot evaluation of
+small and XL models are displayed in Tables 6 and 7 in the appendix. Moreover, we also present
+2-shot evaluation results in Tables 8, 9, 10 and 11 in the appendix.
+For the medium-size (353M) models (Tables 2 and 9), TPA generally ties or outperforms all com-
+peting methods, achieving, for example, an average of 51.41% in zero-shot mode versus MHA’s
+50.11%, MQA’s 50.44%, and MLA’s 50.13%. When given two-shot prompts, TPA again leads with
+53.12% average accuracy. A similar trend appears for the large-size (773M) models (Tables 3),
+where TPA-KVonly attains the highest average (53.52% zero-shot). And for the XL size (1.5B)
+models (Table 7), TPA-KVonly attains the highest average (55.03% zero-shot).
+Our experiments confirm that TPA consistently matches or exceeds the performance of established
+attention mechanisms (MHA, MQA, GQA, MLA) across medium and large model scales. The
+fully factorized TPA excels on mid-scale models, while TPA-KVonly can rival or surpass it at larger
+scales. In both cases, factorizing the attention activations shrinks autoregressive KV cache require-
+ments by up to 5×–10×, thus enabling much longer context windows under fixed memory budgets.
+In summary, tensor product attention provides a flexible, memory-efficient alternative to standard
+multi-head attention, advancing the scalability of modern language models.
+9
+
+(a) Medium models (353M) (b) Large models (773M) (c) XL models (1.5B)
+Figure 2: The training loss of medium-size (353M), large-size (773M) as well as XL-size (1.5B)
+models, with different attention mechanisms on the FineWeb-Edu 100B dataset.
+(a) Medium models (353M) (b) Large models (773M) (c) XL models (1.5B)
+Figure 3: The validation loss of medium-size (353M), large-size (773M) as well as XL-size (1.5B)
+models, with different attention mechanisms on the FineWeb-Edu 100B dataset.
+Table 2: The evaluation results of medium models with different attention mechanisms pre-trained
+using FineWeb-Edu 100B dataset (0-shot with lm-evaluation-harness). The best scores in each col-
+umn are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 59.51 29.52 59.60 45.68 34.20 68.82 53.43 23.33 76.90 50.11
+MQA 57.62 31.91 59.45 45.69 35.40 69.31 53.51 26.47 74.60
+50.44
+GQA 58.67 31.48 58.29 45.45 35.20 68.50 54.46 24.58 76.50 50.35
+MLA 56.65 29.52 57.83 46.05 34.60 69.42 52.80 24.62 79.70 50.13
+TPA-KVonly 58.01 30.12 58.01 45.95 35.60 69.10 53.12 25.39 75.10 50.04
+TPA (non-ctx-A) 58.96 31.48 59.76 45.07 34.80 69.21 53.59 25.42 76.40 50.52
+TPA 58.38 31.57 59.39 46.83 37.00 70.02 54.06 25.52 79.90 51.41
+Table 3: The evaluation results of large models with different attention mechanisms pre-trained
+using the FineWeb-Edu 100B dataset (0-shot with lm-evaluation-harness). The best scores in each
+column are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 59.93 33.62 61.93 50.63 36.00 71.06 55.41 22.87 81.20 52.52
+MQA 60.73 33.62 57.34 50.09 37.00 69.97 55.49 25.30 79.60 52.13
+GQA 61.66 34.30 58.72 49.85 38.40 71.16 53.75 25.23 77.60
+52.30
+MLA 63.55 32.85 60.95 51.72 38.80 70.51 55.01 24.55 81.90 53.32
+TPA-KVonly 63.26 34.13 61.96 50.66 37.20 72.09 55.25 26.06 81.10 53.52
+TPA 63.22 35.58 60.03 51.26 36.80 71.44 55.56 24.77 79.60
+53.10
+5 Related Work
+Transformers and Attention. As a sequence-to-sequence architecture Transformer (Vaswani et al.,
+2017) introduced Multi-Head Attention (MHA), enabling more effective capture of long-range de-
+pendencies. Subsequent work has explored a variety of attention mechanisms aimed at improving
+scalability and efficiency, including sparse patterns (Child et al., 2019; Shi et al., 2023; Han et al.,
+2024; Liang et al., 2024a; Li et al., 2024; Liang et al., 2024b), kernel-based projections (Choroman-
+ski et al., 2021), and linearized transformers (Tsai et al., 2019; Katharopoulos et al., 2020; Schlag
+et al., 2021; Zhang et al., 2023b; Sun et al., 2023; Zhang et al., 2024). To decrease memory usage
+10
+
+and circumvent the limitation of memory bandwidth in training, Shazeer (2019) proposed Multi-
+Query Attention (MQA) where multiple query heads share the same key head and value head. To
+tackle with the issue of quality degradation and instability in training, Grouped-Query Attention
+(GQA) (Ainslie et al., 2023) divides queries into several groups, and each group of queries shares a
+single key head and value head. Recently, DeepSeek-V2 (Liu et al., 2024a) applied multihead latent
+attention (MLA) to achieve better performance than MHA while reducing KV cache in inference
+time by sharing the same low-rank representation of key and value. Concurrently, Hu et al. (2024)
+proposed Multi-matrix Factorization Attention (MFA), which can be simply seen as MQA with
+low-rank factorized Q. Compared to the approaches above, TPA applied contextual tensor decom-
+positions to represent queries, keys, and values activations compactly, achieving better reduction on
+the size of KV cache with improved performance.
+KV Cache Optimization. During the inference time of Transformers, key and value tensors of the
+previous tokens are repeatedly computed due to their auto-regressive nature. To enhance efficiency,
+firstly proposed by Ott et al. (2019), these tensors can be cached in memory for future decoding,
+referred to as the KV cache. However, the KV cache requires additional memory usage and may
+add to more latencies due to the bandwidth limitation (Adnan et al., 2024). Therefore, previous
+studies have explored diverse approaches to mitigate these issues, including KV cache eviction to
+discard less significant tokens (Zhang et al., 2023c; Xiao et al., 2024; Cai et al., 2024; Adnan et al.,
+2024), dynamic sparse attention among selected keys and values (Ribar et al., 2024; Tang et al.,
+2024; Singhania et al., 2024), KV cache offloading to CPU (He & Zhai, 2024; Lee et al., 2024;
+Sun et al., 2024), as well as quantization of KV cache (Xiao et al., 2023; Liu et al., 2024c; Hooper
+et al., 2024). Different from the methods above, TPA reduces the size of the KV cache by using
+tensor-decomposed KV.
+6 Conclusion
+We introduced Tensor Product Attention (TPA), which factorizes query, key, and value matrices
+into rank-R tensor products dependent on the token’s hidden state. Storing only the factorized
+key/value components during autoregressive decoding substantially decreases the kv memory size
+with improved performance compared with MHA, MQA, GQA, and MLA. The approach is fully
+compatible with RoPE (and can store pre-rotated keys). Variants of TPA include factorizing only
+the key/value or sharing basis vectors across tokens. Overall, TPA offers a powerful mechanism for
+compressing KV storage while improving the model performance, thereby enabling longer sequence
+contexts under constrained memory.
+References
+Muhammad Adnan, Akhil Arunkumar, Gaurav Jain, Prashant Nair, Ilya Soloveychik, and Pu-
+rushotham Kamath. Keyformer: Kv cache reduction through key tokens selection for efficient
+generative inference. Proceedings of Machine Learning and Systems, 6:114–127, 2024.
+Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebr´on, and Sumit
+Sanghai. GQA: training generalized multi-query transformer models from multi-head check-
+points. In Houda Bouamor, Juan Pino, and Kalika Bali (eds.), Proceedings of the 2023 Conference
+on Empirical Methods in Natural Language Processing, EMNLP 2023, Singapore, December 6-
+10, 2023, pp. 4895–4901. Association for Computational Linguistics, 2023. doi: 10.18653/V1/
+2023.EMNLP-MAIN.298. URL https://doi.org/10.18653/v1/2023.emnlp-main.298.
+Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and Yejin Choi. PIQA: reasoning
+about physical commonsense in natural language. In The Thirty-Fourth AAAI Conference on
+Artificial Intelligence, AAAI 2020, The Thirty-Second Innovative Applications of Artificial Intelli-
+gence Conference, IAAI 2020, The Tenth AAAI Symposium on Educational Advances in Artificial
+Intelligence, EAAI 2020, New York, NY, USA, February 7-12, 2020, pp. 7432–7439. AAAI Press,
+2020.
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are
+few-shot learners. Advances in neural information processing systems, 33:1877–1901, 2020.
+11
+
+S´ebastien Bubeck, Varun Chandrasekaran, Ronen Eldan, Johannes Gehrke, Eric Horvitz, Ece Ka-
+mar, Peter Lee, Yin Tat Lee, Yuanzhi Li, Scott Lundberg, et al. Sparks of artificial general
+intelligence: Early experiments with gpt-4. arXiv preprint arXiv:2303.12712, 2023.
+Kerim B¨uy¨ukaky¨uz. Olora: Orthonormal low-rank adaptation of large language models. arXiv
+preprint arXiv:2406.01775, 2024.
+Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong,
+Baobao Chang, Junjie Hu, et al. Pyramidkv: Dynamic kv cache compression based on pyramidal
+information funneling. arXiv preprint arXiv:2406.02069, 2024.
+Yukang Chen, Shengju Qian, Haotian Tang, Xin Lai, Zhijian Liu, Song Han, and Jiaya Jia. Lon-
+glora: Efficient fine-tuning of long-context large language models. In The Twelfth International
+Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024, 2024.
+Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse
+transformers. arXiv preprint arXiv:1904.10509, 2019.
+Krzysztof Marcin Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea
+Gane, Tam´as Sarl´os, Peter Hawkins, Jared Quincy Davis, Afroz Mohiuddin, Lukasz Kaiser,
+David Benjamin Belanger, Lucy J. Colwell, and Adrian Weller. Rethinking attention with per-
+formers. In 9th International Conference on Learning Representations, ICLR 2021, Virtual Event,
+Austria, May 3-7, 2021, 2021.
+Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam
+Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, Parker Schuh,
+Kensen Shi, Sasha Tsvyashchenko, Joshua Maynez, Abhishek Rao, Parker Barnes, Yi Tay, Noam
+Shazeer, Vinodkumar Prabhakaran, Emily Reif, Nan Du, Ben Hutchinson, Reiner Pope, James
+Bradbury, Jacob Austin, Michael Isard, Guy Gur-Ari, Pengcheng Yin, Toju Duke, Anselm Lev-
+skaya, Sanjay Ghemawat, Sunipa Dev, Henryk Michalewski, Xavier Garcia, Vedant Misra, Kevin
+Robinson, Liam Fedus, Denny Zhou, Daphne Ippolito, David Luan, Hyeontaek Lim, Barret
+Zoph, Alexander Spiridonov, Ryan Sepassi, David Dohan, Shivani Agrawal, Mark Omernick,
+Andrew M. Dai, Thanumalayan Sankaranarayana Pillai, Marie Pellat, Aitor Lewkowycz, Erica
+Moreira, Rewon Child, Oleksandr Polozov, Katherine Lee, Zongwei Zhou, Xuezhi Wang, Bren-
+nan Saeta, Mark Diaz, Orhan Firat, Michele Catasta, Jason Wei, Kathy Meier-Hellstern, Douglas
+Eck, Jeff Dean, Slav Petrov, and Noah Fiedel. Palm: Scaling language modeling with pathways.
+J. Mach. Learn. Res., 24:240:1–240:113, 2023.
+Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina
+Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In Jill Burstein,
+Christy Doran, and Thamar Solorio (eds.), Proceedings of the 2019 Conference of the North Amer-
+ican Chapter of the Association for Computational Linguistics: Human Language Technologies,
+NAACL-HLT 2019, Minneapolis, MN, USA, June 2-7, 2019, Volume 1 (Long and Short Papers),
+pp. 2924–2936. Association for Computational Linguistics, 2019.
+Leo Gao, Jonathan Tow, Baber Abbasi, Stella Biderman, Sid Black, Anthony DiPofi, Charles Fos-
+ter, Laurence Golding, Jeffrey Hsu, Alain Le Noac’h, Haonan Li, Kyle McDonell, Niklas Muen-
+nighoff, Chris Ociepa, Jason Phang, Laria Reynolds, Hailey Schoelkopf, Aviya Skowron, Lintang
+Sutawika, Eric Tang, Anish Thite, Ben Wang, Kevin Wang, and Andy Zou. A framework for few-
+shot language model evaluation, 07 2024. URL https://zenodo.org/records/12608602.
+Xavier Glorot and Yoshua Bengio. Understanding the difficulty of training deep feedforward neural
+networks. In Proceedings of the thirteenth international conference on artificial intelligence and
+statistics, pp. 249–256. JMLR Workshop and Conference Proceedings, 2010.
+Insu Han, Rajesh Jayaram, Amin Karbasi, Vahab Mirrokni, David P. Woodruff, and Amir Zandieh.
+Hyperattention: Long-context attention in near-linear time. In The Twelfth International Con-
+ference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024. OpenRe-
+view.net, 2024. URL https://openreview.net/forum?id=Eh0Od2BJIM.
+Jiaao He and Jidong Zhai. Fastdecode: High-throughput gpu-efficient llm serving using heteroge-
+neous pipelines. arXiv preprint arXiv:2403.11421, 2024.
+12
+
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob
+Steinhardt. Measuring massive multitask language understanding. In 9th International Confer-
+ence on Learning Representations, ICLR 2021, Virtual Event, Austria, May 3-7, 2021, 2021.
+Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun Sophia Shao,
+Kurt Keutzer, and Amir Gholami. Kvquant: Towards 10 million context length llm inference with
+kv cache quantization. arXiv preprint arXiv:2401.18079, 2024.
+Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang,
+and Weizhu Chen. Lora: Low-rank adaptation of large language models. In The Tenth Inter-
+national Conference on Learning Representations, ICLR 2022, Virtual Event, April 25-29, 2022,
+2022.
+Jingcheng Hu, Houyi Li, Yinmin Zhang, Zili Wang, Shuigeng Zhou, Xiangyu Zhang, and Heung-
+Yeung Shum. Multi-matrix factorization attention. arXiv preprint arXiv:2412.19255, 2024.
+Ting Jiang, Shaohan Huang, Shengyue Luo, Zihan Zhang, Haizhen Huang, Furu Wei, Weiwei Deng,
+Feng Sun, Qi Zhang, Deqing Wang, et al. Mora: High-rank updating for parameter-efficient fine-
+tuning. arXiv preprint arXiv:2405.12130, 2024.
+Andrej Karpathy. NanoGPT. https://github.com/karpathy/nanoGPT, 2022.
+Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and Franc¸ois Fleuret. Transformers are
+rnns: Fast autoregressive transformers with linear attention. In International conference on ma-
+chine learning, pp. 5156–5165. PMLR, 2020.
+Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. {InfiniGen}: Efficient generative
+inference of large language models with dynamic {KV} cache management. In 18th USENIX
+Symposium on Operating Systems Design and Implementation (OSDI 24), pp. 155–172, 2024.
+Xiaoyu Li, Yingyu Liang, Zhenmei Shi, and Zhao Song. A tighter complexity analysis of sparsegpt.
+arXiv preprint arXiv:2408.12151, 2024.
+Vladislav Lialin, Sherin Muckatira, Namrata Shivagunde, and Anna Rumshisky. Relora: High-
+rank training through low-rank updates. In The Twelfth International Conference on Learning
+Representations, 2023.
+Yan-Shuo Liang and Wu-Jun Li. Inflora: Interference-free low-rank adaptation for continual learn-
+ing. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pp. 23638–23647, 2024.
+Yingyu Liang, Heshan Liu, Zhenmei Shi, Zhao Song, Zhuoyan Xu, and Junze Yin. Conv-basis: A
+new paradigm for efficient attention inference and gradient computation in transformers. arXiv
+preprint arXiv:2405.05219, 2024a.
+Yingyu Liang, Jiangxuan Long, Zhenmei Shi, Zhao Song, and Yufa Zhou. Beyond linear approxi-
+mations: A novel pruning approach for attention matrix. arXiv preprint arXiv:2410.11261, 2024b.
+Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao, Chengqi Dengr, Chong
+Ruan, Damai Dai, Daya Guo, et al. Deepseek-v2: A strong, economical, and efficient mixture-
+of-experts language model. arXiv preprint arXiv:2405.04434, 2024a.
+Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao,
+Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. Deepseek-v3 technical report. arXiv preprint
+arXiv:2412.19437, 2024b.
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi
+Chen, and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In Forty-first
+International Conference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024,
+2024c.
+I Loshchilov. Decoupled weight decay regularization. arXiv preprint arXiv:1711.05101, 2017.
+Ilya Loshchilov and Frank Hutter. Sgdr: Stochastic gradient descent with warm restarts. arXiv
+preprint arXiv:1608.03983, 2016.
+13
+
+Anton Lozhkov, Loubna Ben Allal, Leandro von Werra, and Thomas Wolf. Fineweb-edu: the
+finest collection of educational content, 2024. URL https://huggingface.co/datasets/
+HuggingFaceFW/fineweb-edu.
+Sadhika Malladi, Alexander Wettig, Dingli Yu, Danqi Chen, and Sanjeev Arora. A kernel-based
+view of language model fine-tuning. In International Conference on Machine Learning, pp.
+23610–23641. PMLR, 2023.
+Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of armor conduct
+electricity? A new dataset for open book question answering. In Ellen Riloff, David Chiang,
+Julia Hockenmaier, and Jun’ichi Tsujii (eds.), Proceedings of the 2018 Conference on Empirical
+Methods in Natural Language Processing, Brussels, Belgium, October 31 - November 4, 2018,
+pp. 2381–2391. Association for Computational Linguistics, 2018. doi: 10.18653/V1/D18-1260.
+URL https://doi.org/10.18653/v1/d18-1260.
+Myle Ott, Sergey Edunov, Alexei Baevski, Angela Fan, Sam Gross, Nathan Ng, David Grangier,
+and Michael Auli. fairseq: A fast, extensible toolkit for sequence modeling. In Waleed Am-
+mar, Annie Louis, and Nasrin Mostafazadeh (eds.), Proceedings of the 2019 Conference of the
+North American Chapter of the Association for Computational Linguistics: Human Language
+Technologies, NAACL-HLT 2019, Minneapolis, MN, USA, June 2-7, 2019, Demonstrations, pp.
+48–53. Association for Computational Linguistics, 2019.
+Weijieying Ren, Xinlong Li, Lei Wang, Tianxiang Zhao, and Wei Qin. Analyzing and reducing
+catastrophic forgetting in parameter efficient tuning. arXiv preprint arXiv:2402.18865, 2024.
+Luka Ribar, Ivan Chelombiev, Luke Hudlass-Galley, Charlie Blake, Carlo Luschi, and Douglas Orr.
+Sparq attention: Bandwidth-efficient LLM inference. In Forty-first International Conference on
+Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024, 2024.
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. Winogrande: An ad-
+versarial winograd schema challenge at scale. In The Thirty-Fourth AAAI Conference on Artifi-
+cial Intelligence, AAAI 2020, The Thirty-Second Innovative Applications of Artificial Intelligence
+Conference, IAAI 2020, The Tenth AAAI Symposium on Educational Advances in Artificial In-
+telligence, EAAI 2020, New York, NY, USA, February 7-12, 2020, pp. 8732–8740. AAAI Press,
+2020.
+Imanol Schlag, Kazuki Irie, and J¨urgen Schmidhuber. Linear transformers are secretly fast weight
+programmers. In International Conference on Machine Learning, pp. 9355–9366. PMLR, 2021.
+Noam Shazeer. Fast transformer decoding: One write-head is all you need. arXiv preprint
+arXiv:1911.02150, 2019.
+Noam Shazeer. Glu variants improve transformer. arXiv preprint arXiv:2002.05202, 2020.
+Yiming Shi, Jiwei Wei, Yujia Wu, Ran Ran, Chengwei Sun, Shiyuan He, and Yang Yang. Loldu:
+Low-rank adaptation via lower-diag-upper decomposition for parameter-efficient fine-tuning.
+arXiv preprint arXiv:2410.13618, 2024.
+Zhenmei Shi, Jiefeng Chen, Kunyang Li, Jayaram Raghuram, Xi Wu, Yingyu Liang, and Somesh
+Jha. The trade-off between universality and label efficiency of representations from contrastive
+learning. In The Eleventh International Conference on Learning Representations, ICLR 2023,
+Kigali, Rwanda, May 1-5, 2023, 2023.
+Prajwal Singhania, Siddharth Singh, Shwai He, Soheil Feizi, and Abhinav Bhatele. Loki: Low-rank
+keys for efficient sparse attention. arXiv preprint arXiv:2406.02542, 2024.
+Jianlin Su. The extreme pull between cache and effect: From MHA, MQA, GQA to MLA. https:
+//spaces.ac.cn/archives/10091, May 2024.
+Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. Roformer: En-
+hanced transformer with rotary position embedding. Neurocomputing, 568:127063, 2024.
+14
+
+Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie
+Chi, and Beidi Chen. Shadowkv: Kv cache in shadows for high-throughput long-context llm
+inference. arXiv preprint arXiv:2410.21465, 2024.
+Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang, and
+Furu Wei. Retentive network: A successor to transformer for large language models. arXiv
+preprint arXiv:2307.08621, 2023.
+Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. QUEST:
+query-aware sparsity for efficient long-context LLM inference. In Forty-first International Con-
+ference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024, 2024.
+Gemma Team, Thomas Mesnard, Cassidy Hardin, Robert Dadashi, Surya Bhupatiraju, Shreya
+Pathak, Laurent Sifre, Morgane Rivi`ere, Mihir Sanjay Kale, Juliette Love, et al. Gemma: Open
+models based on gemini research and technology. arXiv preprint arXiv:2403.08295, 2024.
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timoth´ee
+Lacroix, Baptiste Rozi`ere, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and
+efficient foundation language models. arXiv preprint arXiv:2302.13971, 2023.
+Yao-Hung Hubert Tsai, Shaojie Bai, Makoto Yamada, Louis-Philippe Morency, and Ruslan
+Salakhutdinov. Transformer dissection: An unified understanding for transformer’s attention via
+the lens of kernel. In Proceedings of the 2019 Conference on Empirical Methods in Natural Lan-
+guage Processing and the 9th International Joint Conference on Natural Language Processing
+(EMNLP-IJCNLP), pp. 4344–4353, 2019.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural informa-
+tion processing systems, 30, 2017.
+Guangxuan Xiao, Ji Lin, Mickael Seznec, Hao Wu, Julien Demouth, and Song Han. Smoothquant:
+Accurate and efficient post-training quantization for large language models. In International
+Conference on Machine Learning, pp. 38087–38099. PMLR, 2023.
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming
+language models with attention sinks. In The Twelfth International Conference on Learning Rep-
+resentations, ICLR 2024, Vienna, Austria, May 7-11, 2024, 2024.
+Vikas Yadav, Steven Bethard, and Mihai Surdeanu. Quick and (not so) dirty: Unsupervised se-
+lection of justification sentences for multi-hop question answering. In Kentaro Inui, Jing Jiang,
+Vincent Ng, and Xiaojun Wan (eds.), Proceedings of the 2019 Conference on Empirical Methods
+in Natural Language Processing and the 9th International Joint Conference on Natural Lan-
+guage Processing, EMNLP-IJCNLP 2019, Hong Kong, China, November 3-7, 2019, pp. 2578–
+2589. Association for Computational Linguistics, 2019. doi: 10.18653/V1/D19-1260. URL
+https://doi.org/10.18653/v1/D19-1260.
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. Hellaswag: Can a ma-
+chine really finish your sentence? In Anna Korhonen, David R. Traum, and Llu´ıs M`arquez
+(eds.), Proceedings of the 57th Conference of the Association for Computational Linguistics,
+ACL 2019, Florence, Italy, July 28- August 2, 2019, Volume 1: Long Papers, pp. 4791–
+4800. Association for Computational Linguistics, 2019. doi: 10.18653/V1/P19-1472. URL
+https://doi.org/10.18653/v1/p19-1472.
+Yuchen Zeng and Kangwook Lee. The expressive power of low-rank adaptation. In The Twelfth
+International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11,
+2024, 2024.
+Hengyu Zhang. Sinklora: Enhanced efficiency and chat capabilities for long-context large language
+models. arXiv preprint arXiv:2406.05678, 2024.
+Michael Zhang, Kush Bhatia, Hermann Kumbong, and Christopher R´e. The hedgehog & the porcu-
+pine: Expressive linear attentions with softmax mimicry. In The Twelfth International Conference
+on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024, 2024.
+15
+
+Qingru Zhang, Minshuo Chen, Alexander Bukharin, Pengcheng He, Yu Cheng, Weizhu Chen, and
+Tuo Zhao. Adaptive budget allocation for parameter-efficient fine-tuning. In The Eleventh Inter-
+national Conference on Learning Representations, ICLR 2023, Kigali, Rwanda, May 1-5, 2023.
+OpenReview.net, 2023a.
+Ruiqi Zhang, Spencer Frei, and Peter L Bartlett. Trained transformers learn linear models in-context.
+arXiv preprint arXiv:2306.09927, 2023b.
+Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song,
+Yuandong Tian, Christopher R´e, Clark Barrett, et al. H2o: Heavy-hitter oracle for efficient gen-
+erative inference of large language models. Advances in Neural Information Processing Systems,
+36:34661–34710, 2023c.
+Hongbo Zhao, Bolin Ni, Junsong Fan, Yuxi Wang, Yuntao Chen, Gaofeng Meng, and Zhaoxiang
+Zhang. Continual forgetting for pre-trained vision models. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 28631–28642, 2024.
+16
+
+Appendix
+A Toward Faster Computation Without Materializing Q, K and V 18
+A.1 Single-Head Factorization Setup Without Materializing Q and K . . . . . . . . . . 18
+A.2 Multi-Head Case . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+A.3 Complexity Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+A.4 Complexity Analysis for the Specialized Implementation . . . . . . . . . . . . . . 19
+A.5 Toward Faster Computation Without Materializing Q, K, V . . . . . . . . . . . . 20
+A.6 Overall Complexity for Single-Head . . . . . . . . . . . . . . . . . . . . . . . . . 20
+A.7 Multi-Head and Batch Extensions (Reuse of b-Dot Products) . . . . . . . . . . . . 21
+A.8 Decoding Speed during Inference Time of MHA, MQA, GQA, MLA, and TPA . . 21
+B Higher-Order Tensor Product Attention 22
+B.1 RoPE Compatibility in Higher-Order TPA . . . . . . . . . . . . . . . . . . . . . . 22
+C Proofs of Theorems 23
+C.1 Proof of Theorem 1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+C.2 Proof of Theorem 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+D More Related Works 25
+E More on Attention Mechanisms 25
+E.1 Multi-Query Attention (MQA) . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+E.2 Grouped Query Attention (GQA) . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+E.3 Multi-head Latent Attention (MLA) . . . . . . . . . . . . . . . . . . . . . . . . . 26
+E.4 Multi-matrix Factorization Attention (MFA) . . . . . . . . . . . . . . . . . . . . . 27
+F Other Variants of TPA 27
+G More on Experiments 28
+G.1 Experimental Settings . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+G.2 Additional Experimental Results . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+G.3 Ablation Studies on Learning Rates . . . . . . . . . . . . . . . . . . . . . . . . . 29
+17
+
+A Toward Faster Computation Without Materializing Q, K and V
+We now explore whether it is possible to compute attention scores Q K
+⊤
+of Tensor Product Atten-
+tion (TPA) directly from their factorized forms, thereby reducing floating-point operations.
+A.1 Single-Head Factorization Setup Without Materializing Q and K
+Consider a single head i. Each query vector Q
+(i)
+t
+∈ R
+d
+h
+is factorized (with rank R
+q
+):
+Q
+(i)
+t
+=
+R
+q
+X
+r=1
+a
+(r)
+q,i
+(x
+t
+) b
+(r)
+q
+(x
+t
+),
+and each key vector K
+(i)
+τ
+∈ R
+d
+h
+is factorized (with rank R
+k
+):
+K
+(i)
+τ
+=
+R
+k
+X
+s=1
+a
+(s)
+k,i
+(x
+τ
+) b
+(s)
+k
+(x
+τ
+).
+Their dot-product for tokens t, τ is
+
+Q
+(i)
+(K
+(i)
+)
+⊤
+
+t,τ
+=
+R
+q
+X
+r=1
+R
+k
+X
+s=1
+a
+(r)
+q,i
+(x
+t
+) a
+(s)
+k,i
+(x
+τ
+) b
+(r)
+q
+(x
+t
+), b
+(s)
+k
+(x
+τ
+) . (A.1)
+A.2 Multi-Head Case
+For multi-head attention with h heads, one repeats the factorization across all heads. The b
+(r)
+q
+, b
+(s)
+k
+vectors are shared across heads.
+A.3 Complexity Analysis
+We compare the cost of standard multi-head attention versus TPA under two scenarios:
+1. Na¨ıve: Materialize Q and K from factors, then perform the usual batched GEMM.
+2. Specialized: Attempt to compute Q K
+⊤
+directly from the rank-(R
+q
+, R
+k
+) factors without
+explicitly forming Q, K.
+Standard Multi-Head Attention. For batch size B and sequence length T :
+• Projection cost: O
+
+B T d
+2
+model
+
+or O
+
+B T d
+model
+d
+h
+
+.
+• Dot-product: Q (K)
+⊤
+∈ R
+(B h)×T ×T
+costs O
+
+B T
+2
+d
+model
+
+.
+For large T , the O(B T
+2
+d
+model
+) term dominates.
+TPA: Na¨ıve Implementation.
+• Constructing factors: O
+
+B T d
+model
+× R
+q
+(h + d
+h
+) + R
+k
+(h + d
+h
+) + R
+v
+(h + d
+h
+)
+
+.
+• Materializing Q, K: O
+
+B T (R
+q
+h d
+h
++ R
+k
+h d
+h
+)
+
+.
+• Dot-product Q (K)
+⊤
+: O
+
+B T
+2
+d
+model
+
+.
+Typically R
+q
+, R
+k
+, R
+v
+≪ h, so the overhead of constructing factors is small relative to O(T
+2
+d
+model
+).
+Meanwhile, we still gain KV caching benefits.
+TPA: Specialized Implementation. If we bypass explicitly forming Q, K, each dot product
+Q
+t
+· K
+τ
+is a double sum over rank indices. Below we detail its complexity.
+18
+
+A.4 Complexity Analysis for the Specialized Implementation
+Single-Head Complexity. A single attention head of dimension d
+h
+. For each query:
+Q
+(i)
+t
+=
+R
+q
+X
+r=1
+a
+(r)
+q,i
+(x
+t
+) b
+(r)
+q
+(x
+t
+),
+and for each key:
+K
+(i)
+τ
+=
+R
+k
+X
+s=1
+a
+(s)
+k,i
+(x
+τ
+) b
+(s)
+k
+(x
+τ
+).
+Their dot product:
+Q
+(i)
+t
+· K
+(i)
+τ
+=
+R
+q
+X
+r=1
+R
+k
+X
+s=1
+h
+a
+(r)
+q,i
+(x
+t
+) a
+(s)
+k,i
+(x
+τ
+)
+i
+b
+(r)
+q
+(x
+t
+), b
+(s)
+k
+(x
+τ
+) .
+For each pair (r, s), we pay:
+1. O(1) for multiplying two scalars,
+2. O(d
+h
+) for the dot product b
+(r)
+q
+(x
+t
+) · b
+(s)
+k
+(x
+τ
+).
+Since (r, s) runs over R
+q
+× R
+k
+, each token-pair (t, τ ) costs roughly
+O
+
+R
+q
+R
+k
+
+1 + d
+h
+
+
+≈ O(R
+q
+R
+k
+d
+h
+).
+For T queries and T keys, that is O(T
+2
+R
+q
+R
+k
+d
+h
+) for a single head.
+Multi-Head and Batches (Reusing b-Dot Products). When extending to h heads, each head i
+has its own scalar factors a
+(r)
+q,i
+(x
+t
+) and a
+(s)
+k,i
+(x
+τ
+), but the b-vectors b
+(r)
+q
+(x
+t
+) and b
+(s)
+k
+(x
+τ
+) can still
+be shared across all heads (assuming the same rank-R factors for every head). Hence, one can split
+the total cost into two stages:
+1. b-Dot-Product Stage:
+For each token pair (t, τ ) and each rank pair (r, s), compute the dot product
+b
+(r)
+q
+(x
+t
+), b
+(s)
+k
+(x
+τ
+) ∈ R.
+Since each dot product is O(d
+h
+) and there are R
+q
+R
+k
+rank pairs as well as T
+2
+token pairs,
+this stage costs:
+O
+
+T
+2
+R
+q
+R
+k
+d
+h
+
+.
+Crucially, these b-dot products need only be computed once and can be cached for reuse
+by all heads.
+2. Per-Head Scalar Multiplications:
+After the b-dot products are precomputed (and cached), each head i only needs to multiply
+each stored dot product by the corresponding scalars a
+(r)
+q,i
+(x
+t
+) a
+(s)
+k,i
+(x
+τ
+). Since this scalar
+multiplication is O(1) per pair, and there are T
+2
+token pairs and R
+q
+R
+k
+rank pairs for each
+of the h heads, this step costs:
+O
+
+h T
+2
+R
+q
+R
+k
+
+.
+Putting these together, for batch size B, the total cost is
+O
+
+B T
+2
+R
+q
+R
+k
+d
+h
+
++ O
+
+B T
+2
+h R
+q
+R
+k
+
+= O
+
+B T
+2
+R
+q
+R
+k
+
+d
+h
++ h
+
+
+.
+By contrast, the standard multi-head attention dot-product step is O
+
+B T
+2
+h d
+h
+
+. Hence, for the
+specialized TPA approach to reduce flops,
+R
+q
+R
+k
+(d
+h
++ h) ≤ h d
+h
+.
+Thus a practical guideline is to ensure R
+q
+R
+k
+< h
+d
+h
+d
+h
++h
+. When that holds, bypassing explicit
+materialization of Q and K can be beneficial.
+19
+
+A.5 Toward Faster Computation Without Materializing Q, K, V
+We have explored a two-step procedure for computing Q K
+⊤
+directly from factorized queries and
+keys without materializing Q or K. Here, we extend this idea to also avoid explicitly forming
+V. That is, all three activations Q, K, V remain factorized throughout the attention pipeline. We
+present a single-head formulation below, and then discuss multi-head and batch extensions.
+Extending the Two-Step Approach to Avoid V Materialization. After we obtain QK
+⊤
+, we
+apply α
+t,τ
+= softmax
+
+1
+√
+d
+h
+(QK
+⊤
+)
+t,τ
+
+. The final attention output at token t (single head) is
+head(t) =
+T
+X
+τ =1
+α
+t,τ
+V
+τ
+.
+Using the factorization V
+τ
+=
+P
+R
+v
+u=1
+a
+(u)
+v
+(x
+τ
+) b
+(u)
+v
+(x
+τ
+), we write:
+head(t) =
+T
+X
+τ =1
+α
+t,τ
+R
+v
+X
+u=1
+a
+(u)
+v
+(x
+τ
+) b
+(u)
+v
+(x
+τ
+).
+Rearrange sums:
+head(t) =
+R
+v
+X
+u=1
+h
+T
+X
+τ =1
+
+α
+t,τ
+a
+(u)
+v
+(x
+τ
+)
+
+b
+(u)
+v
+(x
+τ
+)
+i
+.
+We still do not explicitly form V
+τ
+. Instead:
+Stage 1: Calculating b
+(u)
+v
+(x
+τ
+) for all tokens. We simply observe that each output head(t) can
+be computed by summing vectors b
+(u)
+v
+(x
+τ
+) ∈ R
+d
+h
+weighted by α
+t,τ
+a
+(u)
+v
+(x
+τ
+). The complexity for
+constructing b
+(u)
+v
+(x
+τ
+) ∀u, τ is O(T R
+v
+d
+h
+).
+Stage 2: Weighted Summation by α
+t,τ
+a
+(u)
+v
+(x
+τ
+). For each token t, the final attention head output
+is
+T
+X
+τ =1
+α
+t,τ
+R
+v
+X
+u=1
+a
+(u)
+v
+(x
+τ
+) b
+(u)
+v
+(x
+τ
+) =
+R
+v
+X
+u=1
+h
+T
+X
+τ =1
+
+α
+t,τ
+a
+(u)
+v
+(x
+τ
+)
+
+b
+(u)
+v
+(x
+τ
+)
+i
+.
+We still never explicitly materialize V. Instead, for each pair (t, u), we must accumulate the sum
+of T vectors b
+(u)
+v
+(x
+τ
+) ∈ R
+d
+h
+, each scaled by the scalar α
+t,τ
+a
+(u)
+v
+(x
+τ
+). Because each vector is d
+h
+-
+dimensional, each (t, u) summation costs O(T d
+h
+). Summed over t = 1 . . . T and u = 1 . . . R
+v
+, the
+total work is O(T
+2
+R
+v
+d
+h
+) for the entire sequence.
+In practice, one precomputes all b
+(u)
+v
+(x
+τ
+) for τ = 1 . . . N , so each accumulation can be imple-
+mented as a simple “scalar-times-vector add” in a tight loop. This cost is usually smaller than the
+QK
+⊤
+factorized cost if R
+v
+≪ h.
+A.6 Overall Complexity for Single-Head
+Combining the four bullet-point stages from above (ignoring smaller overheads like the softmax)
+yields:
+(i) QK b-Dot Product Stage: O(T
+2
+R
+q
+R
+k
+d
+h
+).
+(ii) QK Scalar-Multiply Stage: O(T
+2
+R
+q
+R
+k
+).
+(iii) Computing b
+(u)
+v
+(x
+τ
+) for all tokens: O(T R
+v
+d
+h
+).
+(iv) Weighted Summation by α
+t,τ
+a
+(u)
+v
+(x
+τ
+): O(T
+2
+R
+v
+d
+h
+).
+Hence, for a single head, the total cost is:
+O
+
+T
+2
+R
+q
+R
+k
+d
+h
++ T
+2
+R
+q
+R
+k
++ T R
+v
+d
+h
++ T
+2
+R
+v
+d
+h
+
+.
+In many cases (especially for large T ), the O(T
+2
+) terms dominate, so one often focuses on
+O
+
+T
+2
+R
+q
+R
+k
+d
+h
++ T
+2
+R
+q
+R
+k
++ T
+2
+R
+v
+d
+h
+
+.
+20
+
+A.7 Multi-Head and Batch Extensions (Reuse of b-Dot Products)
+When extending to h heads and batch size B, all sequence-length-dependent terms are multiplied
+by ∼ B h. However, crucial b-dot products can be shared across heads:
+QK b-Dot Products. Since each head has distinct scalar factors a
+q,i
+, a
+k,i
+but the same b
+(r)
+q
+, b
+(s)
+k
+across heads, each pairwise dot product
+⟨b
+(r)
+q
+(x
+t
+), b
+(s)
+k
+(x
+τ
+)⟩
+is computed just once per batch. That cost remains
+O
+
+B T
+2
+R
+q
+R
+k
+d
+h
+
+,
+not multiplied by h. After caching these dot products, each of the h heads pays O
+
+B T
+2
+h R
+q
+R
+k
+
+total for the head-specific scalar multiplications (the “α
+t,τ
+”–like factors).
+V b-Evaluations. Likewise, the b
+(u)
+v
+factors are shared across heads (i.e. one set of b
+v
+-vectors for
+all heads). Hence, computing all b
+(u)
+v
+(x
+τ
+) for τ = 1 . . . T (across the batch) is a one-time cost:
+O
+
+B T R
+v
+d
+h
+
+.
+Then each head i has its own scalar factors a
+(u)
+v,i
+(x
+τ
+), so the final accumulation
+P
+T
+τ =1
+α
+t,τ
+a
+(u)
+v,i
+(x
+τ
+) b
+(u)
+v
+(x
+τ
+) costs O
+
+B T
+2
+h R
+v
+d
+h
+
+in total (for all t, u).
+Putting it all together, the total flops for multi-head attention with batch size B are:
+O
+
+B T
+2
+R
+q
+R
+k
+d
+h
+
+|
+{z }
+QK b-dot products
+(shared across heads)
++ O
+
+B T
+2
+h R
+q
+R
+k
+
+|
+{z }
+per-head QK scalar mult.
++ O
+
+B T R
+v
+d
+h
+
+| {z }
+Compute b
+v
+for all tokens
+(shared across heads)
++ O
+
+B T
+2
+h R
+v
+d
+h
+
+|
+{z }
+final accumulations
+(per head)
+.
+Discussion. By contrast, standard multi-head attention typically requires O
+
+B T
+2
+h d
+h
+
+flops for
+the QK
+⊤
+dot product (plus a similar O
+
+B T
+2
+h d
+h
+
+for multiplying by V). The factorization can
+yield savings provided R
+q
+R
+k
+≪ h (for QK) and R
+v
+≪ h (for V), though actual speedups depend
+on how well these multi-stage kernels are implemented and on hardware efficiency. By retaining
+Q, K, and V in factorized form, one can forgo the usual steps:
+x
+t
+7
+
+→ Q
+t
+, K
+τ
+7
+
+→ (Q K
+⊤
+) 7 → softmax(Q K
+⊤
+) V 7 → final output.
+Instead, the large Q, K, V tensors (of size T × d
+h
+) are never materialized. The cost is replaced by
+rank-based b-dot-product computations plus per-head scalar multiplications. The main challenge is
+to keep the factor ranks (R
+q
+, R
+k
+, R
+v
+) sufficiently small relative to d
+h
+and to implement the necessary
+multi-stage kernels efficiently. When R
+q
+, R
+k
+, R
+v
+≪ h, fully factorized QKV attention can yield
+substantial gains in both computation and memory footprint.
+A.8 Decoding Speed during Inference Time of MHA, MQA, GQA, MLA, and TPA
+Suppose we are in an autoregressive setting, decoding the current token x
+T
+given cached keys and
+values (KV) from all previous tokens x
+1
+, . . . , x
+T −1
+. For each attention head i ∈ {1, . . . , h}, we
+store K
+i
+∈ R
+T ×d
+h
+, V
+i
+∈ R
+T ×d
+h
+. Below, we compare the flops needed by MHA, MQA, GQA,
+MLA, and TPA to compute the next-token logits during inference.
+MHA, MQA, and GQA. Despite sharing or grouping keys/values in MQA and GQA, the decod-
+ing cost for MHA, MQA, and GQA remains of the same order. Specifically, for each head i, we
+compute:
+Q
+i
+(x
+T
+) ∈ R
+d
+h
+, K
+i
+∈ R
+T ×d
+h
+, Q
+i
+(x
+T
+) K
+⊤
+i
+∈ R
+1×T
+, and Softmax
+
+Q
+i
+(x
+T
+) K
+⊤
+i
+
+V
+i
+∈ R
+d
+h
+.
+Hence, the flops scale linearly in h, d
+h
+, and T . For example, forming Q
+i
+(x
+T
+)K
+⊤
+i
+for each head i
+costs roughly O(h d
+h
+T ).
+MLA. During inference, MLA can be seen as MQA but uses a larger head dimension to accommo-
+date both RoPE and compressed representations (e.g., d
+′
+h
+= d
+rope
++ d
+c
+). In typical configurations,
+21
+
+d
+rope
++ d
+c
+can be significantly larger (e.g., d
+′
+h
+= 576 rather than d
+h
+= 64 or 128), thus inflating the
+dot-product cost by roughly 4.5× to 9× compared to MHA/MQA/GQA.
+TPA. Recall that TPA factorizes Q and K into rank-(R
+q
+, R
+k
+) terms (see Section A), potentially
+avoiding large Q, K materializations. At inference, TPA’s dot-product cost can be broken into two
+parts:
+R
+q
+R
+k
+d
+h
+T
+|
+{z }
+QK b-dot products (shared across all heads)
++ 2 R
+q
+R
+k
+h T
+|
+{z }
+per-head scalar multiplications
+,
+where T is the current sequence length. For concrete values d
+h
+= 128, h = 64, R
+q
+= 8, and R
+k
+= 2
+(or R
+q
+= 16, R
+k
+= 1), we obtain:
+MHA, MQA, GQA: 128 × 64 × T = 8192 T,
+MLA: 576 × 64 × T = 36,384 T,
+TPA:
+
+8 × 2 × 128 × T
+
++
+
+2 × 8 × 2 × 64 × T
+
+= 4096 T.
+Thus, in this setup, TPA can significantly reduce the flops needed for computing the Q(x
+T
+)K
+⊤
+operation at each decoding step. The actual end-to-end wall-clock speedup also depends on ker-
+nel fusion, caching strategies, and hardware implementation details, but the factorized formulation
+offers a pathway to more efficient decoding than standard attention.
+B Higher-Order Tensor Product Attention
+All prior discussions have focused on a second-order factorization in which each rank-R
+Q
+(and
+similarly R
+K
+, R
+V
+) component is the outer product of two vectors: one in R
+h
+(the “head” dimension)
+and one in R
+d
+h
+. We now generalize this by introducing an additional latent factor, yielding a third-
+order (or higher) factorization reminiscent of canonical polyadic (CP) decomposition. Concretely,
+for a single token t, we write
+Q
+t
+=
+1
+R
+Q
+R
+Q
+X
+r=1
+a
+Q
+r
+(x
+t
+) ⊗ vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+,
+where the newly introduced factor c
+Q
+r
+(x
+t
+) ∈ R
+d
+c
+can be viewed as a learnable gate or modulation
+term. Analogous expansions apply to K
+t
+and V
+t
+. In practice, these triple (or higher-order) products
+still collapse into a matrix in R
+h×d
+h
+. One straightforward way to achieve this collapse is to split the
+feature dimension d
+h
+such that d
+b
+× d
+c
+= d
+h
+,
+b
+Q
+r
+(x
+t
+) ∈ R
+d
+b
+, c
+Q
+r
+(x
+t
+) ∈ R
+d
+c
+, vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+∈ R
+d
+h
+.
+This additional factor can enhance expressiveness without necessarily increasing the base rank. Con-
+ceptually, it can act as a learnable nonlinearity or gating mechanism. One could also tie or share c
+Q
+r
+across queries, keys, and values, to reduce parameter overhead.
+A similar setup holds for keys (with rank R
+K
+) and values (with rank R
+V
+). Although this extra
+dimension adds to the parameter count, it can reduce the required rank to achieve a certain level of
+representational power.
+From a memory perspective, higher-order TPA still leverages factorized KV caching: only the fac-
+tors a(x
+t
+), b(x
+t
+), and c(x
+t
+) for each past token are cached. As usual, a trade-off arises between
+model capacity and the overhead of memory and computing. Nonetheless, moving from a rank-
+
+R
+Q
+, R
+K
+, R
+V
+
+matrix factorization to a higher-order tensor decomposition can provide additional
+flexibility and increased capacity.
+B.1 RoPE Compatibility in Higher-Order TPA
+Rotary positional embeddings (RoPE) remain compatible even under higher-order factorizations.
+In second-order TPA, RoPE can be treated as an invertible blockwise linear map acting on the last
+dimension of Q
+t
+or K
+t
+. The same argument carries over when a third factor c
+Q
+r
+(x
+t
+) is present.
+Suppose RoPE acts on the b
+Q
+r
+(x
+t
+) portion (of dimension size d
+b
+), we have the following theorem.
+22
+
+Theorem 2 (RoPE Compatibility in Higher-Order TPA). Consider the higher-order (3-order) Tensor
+Product Attention (TPA) query factorization
+Q
+t
+=
+1
+R
+Q
+R
+Q
+X
+r=1
+a
+Q
+r
+(x
+t
+) ⊗ vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+∈ R
+h×d
+h
+,
+where a
+Q
+r
+(x
+t
+) ∈ R
+h
+, b
+Q
+r
+(x
+t
+) ∈ R
+d
+b
+, c
+Q
+r
+(x
+t
+) ∈ R
+d
+c
+, with d
+c
+=
+d
+h
+d
+b
+. Define the RoPE-transformed
+query as
+e
+Q
+t
+= RoPE
+t
+
+Q
+t
+
+= Q
+t
+T
+t
+, where
+T
+t
+= R
+t
+⊗ I
+d
+c
+=
+
+
+
+
+R
+t
+· · · 0 0
+0 R
+t
+· · · 0
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+.
+0 0 · · · R
+t
+
+
+
+
+∈ R
+d
+h
+×d
+h
+,
+and R
+t
+∈ R
+d
+b
+×d
+b
+(d
+b
+∈ Z
++
+is even) is a block-diagonal matrix composed of 2 × 2 rotation matrices:
+R
+t
+=
+
+
+
+
+
+
+
+
+
+
+cos(tθ
+1
+) − sin(tθ
+1
+)
+sin(tθ
+1
+) cos(tθ
+1
+)
+cos(tθ
+2
+) − sin(tθ
+2
+)
+sin(tθ
+2
+) cos(tθ
+2
+)
+.
+.
+.
+cos(tθ
+d
+b
+/2
+) − sin(tθ
+d
+b
+/2
+)
+sin(tθ
+d
+b
+/2
+) cos(tθ
+d
+b
+/2
+)
+
+
+
+
+
+
+
+
+
+
+,
+for t ∈ {1, . . . , T } and j ∈ {1, . . . , d
+b
+/2}.
+This construction ensures that RoPE rotates only the coordinates corresponding to b
+Q
+r
+(x
+t
+) while
+leaving c
+Q
+r
+(x
+t
+) unchanged. Under these conditions, the RoPE-transformed query RoPE
+t
+
+Q
+t
+
+ad-
+mits a higher-order TPA factorization of the same rank R
+Q
+. Specifically, we have
+1
+R
+Q
+R
+Q
+X
+r=1
+a
+Q
+r
+(x
+t
+) ⊗ vec
+
+e
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+= RoPE
+t
+
+Q
+t
+
+, (B.1)
+where
+e
+b
+Q
+r
+(x
+t
+) = R
+t
+b
+Q
+r
+(x
+t
+).
+Please see Appendix C.2 for the proof. For fourth-order or higher, this result still holds.
+C Proofs of Theorems
+C.1 Proof of Theorem 1
+Proof. Because RoPE is a linear orthogonal transform, we can write
+e
+Q
+t
+= Q
+t
+T
+t
+=
+1
+R
+Q
+
+A
+Q
+(x
+t
+)
+⊤
+B
+Q
+(x
+t
+)
+
+T
+t
+=
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+
+B
+Q
+(x
+t
+) T
+t
+
+,
+where T
+t
+is the block-diagonal matrix encoding RoPE. This allows us to define
+e
+B
+Q
+(x
+t
+) = B
+Q
+(x
+t
+) T
+t
+,
+thereby obtaining
+RoPE(Q
+t
+) =
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+e
+B
+Q
+(x
+t
+).
+Similarly, for the key tensor K
+s
+, we have
+e
+K
+s
+= K
+s
+T
+s
+=
+1
+R
+K
+
+A
+K
+(x
+s
+)
+⊤
+B
+K
+(x
+s
+)
+
+T
+s
+=
+1
+R
+K
+A
+K
+(x
+s
+)
+⊤
+
+B
+K
+(x
+s
+) T
+s
+
+,
+23
+
+which defines
+e
+B
+K
+(x
+s
+) = B
+K
+(x
+s
+) T
+s
+,
+and thus
+RoPE(K
+s
+) =
+1
+R
+K
+A
+K
+(x
+s
+)
+⊤
+e
+B
+K
+(x
+s
+).
+Now, consider the product of the rotated queries and keys:
+e
+Q
+t
+e
+K
+⊤
+s
+=
+1
+R
+Q
+R
+K
+
+A
+Q
+(x
+t
+)
+⊤
+e
+B
+Q
+(x
+t
+)
+ 
+A
+K
+(x
+s
+)
+⊤
+e
+B
+K
+(x
+s
+)
+
+⊤
+=
+1
+R
+Q
+R
+K
+A
+Q
+(x
+t
+)
+⊤
+e
+B
+Q
+(x
+t
+)
+e
+B
+K
+(x
+s
+)
+⊤
+A
+K
+(x
+s
+),
+Since T
+t
+and T
+s
+encode positional rotations, the product T
+t
+T
+⊤
+s
+corresponds to a relative rotation
+T
+t−s
+. Therefore, we can express the above as
+e
+Q
+t
+e
+K
+⊤
+s
+=
+1
+R
+Q
+R
+K
+A
+Q
+(x
+t
+)
+⊤
+
+B
+Q
+(x
+t
+)T
+t
+T
+⊤
+s
+B
+K
+(x
+s
+)
+⊤
+
+A
+K
+(x
+s
+)
+=
+1
+R
+Q
+R
+K
+A
+Q
+(x
+t
+)
+⊤
+
+B
+Q
+(x
+t
+)T
+t−s
+B
+K
+(x
+s
+)
+⊤
+
+A
+K
+(x
+s
+)
+=
+1
+R
+Q
+R
+K
+A
+Q
+(x
+t
+)
+⊤
+(B
+Q
+(x
+t
+)T
+t−s
+)
+
+B
+K
+(x
+s
+)
+⊤
+A
+K
+(x
+s
+)
+
+=
+
+1
+R
+Q
+A
+Q
+(x
+t
+)
+⊤
+B
+Q
+(x
+t
+)T
+t−s
+ 
+1
+R
+K
+A
+K
+(x
+s
+)
+⊤
+B
+K
+(x
+s
+)
+
+⊤
+,
+This shows that
+RoPE
+t−s
+(Q
+t
+)K
+⊤
+s
+=
+e
+Q
+t
+e
+K
+⊤
+s
+,
+Focusing on individual heads i, the above matrix equality implies:
+RoPE
+t−s
+(q
+t,i
+)
+⊤
+k
+s,i
+=
+e
+q
+⊤
+t,i
+e
+k
+s,i
+,
+where
+e
+q
+t,i
+= RoPE(q
+t,i
+) = T
+t
+q
+t,i
+∈ R
+d
+h
+,
+e
+k
+s,i
+= RoPE(k
+s,i
+) = T
+s
+k
+s,i
+∈ R
+d
+h
+.
+This equality confirms that the relative positional encoding between queries and keys is preserved
+under TPA’s factorization and RoPE’s rotation. Thus, TPA maintains compatibility with RoPE. This
+completes the proof of Theorem 1.
+C.2 Proof of Theorem 2
+Proof. We begin by observing that each term a
+Q
+r
+(x
+t
+) ⊗ vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+is an element of
+R
+h
+⊗ R
+d
+h
+. Here, b
+Q
+r
+(x
+t
+) ∈ R
+d
+b
+, c
+Q
+r
+(x
+t
+) ∈ R
+d
+c
+, with d
+c
+=
+d
+h
+d
+b
+. Consequently, the tensor product
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+) forms a d
+b
+× d
+c
+matrix, and its vectorization lies in R
+d
+b
+·d
+c
+= R
+d
+h
+.
+Applying the RoPE transformation to a single summand yields
+vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+7
+
+→ T
+t
+vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+.
+Since T
+t
+is defined as the Kronecker product R
+t
+⊗ I
+d
+c
+, where R
+t
+∈ R
+d
+b
+×d
+b
+and I
+d
+c
+is the identity
+matrix of size d
+c
+× d
+c
+, it follows that
+T
+t
+vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+= vec
+
+R
+t
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+.
+This is because the Kronecker product with an identity matrix effectively applies the rotation R
+t
+to
+the b
+Q
+r
+(x
+t
+) component while leaving c
+Q
+r
+(x
+t
+) unchanged.
+24
+
+Therefore, the RoPE transformation of a single summand becomes
+RoPE
+t
+
+a
+Q
+r
+(x
+t
+) ⊗ vec
+
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+
+= a
+Q
+r
+(x
+t
+) ⊗ vec
+
+R
+t
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+.
+Importantly, this transformation does not mix the components b
+Q
+r
+(x
+t
+) and c
+Q
+r
+(x
+t
+); it solely rotates
+b
+Q
+r
+(x
+t
+) via R
+t
+.
+Summing over all ranks r = 1, . . . , R
+Q
+, we obtain
+1
+R
+Q
+R
+Q
+X
+r=1
+a
+Q
+r
+(x
+t
+) ⊗ vec
+
+R
+t
+b
+Q
+r
+(x
+t
+) ⊗ c
+Q
+r
+(x
+t
+)
+
+= RoPE
+t
+
+Q
+t
+
+,
+which retains the same higher-order TPA structure with rank R
+Q
+.
+Thus, the RoPE transformation is fully compatible with higher-order TPA, preserving the factor-
+ization rank and maintaining the structure by only rotating the b
+Q
+r
+(x
+t
+) components while leaving
+c
+Q
+r
+(x
+t
+) unchanged.
+D More Related Works
+Low-Rank Factorizations. Low-rank approximations have been applied to compress model pa-
+rameters and reduce complexity including LoRA (Hu et al., 2022), which factorizes weight up-
+dates during fine-tuning, and its derivatives for other training scenarios such as efficient pretraining
+(ReLoRA (Lialin et al., 2023), MoRA (Jiang et al., 2024)), long-context training (LongLoRA (Chen
+et al., 2024), SinkLoRA (Zhang, 2024)), as well as continual training (InfLoRA (Liang & Li, 2024),
+GS-LoRA (Zhao et al., 2024), I-LoRA (Ren et al., 2024)). These approaches typically produce static
+low-rank expansions that do not explicitly depend on the input context. And Malladi et al. (2023);
+Zeng & Lee (2024) provided theoretical proof of the expressiveness of low-rank approximation. For
+the initialization of factorization matrices, OLoRA (B¨uy¨ukaky¨uz, 2024) applied QR-decomposition
+of pretrained weight to achieve better performance of language models while LoLDU (Shi et al.,
+2024) used LDU-decomposition to accelerate training of LoRA. Moreover, AdaLoRA (Zhang et al.,
+2023a) utilized Singular Value Decomposition (SVD) of the pretrained weight and introduced im-
+portance score for each parameter as a measurement to achieve dynamic adjustment of rank. TPA,
+by contrast, constructs Q, K, and V as contextually factorized tensors, enabling dynamic adaptation.
+E More on Attention Mechanisms
+E.1 Multi-Query Attention (MQA)
+Multi-Query Attention (MQA) (Shazeer, 2019) significantly reduces memory usage by sharing keys
+and values across heads, while still preserving unique query projections. For a sequence of embed-
+dings X ∈ R
+T ×d
+model
+,
+Q
+i
+= XW
+Q
+i
+, K
+shared
+= XW
+K
+shared
+, V
+shared
+= XW
+V
+shared
+.
+Hence, each head i only has a distinct query Q
+i
+∈ R
+T ×d
+h
+, but shares the same key K
+shared
+∈ R
+T ×d
+h
+and value V
+shared
+∈ R
+T ×d
+h
+. In practice, this means:
+W
+Q
+i
+∈ R
+d
+model
+×d
+h
+, W
+K
+shared
+, W
+V
+shared
+∈ R
+d
+model
+×d
+h
+.
+The resulting MQA operation is:
+MQA(X) = Concat
+
+head
+1
+, . . . , head
+h
+
+W
+O
+,
+where
+head
+i
+= Attention
+
+Q
+i
+, K
+shared
+, V
+shared
+
+.
+By sharing these key and value projections, MQA cuts down on memory usage (especially for the
+key-value cache in autoregressive inference) but loses some expressivity since all heads must rely
+on the same key/value representations.
+25
+
+E.2 Grouped Query Attention (GQA)
+Grouped Query Attention (GQA) (Ainslie et al., 2023) generalizes MHA and MQA by grouping
+heads. Specifically, we partition the h total heads into G groups. Each group has a single set of
+keys and values, but each individual head within that group still retains its own query projection.
+Formally, if g(i) maps a head i ∈ [h] to its group index g ∈ [G], then:
+K
+g(i)
+= X W
+K
+g(i)
+, V
+g(i)
+= X W
+V
+g(i)
+, Q
+i
+= X W
+Q
+i
+,
+and
+head
+i
+= Attention
+
+Q
+i
+, K
+g(i)
+, V
+g(i)
+
+.
+Again, W
+K
+g
+, W
+V
+g
+∈ R
+d
+model
+×d
+h
+for each group g, and W
+Q
+i
+∈ R
+d
+model
+×d
+h
+for each head i. The
+complete output is again a concatenation of all heads:
+GQA(X) = Concat
+
+head
+1
+, . . . , head
+h
+
+W
+O
+.
+By adjusting G between 1 and h, GQA can interpolate between sharing all key/value projections
+across heads (i.e., MQA) and having one set of projections per head (i.e., MHA).
+E.3 Multi-head Latent Attention (MLA)
+Below, we briefly outline the Multi-head Latent Attention (MLA) approach used by DeepSeek-
+V2 (Liu et al., 2024a) and DeepSeek-V3 (Liu et al., 2024b). MLA introduces a low-rank compres-
+sion of the keys and values to reduce the Key-Value (KV) caching cost at inference.
+C
+KV
+= XW
+DKV
+,
+Concat
+
+K
+C
+1
+, K
+C
+2
+, . . . , K
+C
+h
+
+= K
+C
+= C
+KV
+W
+U K
+,
+K
+R
+= RoPE
+
+XW
+KR
+
+,
+K
+i
+= Concat
+
+K
+C
+i
+, K
+R
+
+,
+Concat
+
+V
+C
+1
+, V
+C
+2
+, . . . , V
+C
+h
+
+= V
+C
+= C
+KV
+W
+U V
+,
+where W
+DKV
+∈ R
+d
+model
+×d
+c
+, W
+U K
+∈ R
+d
+c
+×d
+h
+h
+, W
+KR
+∈ R
+d
+model
+×d
+R
+h
+, W
+U V
+∈ R
+d
+c
+×d
+h
+h
+, and
+C
+KV
+∈ R
+T ×d
+c
+is the compressed KV latent (with d
+c
+≪ d
+h
+h), and RoPE(·) represents the RoPE
+transform applied to the separate key embeddings K
+R
+of dimension d
+R
+h
+. Thus, only C
+KV
+and K
+R
+need to be cached, reducing KV memory usage while largely preserving performance compared to
+standard MHA (Vaswani et al., 2017).
+MLA also compresses the queries, lowering their training-time memory footprint:
+C
+Q
+= XW
+DQ
+,
+Concat
+
+Q
+C
+1
+, Q
+C
+2
+, . . . , Q
+C
+h
+
+= Q
+C
+= C
+Q
+W
+U Q
+,
+Concat
+
+Q
+R
+1
+, Q
+R
+2
+, . . . , Q
+R
+h
+
+= Q
+R
+= RoPE
+
+C
+Q
+W
+QR
+
+,
+Q = Concat
+
+Q
+C
+, Q
+R
+
+.
+where W
+DQ
+∈ R
+d
+model
+×d
+′
+c
+, W
+U Q
+∈ R
+d
+′
+c
+×d
+h
+h
+, W
+QR
+∈ R
+d
+′
+c
+×d
+R
+h
+h
+. Here, C
+Q
+∈ R
+T ×d
+′
+c
+(with
+d
+′
+c
+≪ d
+h
+h) is the compressed query latent. As above, each W
+DQ
+, W
+U Q
+, and W
+QR
+connects these
+lower-dimensional query latents back to h heads of dimension d
+h
++ d
+R
+h
+.
+Given compressed queries, keys, and values, the final attention output for the t-th token is:
+O
+i
+= Softmax
+
+Q
+i
+K
+⊤
+i
+√
+d
+h
++d
+R
+h
+
+V
+C
+i
+,
+U = Concat
+
+O
+1
+, O
+2
+, . . . , O
+h
+
+W
+O
+,
+where W
+O
+∈ R
+(d
+h
+h)× d
+model
+is the output projection.
+In inference time, C
+KV
+and K
+R
+can be cached to accelerate decoding. In detail, when RoPE is
+ignored, the inner product q
+⊤
+t,i
+k
+s,i
+(where q
+t,i
+, k
+s,i
+∈ R
+d
+) of the i-th head between t-th and s-th
+26
+
+tokens can be calculated using the hidden state x
+t
+∈ R
+d
+model
+for t-th token and the cached latent state
+c
+KV
+s
+∈ R
+d
+c
+for s-th token:
+q
+⊤
+t,i
+k
+s,i
+= [(W
+U Q
+i
+)
+⊤
+(W
+DQ
+i
+)
+⊤
+x
+t
+]
+⊤
+[(W
+U K
+i
+)
+⊤
+c
+KV
+s
+] (E.1)
+= x
+⊤
+t
+[W
+DQ
+i
+W
+U Q
+i
+(W
+U K
+i
+)
+⊤
+]c
+KV
+s
+, (E.2)
+where W
+(·)
+i
+is the i-th head of the original weight, and [W
+DQ
+i
+W
+U Q
+i
+(W
+U K
+i
+)
+⊤
+] can be computed
+previously for faster decoding. However, this process fails when RoPE is considered according to Su
+(2024). Since RoPE can be considered as multiplication with a block-diagonal matrix T
+t
+∈ R
+d
+h
+×d
+h
+(see Section 2.3), with the property (2.1) that T
+t
+T
+⊤
+s
+= T
+t−s
+, then
+q
+⊤
+t,i
+k
+s,i
+= [T
+t
+⊤
+(W
+U Q
+i
+)
+⊤
+(W
+DQ
+i
+)
+⊤
+x
+t
+]
+⊤
+[T
+s
+⊤
+(W
+U K
+i
+)
+⊤
+c
+KV
+s
+]
+= x
+⊤
+t
+[W
+DQ
+i
+W
+U Q
+i
+T
+t−s
+(W
+U K
+i
+)
+⊤
+]c
+KV
+s
+.
+(E.3)
+Different from (E.2), acceleration by pre-computing [W
+DQ
+i
+W
+U Q
+i
+T
+t−s
+(W
+U K
+i
+)
+⊤
+] fails since it
+varies for different (t, s) position pairs. Therefore, MLA adds the additional k
+R
+t
+part with a rel-
+atively smaller size for RoPE compatibility. In Section 3.2, we will show that TPA addresses the
+issue of RoPE-incompatibility by applying tensor product.
+C
+KV
+= XW
+DKV
+,
+Concat
+
+K
+C
+1
+, K
+C
+2
+, . . . , K
+C
+h
+
+= K
+C
+= C
+KV
+W
+U K
+,
+K
+R
+= RoPE
+
+XW
+KR
+
+,
+K
+i
+= Concat
+
+K
+C
+i
+, K
+R
+
+,
+Concat
+
+V
+C
+1
+, V
+C
+2
+, . . . , V
+C
+h
+
+= V
+C
+= C
+KV
+W
+U V
+,
+E.4 Multi-matrix Factorization Attention (MFA)
+Hu et al. (2024) proposed Multi-matrix Factorization Attention (MFA), which can be seen as Multi-
+Query Attention (MQA) with dimension of each head equals d
+C
+, and low-rank factorized Q:
+Q
+i
+= XW
+DQ
+W
+U Q
+i
+, K
+shared
+= XW
+K
+shared
+, V
+shared
+= XW
+V
+shared
+,
+where
+W
+DQ
+∈ R
+d
+model
+×d
+c
+, W
+U Q
+i
+∈ R
+d
+c
+×d
+c
+, W
+K
+shared
+, W
+V
+shared
+∈ R
+d
+model
+×d
+c
+.
+F Other Variants of TPA
+TPA with Non-contextual B. Conversely, one may fix the token-dimension factors b
+Q
+r
+, b
+K
+r
+, b
+V
+r
+∈
+R
+d
+h
+as learned parameters, while allowing a
+Q
+r
+(x
+t
+), a
+K
+r
+(x
+t
+), a
+V
+r
+(x
+t
+) to adapt to x
+t
+. For keys:
+K
+t
+=
+1
+R
+K
+R
+K
+X
+r=1
+a
+K
+r
+(x
+t
+) ⊗ b
+K
+r
+,
+and similarly for values. This arrangement is effective if the token-dimension structure remains
+mostly uniform across the sequence, while the head-dimension factors capture context.
+TPA KV Only. One can preserve a standard query mapping,
+Q
+t
+= W
+Q
+x
+t
+∈ R
+h×d
+h
+,
+and factorize only the keys and values. This leaves the query projection as the original linear trans-
+formation while reducing memory usage via factorized KV caching.
+TPA KV with Shared B. Another variant is to share the token-dimension factors of keys and
+values:
+b
+K
+r
+(x
+t
+) = b
+V
+r
+(x
+t
+),
+27
+
+lowering parameter counts and the KV cache footprint. While it constrains K and V to be formed
+from the same token basis, it can still perform well and provide additional memory savings.
+Nonlinear Head Factors. Rather than applying purely linear mappings to the head-dimension
+factors a
+Q
+r
+, a
+K
+r
+, a
+V
+r
+, one may introduce element-wise nonlinearities such as σ(·) or softmax(·). This
+effectively yields a Mixture of Heads Attention (MoH Attention), where each component becomes a
+learned mixture weight modulated by the nonlinearity.
+Discussion. These variants illustrate TPA’s versatility in balancing memory cost, computational
+overhead, and representation power. By choosing which dimensions (heads or tokens) remain con-
+textual and adjusting ranks (R
+Q
+, R
+K
+, R
+V
+), TPA unifies multiple existing attention mechanisms—
+such as MHA, MQA, and GQA—under one framework, while potentially reducing the KV cache
+size by an order of magnitude during autoregressive inference.
+G More on Experiments
+G.1 Experimental Settings
+We list the main architecture hyper-parameters and training devices in Table 4. We fix d
+h
+= 64
+for all the models. Moreover, we fix the number of KV heads with 2 for GQA models; d
+R
+h
+= 32
+for MLA models; and R
+k
+= R
+v
+= 2, R
+q
+= 6 for TPA and TPA-KV only models. Other hyper-
+parameters are listed in Table 5.
+Table 4: The architecture hyper-parameters and training devices of models. Abbreviations: BS. =
+Batch Size, GAS. = Gradient Accumulation Steps.
+MODEL SIZE #PARAM DEVICES MICRO BS. GAS. #LAYER d
+MODEL
+SMALL 124M 4× A100 GPUS 24 5 12 768
+MEDIUM 353M 8× A100 GPUS 20 3 24 1024
+LARGE
+772M 8× A100 GPUS 15 4 36 1280
+XL 1.55B 8× A100 GPUS 6 10 48 1600
+Table 5: The architecture hyper-parameters for different models.
+MODEL SIZE SMALL MEDIUM LARGE XL
+h (MHA) 12 16 20 25
+h (MQA) 23 31 39 49
+h (GQA) 22 30 38 48
+h (MLA) 12 23 34 49
+h (TPA-KVONLY)
+22 29 37 47
+h (TPA)
+34 47 61 78
+d
+c
+(MLA) 256 512 512 512
+d
+′
+c
+(MLA) 512 1024 1024 1024
+G.2 Additional Experimental Results
+G.2.1 Perplexity Curves
+We display the perplexity curves for medium, large and XL size of models in Figure 4.
+G.2.2 Ablation Study on Different Ranks
+Figure 5 shows the training loss, validation loss, and validation perplexity curves of XL-size (1.5B)
+T6 models with different ranks trained on the FineWeb-Edu 100B dataset, and the evaluation results
+are displayed in Table 7. It can be observed that increase in rank can improve the performances of
+large language models.
+28
+
+(a) Validation Perplexity (b) Validation Perplexity (c) Validation Perplexity
+Figure 4: The validation perplexity of medium-size (353M) models, large-size (773M), and XL-size
+(1.5B) models with different attention mechanisms on the FineWeb-Edu 100B dataset.
+(a) Training Loss (b) Validation Loss (c) Validation Perplexity
+Figure 5: The training loss, validation loss and validation perplexity curves of XL-size (1.5B) T6
+models with different ranks on the FineWeb-Edu 100B dataset.
+G.2.3 0-shot Evaluation with lm-evaluation-harness
+For the evaluation, We show the 0-shot performances with lm-evaluation-harness for small-size
+(124M) and XL-size (1.5B) models in Tables 6 and 7.
+Table 6: The evaluation results of small models with different attention mechanisms pre-trained us-
+ing FineWeb-Edu 100B dataset (0-shot with lm-evaluation-harness). The best scores in each column
+are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 50.63 26.96 59.39 36.18 32.00 64.96 51.85 23.40 70.30 46.19
+MQA 49.62 25.34 55.72 35.94 31.40 64.85 51.30 23.37 68.70 45.14
+GQA 48.70 25.68 56.15 35.58 31.40 64.91 51.62 23.12 68.20 45.04
+MLA 50.21 26.71 58.01 36.25 32.80 64.69 50.59 24.67 71.90 46.20
+TPA-KVonly 51.05 26.54 57.25 36.77 32.60 65.02 50.91 23.64 69.70 45.94
+TPA (non-ctx-A) 50.17 25.60 57.95 36.13 31.40 64.80 49.57 24.88 64.80 45.03
+TPA 51.26 27.39 57.00 36.68 32.80 64.47 49.72 24.61 72.00 46.21
+G.2.4 2-shot Evaluation with lm-evaluation-harness
+We also show 2-shot performances in Tables 8, 9, 10 and 11.
+G.3 Ablation Studies on Learning Rates
+We implement a set of parallel experiments for medium models with learning rate 3 × 10
+−4
+, and the
+curves for training loss, validation loss, and validation perplexity are displayed in Figure 6. We also
+show the performance of these models on the benchmarks described in Section 4 in Tables 12-13.
+The results show that TPA and TPA-KVonly models can also outperform other types of attention
+with different learning rates.
+29
+
+Table 7: The evaluation results of XL models with different attention mechanisms pre-trained using
+the FineWeb-Edu 100B dataset (0-shot with lm-evaluation-harness). The best scores in each column
+are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande. If not specified, TPA and
+TPA-KVonly set R
+K
+= R
+V
+= 2.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 64.81 35.41 61.90 54.32 37.20 72.74 55.80 25.44 82.80 54.49
+MQA 64.10 36.01 62.26 54.38 39.00 72.58 56.43 23.70 81.90 54.48
+GQA 63.68 35.92 60.46 54.17 38.40 73.56 56.27 24.77 81.70
+54.33
+MLA 64.14 35.92 60.12 53.60 39.20 72.25 55.17 24.71 81.60 54.08
+TPA-KVonly 65.61 36.77 63.02 54.17 37.00 73.34 54.62 25.02 81.60 54.57
+TPA-KVonly (R
+K,V
+= 4) 64.52 37.03 63.27 54.89 39.80 72.91 56.51 24.74 81.60
+55.03
+TPA-KVonly (R
+K,V
+= 6) 65.78 35.92 61.71 54.86 38.60 72.69 57.93 25.59 82.20 55.03
+TPA 66.71 36.52 61.38 54.03 40.40 72.52 56.83 24.49 82.20 55.01
+Table 8: The evaluation results of small models with different attention mechanisms on FineWeb-
+Edu 100B dataset (2-shot with lm-evaluation-harness). The best scores in each column are bolded.
+Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 57.66 28.24 57.28 36.43 29.60 64.09 51.14 26.57 82.00 48.11
+MQA 53.79 26.35 44.95 34.18 28.80 62.79 52.01 25.91 78.10 45.21
+GQA 55.01 25.94 55.72 35.68 31.80 65.29 51.93 25.27 77.80 47.16
+MLA 54.76 27.13 58.07 36.13 31.40 65.07 51.30 25.90 78.90 47.63
+TPA-KVonly 54.25 27.90 57.06 36.36 31.80 64.31 53.59 26.18 79.20 47.85
+TPA (non-ctx-A) 55.09 27.65 53.82 36.24 30.20 64.53 50.75 26.01 78.60 46.99
+TPA 57.53 28.07 56.33 36.49 31.80 64.36 51.14 25.92 79.70 47.93
+Table 9: The evaluation results of medium models with different attention mechanisms pre-trained
+using FineWeb-Edu 100B dataset (2-shot with lm-evaluation-harness). The best scores in each col-
+umn are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 64.73 32.42 58.29 45.89 34.20 68.50 53.20 25.86 88.00 52.34
+MQA 64.98 33.62 55.02 45.81 34.00 69.59 53.43 24.30 85.20 51.77
+GQA 65.24 33.19 56.54 45.41 34.80 69.04 55.72 24.73 87.90 52.51
+MLA 64.98 33.62 53.52 45.94 33.00 68.55 51.85 25.46 89.10 51.78
+TPA-KVonly 64.69 32.34 59.48 46.23 35.40 70.08 54.06 25.64 86.30 52.69
+TPA (non-ctx-A) 65.45 33.79 56.88 45.23 33.60 68.61 54.22 25.00 85.00
+51.98
+TPA 67.97 34.56 57.22 46.87 34.60 69.91 52.01 25.07 89.90 53.12
+Table 10: The evaluation results of large models with different attention mechanisms pre-trained
+using the FineWeb-Edu 100B dataset (2-shot with lm-evaluation-harness). The best scores in each
+column are bolded. Abbreviations: HellaSwag = HellaSwag, WG = WinoGrande.
+Method ARC-E ARC-C BoolQ HellaSwag OBQA PIQA WG MMLU SciQ Avg.
+MHA 67.85 36.35 59.82 50.22 35.00 70.67 53.35 23.92 91.10 54.25
+MQA 68.86 36.09 53.79 50.50 37.00 70.89 54.70 25.01 88.00 53.87
+GQA 69.15 36.09 58.84 50.29 36.20 70.73 54.22 26.08 90.00
+54.62
+MLA 70.54 38.74 61.50 51.86 36.00 70.89 54.22 25.47 92.40
+55.74
+TPA-KVonly 71.34 37.71 59.76 51.10 36.00 71.49 54.62 25.83 90.10 55.33
+TPA 70.41 37.71 60.06 51.30 34.00 71.06 54.54 25.79 90.30 55.02
+30
+
+Table 11: The evaluation results of XL models with different attention mechanisms pre-trained using
+the FineWeb-Edu 100B dataset (2-shot with lm-evaluation-harness). The best scores in each column
+are bolded. Abbreviations: HellaSwag = HellaSwag, WG = WinoGrande. If not specified, We set
+R
+K
+= R
+V
+= 2 for TPA and TPA-KVonly.
+Method ARC-E ARC-C BoolQ HellaSwag OBQA PIQA WG MMLU SciQ Avg.
+MHA 70.83 39.93 59.85 54.05 36.20 72.52 55.17 25.42 91.70 56.18
+MQA 71.34 39.76 58.93 54.27 39.40 72.96 57.38 24.74 91.90 56.74
+GQA 71.17 39.08 60.18 54.05 37.40 73.07 56.35 24.87 92.20 56.49
+MLA 70.79 37.54 50.83 53.33 40.00 72.09 56.51 24.93 91.80 55.31
+TPA-KVonly 72.85 39.68 60.92 53.81 37.00 73.34 56.83 26.19 91.30 56.88
+TPA-KVonly (R
+K,V
+= 4) 72.98 40.27 60.15 54.88 36.80 73.29 56.43 25.50 92.10
+56.93
+TPA-KVonly (R
+K,V
+= 6) 73.95 39.76 58.99 54.73 36.80 72.91 59.04 24.93 92.90 57.11
+TPA 71.76 39.16 61.25 53.74 37.80 72.80 55.49 23.86 90.70 56.28
+(a) Training Loss (b) Validation Loss (c) Validation Perplexity
+Figure 6: The training loss, validation loss, and validation perplexity of medium-size (353M) models
+(learning rate 3 × 10
+−4
+) and different attention mechanisms on the FineWeb-Edu 100B dataset.
+Table 12: The evaluation results of medium models (learning rate 3 × 10
+−4
+) with different attention
+mechanisms pretrained using the FineWeb-Edu 100B dataset (0-shot with lm-evaluation-harness).
+The best scores in each column are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = Wino-
+Grande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 56.52 29.27 58.84 44.06 35.00 68.44 51.07 25.35 76.40 49.44
+MQA 55.68 28.24 60.86 44.17 35.20 68.66 52.72 25.14 72.90 49.29
+GQA 54.88 29.61 56.36 43.77 35.20 68.82 52.57 25.41 74.80 49.05
+MLA 59.64 29.78 60.73 45.17 34.20 68.66 52.80 25.34 75.70 50.22
+TPA-KVonly 57.11 30.03 61.25 44.83 34.60 69.04 54.54 23.35 74.60 49.93
+TPA 59.30 31.91 60.98 45.57 34.60 69.48 53.91 24.93 77.20 50.88
+Table 13: The evaluation results of medium models (learning rate 3 × 10
+−4
+) with different attention
+mechanisms pre-trained using the FineWeb-Edu 100B dataset (2-shot with lm-evaluation-harness).
+The best scores in each column are bolded. Abbreviations: HellaSw. = HellaSwag, W.G. = Wino-
+Grande.
+Method ARC-E ARC-C BoolQ HellaSw. OBQA PIQA W.G. MMLU SciQ Avg.
+MHA 64.44 32.85 59.05 44.18 33.20 68.72 50.12 26.01 87.40 49.44
+MQA 64.27 32.94 57.71 44.36 31.80 68.01 51.70 25.99 86.00 49.29
+GQA 61.70 32.17 52.81 43.99 33.80 68.50 53.35 24.44 86.40
+50.80
+MLA 65.95 31.48 50.98 44.99 32.20 68.93 51.93 25.89 88.80 51.24
+TPA-KVonly 65.99 33.70 57.49 44.47 34.20 69.53 53.28 24.23 86.50 49.93
+TPA 66.54 34.47 58.96 45.35 33.00 69.21 53.99 24.51 91.30 53.04
+31

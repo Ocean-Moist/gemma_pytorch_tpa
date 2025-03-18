@@ -1,0 +1,265 @@
+"""Tensor Product Attention implementation for Gemma."""
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+from typing import Optional, Tuple, Mapping
+
+from .. import config as gemma_config
+from .. import model as gemma_model
+
+class GemmaTensorProductAttention(nn.Module):
+    """
+    Gemma Tensor Product Attention (TPA) module.
+    
+    TPA factorizes the attention matrices (Q, K, V) into rank-R tensor products.
+    This significantly reduces KV cache size during inference.
+    """
+
+    def __init__(
+        self,
+        config: gemma_config.GemmaConfig,
+        attn_type: gemma_config.AttentionType,
+    ):
+        super().__init__()
+
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+        self.hidden_size = config.hidden_size
+        self.head_dim = config.head_dim
+
+        # Define TPA rank parameters (can be set in config or use defaults)
+        self.q_rank = getattr(config, "q_rank", 6)  # Default to 6 as in the TPA paper
+        self.k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
+        self.v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
+
+        # TPA projections for A factors (head dimension)
+        self.W_A_q = gemma_model.Linear(config.hidden_size, self.num_heads * self.q_rank, config.quant)
+        self.W_A_k = gemma_model.Linear(config.hidden_size, self.num_kv_heads * self.k_rank, config.quant)
+        self.W_A_v = gemma_model.Linear(config.hidden_size, self.num_kv_heads * self.v_rank, config.quant)
+        
+        # TPA projections for B factors (token dimension)
+        self.W_B_q = gemma_model.Linear(config.hidden_size, self.q_rank * self.head_dim, config.quant)
+        self.W_B_k = gemma_model.Linear(config.hidden_size, self.k_rank * self.head_dim, config.quant)
+        self.W_B_v = gemma_model.Linear(config.hidden_size, self.v_rank * self.head_dim, config.quant)
+        
+        # Output projection
+        self.o_proj = gemma_model.Linear(self.num_heads * self.head_dim, self.hidden_size, config.quant)
+        
+        # Norms for Q and K (if needed)
+        self.query_norm = (
+            gemma_model.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            if config.use_qk_norm
+            else None
+        )
+        self.key_norm = (
+            gemma_model.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            if config.use_qk_norm
+            else None
+        )
+        
+        self.attn_type = attn_type
+        self.sliding_window_size = config.sliding_window_size
+        self.attn_logit_softcapping = config.attn_logit_softcapping
+        
+        # Scaling
+        if config.query_pre_attn_scalar is not None:
+            self.scaling = config.query_pre_attn_scalar**-0.5
+        else:
+            self.scaling = self.head_dim**-0.5
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        kv_write_indices: torch.Tensor,
+        kv_cache: Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        mask: torch.Tensor,
+        local_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass for Tensor Product Attention.
+        
+        TPA computes factorized Q, K, V matrices and uses a modified KV cache
+        structure to store the factorized components.
+        
+        Args:
+            hidden_states: Input tensor of shape [batch_size, seq_len, hidden_size]
+            freqs_cis: Rotary positional embedding tensor
+            kv_write_indices: Indices for writing to KV cache
+            kv_cache: TPA KV cache containing (k_cache_A, k_cache_B, v_cache_A, v_cache_B)
+            mask: Attention mask
+            local_mask: Local window attention mask (if applicable)
+            
+        Returns:
+            Output tensor after TPA attention
+        """
+        hidden_states_shape = hidden_states.shape
+        assert len(hidden_states_shape) == 3
+        
+        batch_size, seq_len, _ = hidden_states_shape
+        
+        # Compute A factors
+        A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
+        A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
+        A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+        
+        # Compute B factors
+        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
+        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, self.head_dim)
+        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, self.head_dim)
+        
+        # Apply RMSNorm if specified
+        if self.query_norm is not None and self.key_norm is not None:
+            # Reshape for applying norm across head dimension
+            B_q_reshaped = B_q.reshape(-1, self.head_dim)
+            B_k_reshaped = B_k.reshape(-1, self.head_dim)
+            
+            B_q_reshaped = self.query_norm(B_q_reshaped)
+            B_k_reshaped = self.key_norm(B_k_reshaped)
+            
+            B_q = B_q_reshaped.reshape(batch_size, seq_len, self.q_rank, self.head_dim)
+            B_k = B_k_reshaped.reshape(batch_size, seq_len, self.k_rank, self.head_dim)
+        
+        # Apply rotary positional embedding to B factors
+        # Apply RoPE to B_q and B_k
+        B_q_rotated = self._apply_rotary_emb_to_factor(B_q, freqs_cis)
+        B_k_rotated = self._apply_rotary_emb_to_factor(B_k, freqs_cis)
+        
+        # Unpack the factorized KV cache
+        k_cache_A, k_cache_B, v_cache_A, v_cache_B = kv_cache
+        
+        # Write new values to KV cache
+        if kv_write_indices is not None:
+            k_cache_A.index_copy_(1, kv_write_indices, A_k)
+            k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated)
+            v_cache_A.index_copy_(1, kv_write_indices, A_v)
+            v_cache_B.index_copy_(1, kv_write_indices, B_v)
+        
+        # Use factorized form for query calculation
+        # Dynamically construct full Q matrix for current sequence
+        # Shape: [batch_size, seq_len, num_heads, head_dim]
+        Q = torch.matmul(
+            A_q.view(batch_size * seq_len, self.num_heads, self.q_rank),
+            B_q_rotated.view(batch_size * seq_len, self.q_rank, self.head_dim)
+        ).view(batch_size, seq_len, self.num_heads, self.head_dim).div(self.q_rank)
+        
+        # For the attention calculation, we'll work with K and V in factorized form
+        # This approach avoids materializing the full K and V matrices
+        # by computing Q·K directly from factors
+        
+        # Prepare for attention calculation
+        # [batch_size, num_heads, seq_len, head_dim]
+        Q = Q.transpose(1, 2)
+        Q = Q * self.scaling
+        
+        # Calculate QK attention scores using factorized approach
+        # This computes (A_q B_q) · (A_k B_k)ᵀ using the distributive property
+        # to avoid materializing the full K matrix
+        
+        # First approach: materialize K for simplicity (can be optimized further)
+        # Here we're using cached K factors for all tokens in current context
+        K_A = k_cache_A[:, :seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len]
+        K_B = k_cache_B[:, :seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len]
+        
+        # Build full K matrix by multiplying factors
+        # [batch_size, ctx_len, num_kv_heads, head_dim]
+        ctx_len = K_A.size(1)
+        K = torch.matmul(
+            K_A.view(batch_size * ctx_len, self.num_kv_heads, self.k_rank),
+            K_B.view(batch_size * ctx_len, self.k_rank, self.head_dim)
+        ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.k_rank)
+        
+        # Expand K if we're using grouped query attention (num_kv_heads < num_heads)
+        if self.num_kv_heads != self.num_heads:
+            K = torch.repeat_interleave(K, self.num_queries_per_kv, dim=2)
+        
+        # [batch_size, num_heads, ctx_len, head_dim]
+        K = K.transpose(1, 2)
+        
+        # Calculate attention scores
+        # [batch_size, num_heads, seq_len, ctx_len]
+        scores = torch.matmul(Q, K.transpose(2, 3))
+        
+        # Apply appropriate masking for local or global attention
+        if (
+            self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
+            and self.sliding_window_size is not None
+            and local_mask is not None
+        ):
+            mask = local_mask
+        
+        # Apply softcapping if specified
+        if self.attn_logit_softcapping is not None:
+            scores = scores / self.attn_logit_softcapping
+            scores = torch.tanh(scores)
+            scores = scores * self.attn_logit_softcapping
+        
+        # Apply attention mask
+        scores = scores + mask
+        
+        # Apply softmax to get attention weights
+        attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)
+        
+        # Compute attention output using factorized V
+        # Get cached V factors
+        V_A = v_cache_A[:, :ctx_len]
+        V_B = v_cache_B[:, :ctx_len]
+        
+        # Build full V matrix by multiplying factors
+        # [batch_size, ctx_len, num_kv_heads, head_dim]
+        V = torch.matmul(
+            V_A.view(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
+            V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
+        ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank)
+        
+        # Expand V if we're using grouped query attention
+        if self.num_kv_heads != self.num_heads:
+            V = torch.repeat_interleave(V, self.num_queries_per_kv, dim=2)
+        
+        # [batch_size, num_heads, ctx_len, head_dim]
+        V = V.transpose(1, 2)
+        
+        # Apply attention weights to values
+        # [batch_size, num_heads, seq_len, head_dim]
+        output = torch.matmul(attn_weights, V)
+        
+        # Reshape output and apply output projection
+        # [batch_size, seq_len, hidden_size]
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        output = self.o_proj(output)
+        
+        return output
+    
+    def _apply_rotary_emb_to_factor(self, factor: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+        """Apply rotary positional embedding to B factor matrices."""
+        # factor shape: [batch_size, seq_len, rank, head_dim]
+        # freqs_cis shape: [seq_len, head_dim//2]
+        
+        batch_size, seq_len, rank, head_dim = factor.shape
+        
+        # Reshape for applying RoPE
+        factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
+        
+        # Apply RoPE in a similar way to the original Gemma implementation
+        factor_reshaped_ = torch.view_as_complex(
+            torch.stack(torch.chunk(factor_reshaped.float(), 2, dim=-1), dim=-1)
+        )
+        
+        # Reshape freqs_cis for broadcasting
+        freqs_cis = freqs_cis.view(1, seq_len, 1, head_dim // 2)
+        freqs_cis = freqs_cis.repeat(batch_size, 1, 1, 1)
+        freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
+        
+        # Apply complex multiplication
+        factor_out = torch.view_as_real(factor_reshaped_ * freqs_cis).type_as(factor)
+        factor_out = torch.cat(torch.chunk(factor_out, 2, dim=-1), dim=-2)
+        
+        # Reshape back to original shape
+        factor_out = factor_out.reshape(batch_size, seq_len, rank, head_dim)
+        
+        return factor_out

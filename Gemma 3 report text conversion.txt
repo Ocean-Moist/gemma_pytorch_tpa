@@ -1,0 +1,851 @@
+2025-03-12
+Gemma 3 Technical Report
+Gemma Team, Google DeepMind
+1
+We introduce Gemma 3, a multimodal addition to the Gemma family of lightweight open models, ranging
+in scale from 1 to 27 billion parameters. This version introduces vision understanding abilities, a wider
+coverage of languages and longer context – at least 128K tokens. We also change the architecture of
+the model to reduce the KV-cache memory that tends to explode with long context. This is achieved by
+increasing the ratio of local to global attention layers, and keeping the span on local attention short.
+The Gemma 3 models are trained with distillation and achieve superior performance to Gemma 2
+for both pre-trained and instruction finetuned versions. In particular, our novel post-training recipe
+significantly improves the math, chat, instruction-following and multilingual abilities, making Gemma3-
+4B-IT competitive with Gemma2-27B-IT and Gemma3-27B-IT comparable to Gemini-1.5-Pro across
+benchmarks. We release all our models to the community.
+1. Introduction
+We present the newest version of Gemma open
+language models (Gemma Team, 2024a), co-
+designed with the family of Gemini frontier mod-
+els (Gemini Team, 2023). This new version
+comes in sizes comparable to Gemma 2 (Gemma
+Team, 2024b), with the addition of a 1B model.
+These models are designed to run on standard
+consumer-grade hardware such as phones, lap-
+tops, and high-end GPUs. This version comes
+with several new abilities to the Gemma family;
+namely, multimodality, long context, and mul-
+tilinguality, while preserving or surpassing the
+performance of prior versions.
+In terms of multimodality, most Gemma 3 mod-
+els are compatible with a tailored version of the
+SigLIP vision encoder (Zhai et al., 2023). The
+language models treat images as a sequence of
+soft tokens encoded by SigLIP. We reduce the in-
+ference cost of image processing by condensing
+the vision embeddings into a fixed size of 256
+vectors. The encoder works at a fixed resolution
+and we take inspiration from LLaVA (Liu et al.,
+2024) to enable flexible resolutions with a Pan
+and Scan (P&S) method.
+The second main architectural improvement is
+an increase in context size to 128K tokens, with-
+out reducing performance. A challenge with long
+context is the memory explosion of the KV cache
+during inference. To reduce this issue, we inter-
+leave multiple local layers between each global
+layer, and assign a smaller span of only 1024
+tokens to the local layers. Therefore, only the
+global layers attend to long context, and we have
+1 global for every 5 local layers.
+The pre-training optimization recipe is similar
+to Gemma 2, with some modifications in the ar-
+chitecture design. We use the same tokenizer as
+Gemini 2.0, and we also revisit our data mixture
+to improve the multilingual capabilities of the
+models, while introducing image understanding.
+All Gemma 3 models are trained with knowledge
+distillation (Hinton et al., 2015).
+In post-training, we focus our efforts on im-
+proving mathematics, reasoning, and chat abili-
+ties, as well as integrating the new capabilities of
+Gemma 3, long-context, and image inputs. We
+use a novel post-training approach that brings
+gains across all capabilities, including math, cod-
+ing, chat, instruction following, and multilingual.
+The resulting Gemma 3 instruction-tuned models
+are both powerful and versatile, outperforming
+their predecessors by a wide margin.
+In the following sections, we provide a brief
+overview of our models, including the architec-
+ture and pre- and post-training recipes. We also
+provide detailed evaluations across a wide vari-
+ety of quantitative and qualitative benchmarks.
+We discuss our approach to safe and responsible
+deployment and outline the broader implications
+of Gemma 3, its limitations, and advantages.
+1
+See Contributions and Acknowledgments section for full author list. Please send correspondence to gemma-3-report@google.com.
+© 2025 Google DeepMind. All rights reserved
+
+Gemma 3 Technical Report
+Figure 1 | Example of visual interaction with
+Gemma 3 27B IT model.
+2. Model Architecture
+Gemma 3 models follow the same general
+decoder-only transformer architecture as previ-
+ous iterations (Vaswani et al., 2017), with most
+architecture elements similar to the first two
+Gemma versions. We use a Grouped-Query Atten-
+tion (GQA) (Ainslie et al., 2023) with post-norm
+and pre-norm with RMSNorm (Zhang and Sen-
+nrich, 2019). Inspired by Dehghani et al. (2023),
+Wortsman et al. (2023) and Chameleon Team
+(2024), we replace the soft-capping of Gemma 2
+with QK-norm. In this section, we focus on some
+key differences from previous versions below.
+5:1 interleaving of local/global layers. We
+alternate between a local sliding window self-
+attention (Beltagy et al., 2020) and global self-
+Model
+Vision
+Encoder
+Embedding
+Parameters
+Non-embedding
+Parameters
+1B 0 302M 698M
+4B 417M 675M 3,209M
+12B 417M 1,012M 10,759M
+27B 417M 1,416M 25,600M
+Table 1 | Parameter counts for the Gemma 3 mod-
+els. Our vocabulary has 256k entries.
+attention (Luong et al., 2015), with a pattern of
+5 local layers for every global layer, starting with
+a local layer as the first layer of the model.
+Long context. Gemma 3 models support context
+length of 128K tokens, with the exception of the
+1B model that has 32K. We increase RoPE base
+frequency from 10k to 1M on global self-attention
+layers, and keep the frequency of the local lay-
+ers at 10k. We follow a process similar to the
+positional interpolation of Chen et al. (2023) to
+extend the span of the global self-attention layers.
+2.1. Vision modality
+Vision encoder. We use a 400M variant of the
+SigLIP encoder (Zhai et al., 2023), a Vision Trans-
+former (Dosovitskiy, 2020) trained with a varia-
+tion of the CLIP loss (Radford et al., 2021). The
+Gemma vision encoder takes as input square im-
+ages resized to 896 x 896, and is finetuned on
+data from visual assistant tasks. For simplicity, we
+share the vision encoder across our 4B, 12B, and
+27B models, keeping it frozen during training.
+Pan & Scan (P&S). The Gemma vision encoder
+operates at a fixed resolution of 896 × 896. This
+results in artifacts when processing non-square
+aspect ratios and high-resolution images, leading
+to unreadable text, or small object disappeared.
+We address this issue with an adaptive windowing
+algorithm during inference. This algorithm seg-
+ments images into non-overlapping crops of equal
+size, covering the whole image, and resize them
+to 896×896 pixels to pass them to the encoder.
+This windowing is applied only when necessary,
+and control for the maximum number of crops.
+It is an inference-time only optimization and can
+be disabled for faster inference.
+2
+
+Gemma 3 Technical Report
+Shards
+Model Type #Chips Data Seq. Replica
+1B TPUv5e 512 16 16 2
+4B TPUv5e 2048 16 16 8
+12B TPUv4 6144 16 16 24
+27B TPUv5p 6144 24 8 32
+Table 2 | Training infrastructure with sharding by
+data, sequence (Seq.), and replica.
+2.2. Pre-training
+We follow a similar recipe as in Gemma 2 for
+pre-training with knowledge distillation.
+Training data. We pre-train our models on a
+slightly larger token budget than Gemma 2, i.e.,
+we train on 14T tokens for Gemma 3 27B, 12T
+for the 12B version, 4T for the 4B, and 2T to-
+kens for the 1B. The increase in tokens accounts
+for the mix of images and text used during pre-
+training. We also increase the amount of multi-
+lingual data to improve language coverage. We
+add both monolingual and parallel data, and we
+handle the imbalance in language representation
+using a strategy inspired by Chung et al. (2023).
+Tokenizer. We use the same tokenizer as Gem-
+ini 2.0: a SentencePiece tokenizer with split dig-
+its, preserved whitespace, and byte-level encod-
+ings (Kudo and Richardson, 2018). The resulting
+vocabulary has 262k entries. This tokenizer is
+more balanced for non-English languages.
+Filtering. We use filtering techniques that reduce
+the risk of unwanted or unsafe utterances and
+remove certain personal information and other
+sensitive data. We decontaminate evaluation sets
+from our pre-training data mixture, and reduce
+the risk of recitation by minimizing the prolifer-
+ation of sensitive outputs. We also apply a qual-
+ity reweighing step inspired by Sachdeva et al.
+(2024) to reduce occurrences of low quality data.
+Distillation. We sample 256 logits per token,
+weighted by teacher probabilities. The student
+learns the teacher’s distribution within these sam-
+ples via cross-entropy loss. The teacher’s target
+distribution is set to zero probability for non-
+sampled logits, and renormalized.
+Raw (GB) Quantized (GB)
+Model bf16 Int4 Int4
+blocks=32
+SFP8
+1B 2.0 0.5 0.7 1.0
++KV 2.9 1.4 1.6 1.9
+4B 8.0 2.6 2.9 4.4
++KV 12.7 7.3 7.6 9.1
+12B 24.0 6.6 7.1 12.4
++KV 38.9 21.5 22.0 27.3
+27B 54.0 14.1 15.3 27.4
++KV 72.7 32.8 34.0 46.1
+Table 3 | Memory footprints (in GB) comparison
+between raw (bfloat16) and quantized check-
+points for weights and KV caching (+KV) at
+32,768 context size, quantized in 8 bits.
+2.3. Quantization Aware Training
+Along with the raw checkpoints, we also provide
+quantized versions of our models in different stan-
+dard formats. These versions are obtained by fine-
+tuning each model for a small number of steps,
+typically 5,000, using Quantization Aware Train-
+ing (QAT) (Jacob et al., 2018). We use prob-
+abilities from the non-quantized checkpoint as
+targets, and adapt the data to match the pre-
+training and post-training distributions. Based
+on the most popular open source quantization
+inference engines (e.g. llama.cpp), we focus on
+three weight representations: per-channel int4,
+per-block int4, and switched fp8. In Table 3, we
+report the memory filled by raw and quantized
+models for each weight representation with and
+without a KV-cache for a sequence of 32k tokens.
+2.4. Compute Infrastructure
+We train our models with TPUv4, TPUv5e, and
+TPUv5p as outlined in Table 2. Each model con-
+figuration is optimized to minimize training step
+time. For the vision encoder, we pre-compute
+the embeddings for each image and directly train
+with the embeddings, adding no cost to the train-
+ing of the language models.
+The optimizer state is sharded using an im-
+plementation of ZeRO-3 (Ren et al., 2021). For
+multi-pod training, we perform a data replica re-
+3
+
+Gemma 3 Technical Report
+Context Formatting
+User turn <start_of_turn>user
+Model turn <start_of_turn>model
+End of turn <end_of_turn>
+Example of discussion:
+User: Who are you?
+Model: My name is Gemma!
+User: What is 2+2?
+Model: 2+2=4.
+Model input:
+[BOS]<start_of_turn>user
+Who are you?<end_of_turn>
+<start_of_turn>model
+My name is Gemma!<end_of_turn>
+<start_of_turn>user
+What is 2+2?<end_of_turn>
+<start_of_turn>model
+Model output:
+2+2=4.<end_of_turn>
+Table 4 | Formatting for Gemma IT models. Explic-
+itly add the [BOS] token after tokenization, or
+use the add_bos=True option in the tokenizer.
+Do not tokenize the text "[BOS]".
+duction over the data center network, using the
+Pathways approach of Barham et al. (2022). We
+use the ‘single controller’ programming paradigm
+of Jax (Roberts et al., 2023) and Pathways
+(Barham et al., 2022), along with the GSPMD
+partitioner (Xu et al., 2021) and the MegaScale
+XLA compiler (XLA, 2019).
+3. Instruction-Tuning
+Pre-trained models are turned into instruction-
+tuned models with an improved post-training ap-
+proach compared to our prior recipe (see Table 6).
+Techniques. Our post-training approach relies
+on an improved version of knowledge distilla-
+tion (Agarwal et al., 2024; Anil et al., 2018; Hin-
+ton et al., 2015) from a large IT teacher, along
+with a RL finetuning phase based on improved ver-
+sions of BOND (Sessa et al., 2024), WARM (Ramé
+et al., 2024b), and WARP (Ramé et al., 2024a).
+Reinforcement learning objectives. We use
+a variety of reward functions to improve help-
+fulness, math, coding, reasoning, instruction-
+following, and multilingual abilities, while mini-
+mizing model harmfulness. This includes learn-
+ing from weight averaged reward models (Ramé
+et al., 2024b) trained with human feedback data,
+code execution feedback (Gehring et al., 2024),
+and ground-truth rewards for solving math prob-
+lems (DeepSeek-AI, 2025; Lambert et al., 2024).
+Data filtering. We carefully optimize the data
+used in post-training to maximize model perfor-
+mance. We filter examples that show certain per-
+sonal information, unsafe or toxic model outputs,
+mistaken self-identification data, and duplicated
+examples. Including subsets of data that encour-
+age better in-context attribution, hedging, and
+refusals to minimize hallucinations also improves
+performance on factuality metrics, without de-
+grading model performance on other metrics.
+[BOS] token. For both PT and IT models, text
+starts with a [BOS] token, that needs to be added
+explicitly since the text “[BOS]” does not map to
+the [BOS] token. For instance, Flax has an option,
+add_bos=True, to add this token automatically
+when tokenizing. An example of the formatting
+for an IT model is shown in Table 4,
+PT versus IT Formatting. All models share the
+same tokenizer, with some control tokens dedi-
+cated to IT formatting. A key difference is that PT
+models output a <eos> token at the end of gener-
+ation, while IT models output a <end_of_turn>
+at the end of the generation, as shown for IT in
+Table 4. Fine-tuning either model type thus also
+requires to add their respective end token.
+4. Evaluation of final models
+In this section, we evaluate the IT models over
+a series of automated benchmarks and human
+evaluations across a variety of domains, as well
+as static benchmarks such as MMLU.
+4.1. LMSYS Chatbot Arena
+In this section, we report the performance of our
+IT 27B model on LMSys Chatbot Arena (Chiang
+et al., 2024) in blind side-by-side evaluations by
+human raters against other state-of-the-art mod-
+els. We report Elo scores in Table 5. Gemma 3 27B
+4
+
+Gemma 3 Technical Report
+Rank Model Elo 95% CI Open Type #params/#activated
+1 Grok-3-Preview-02-24 1412 +8/-10 - - -
+1 GPT-4.5-Preview 1411 +11/-11 - - -
+3 Gemini-2.0-Flash-Thinking-Exp-01-21 1384 +6/-5 - - -
+3 Gemini-2.0-Pro-Exp-02-05 1380 +5/-6 - - -
+3 ChatGPT-4o-latest (2025-01-29) 1377 +5/-4 - - -
+6 DeepSeek-R1 1363 +8/-6 yes MoE 671B/37B
+6 Gemini-2.0-Flash-001 1357 +6/-5 - - -
+8 o1-2024-12-17 1352 +4/-6 - - -
+9 Gemma-3-27B-IT 1338 +8/-9 yes Dense 27B
+9 Qwen2.5-Max 1336 +7/-5 - - -
+9 o1-preview 1335 +4/-3 - - -
+9 o3-mini-high 1329 +8/-6 - - -
+13 DeepSeek-V3 1318 +8/-6 yes MoE 671B/37B
+14 GLM-4-Plus-0111 1311 +8/-8 - - -
+14 Qwen-Plus-0125 1310 +7/-5 - - -
+14 Claude 3.7 Sonnet 1309 +9/-11 - - -
+14 Gemini-2.0-Flash-Lite 1308 +5/-5 - - -
+18 Step-2-16K-Exp 1305 +7/-6 - - -
+18 o3-mini 1304 +5/-4 - - -
+18 o1-mini 1304 +4/-3 - - -
+18 Gemini-1.5-Pro-002 1302 +3/-3 - - -
+...
+28 Meta-Llama-3.1-405B-Instruct-bf16 1269 +4/-3 yes Dense 405B
+...
+38 Llama-3.3-70B-Instruct 1257 +5/-3 yes Dense 70B
+...
+39 Qwen2.5-72B-Instruct 1257 +3/-3 yes Dense 72B
+...
+59 Gemma-2-27B-it 1220 +3/-2 yes Dense 27B
+Table 5 | Evaluation of Gemma 3 27B IT model in the Chatbot Arena (Chiang et al., 2024). All the
+models are evaluated against each other through blind side-by-side evaluations by human raters. Each
+model is attributed a score, based on the Elo rating system. Gemma-3-27B-IT numbers are preliminary
+results received on March 8, 2025.
+IT (1338) is among the top 10 best models, with a
+score above other non-thinking open models, such
+as DeepSeek-V3 (1318), LLaMA 3 405B (1257),
+and Qwen2.5-70B (1257), which are much larger
+models. Finally, the Elo of Gemma 3 is signifi-
+cantly higher than Gemma 2, at 1220. Note that
+Elo scores do not take into account visual abilities,
+which none of the aforementioned models have.
+4.2. Standard benchmarks
+In Table 6, we show the performance of our final
+models across a variety of benchmarks compared
+to our previous model iteration, and Gemini 1.5.
+We do not compare directly with external mod-
+els that often report their own evaluation set-
+tings, since running them in our setting does not
+guarantee a fair comparison. We encourage the
+reader to follow third-party static leaderboards
+for a fairer comparisons across models. We in-
+clude additional evaluations of our models on
+other benchmarks in the appendix.
+5. Ablations
+In this section, we focus on the impact of our
+architecture changes, as well as some of the vision
+abilities new to this model.
+5.1. Pre-training ability probing
+We use several standard benchmarks as probes
+during pre-training to ensure our models capture
+general abilities, and in Figure 2, we compare the
+quality of pre-trained models from Gemma 2 and
+3 across these general abilities, namely, science,
+5
+
+Gemma 3 Technical Report
+Gemini 1.5 Gemini 2.0 Gemma 2 Gemma 3
+Flash Pro Flash Pro 2B 9B 27B 1B 4B 12B 27B
+MMLU-Pro 67.3 75.8 77.6 79.1 15.6 46.8 56.9 14.7 43.6 60.6 67.5
+LiveCodeBench 30.7 34.2 34.5 36.0 1.2 10.8 20.4 1.9 12.6 24.6 29.7
+Bird-SQL (dev) 45.6 54.4 58.7 59.3 12.2 33.8 46.7 6.4 36.3 47.9 54.4
+GPQA Diamond 51.0 59.1 60.1 64.7 24.7 28.8 34.3 19.2 30.8 40.9 42.4
+SimpleQA 8.6 24.9 29.9 44.3 2.8 5.3 9.2 2.2 4.0 6.3 10.0
+FACTS Grounding 82.9 80.0 84.6 82.8 43.8 62.0 62.4 36.4 70.1 75.8 74.9
+Global MMLU-Lite 73.7 80.8 83.4 86.5 41.9 64.8 68.6 34.2 54.5 69.5 75.1
+MATH 77.9 86.5 90.9 91.8 27.2 49.4 55.6 48.0 75.6 83.8 89.0
+HiddenMath 47.2 52.0 63.5 65.2 1.8 10.4 14.8 15.8 43.0 54.5 60.3
+MMMU (val) 62.3 65.9 71.7 72.7 - - - - 48.8 59.6 64.9
+Table 6 | Performance of instruction fine-tuned (IT) models compared to Gemini 1.5, Gemini 2.0, and
+Gemma 2 on zero-shot benchmarks across different abilities.
+Figure 2 | Summary of the performance of different pre-trained models from Gemma 2 and 3 across
+general abilities. This plots are meant to give an simplified summary and details are in the appendix.
+code, factuality, multilinguality, reasoning, and
+vision. The details of the performance across the
+different public benchmarks used in these plots
+are summarized in the appendix. Overall, we see
+that the new versions improve in most categories,
+despite the addition of vision. We particularly
+focus on multilinguality in this version, and this
+directly impacts the quality of our models. How-
+ever, despite the use of decontamination tech-
+niques, there is always a risk of contamination
+of these probes (Mirzadeh et al., 2024), making
+more definitive conclusions harder to assess.
+5.2. Local:Global attention layers
+We measure the impact of changes to local and
+global self-attention layers on performance and
+memory consumption during inference.
+Local:Global ratio. In Fig. 3, we compare differ-
+1:1 3:1 5:1 7:1
+Local:Global
+0.1
+0.0
+0.1
+Perplexity
+
+2B
+9B
+Figure 3 | Impact of Local:Global ratio on the
+perplexity on a validation set. The impact is mini-
+mal, even with 7-to-1 local to global. This ablation
+is run with text-only models.
+ent ratios of local to global attention layers. 1:1
+is used in Gemma 2 models, and 5:1 is used in
+Gemma 3. We observe minimal impact on per-
+plexity when changing this ratio.
+Sliding window size. In Fig. 4, we compare
+different sliding window sizes for the local at-
+6
+
+Gemma 3 Technical Report
+tention layers in different global:local ratio con-
+figurations. The sliding window can be reduced
+significantly without impacting perplexity.
+512 1024 2048 4096
+Sliding Window
+0.02
+0.01
+0.00
+0.01
+Perplexity
+2B L:G=1:1
+2B L:G=3:1
+Figure 4 | Impact of Sliding Window size on per-
+plexity measured on a validation set. We consider
+2 2B models, with 1:1 and 1:3 local to global layer
+ratios. This ablation is run with text-only models.
+Impact on KV cache memory. In Fig. 5, we show
+the balance between the memory used by the
+model and the KV cache during inference with a
+context of 32k tokens. The “global only” configu-
+ration is the standard configuration used across
+most dense models. The “1:1, sw=4096” is used
+in Gemma 2. We observe that the “global only”
+configuration results in a memory overhead of
+60%, while this is reduced to less than 15% with
+1:3 and sliding window of 1024 (“sw=1024”).
+In Fig. 6, we compute the memory used by the
+KV cache as a function of the context length with
+either our 2B architecture (L:G=5:1, sw=1024)
+versus a “global only” 2B model.
+global only 1:1, sw=4096 1:1 sw=1024 1:3 sw=4096 1:3 sw=1024
+0
+1000
+2000
+3000
+4000
+5000
+Inference memory (MB)
+
+model
+kv cache
+Figure 5 | Model versus KV cache memory dur-
+ing inference with a pre-fill KV cache of size 32k.
+We consider a 2B model with different local to
+global ratios and sliding window sizes (sw). We
+compare to global only, which is the standard
+used in Gemma 1 and Llama. This ablation is run
+with a text-only model.
+5.3. Enabling long context
+Instead of training with 128K sequences from
+scratch, we pre-train our models with 32K se-
+1K 4K 8K 16K 32K 64K 128K
+Context length
+0
+2000
+4000
+6000
+KV Cache memory (MB)
+2B L:G=5:1, sw=1024
+2B global only
+Figure 6 | KV cache memory versus context
+length. We show the memory usage of the KV
+cache for our architecture (L:G=5:1, sw=1024)
+and a transformer with global attention only – as
+used in LLaMa or Gemma 1.
+quences and then scale the 4B, 12B, and 27B mod-
+els up to 128K tokens at the end of pre-training
+while rescaling RoPE (Chen et al., 2023). We
+find a scaling factor of 8 to work well in practice.
+Note that compared to Gemma 2, we have also
+increased the RoPE base frequency of global self-
+attention layers from 10k to 1M, while keeping
+10k for the local self-attention layers. In Figure 7,
+we show the impact on perplexity for different
+context lengths. Our models generalize to 128K,
+but rapidly degrade as we continue to scale.
+Figure 7 | Long context performance of pre-
+trained models before and after RoPE rescaling.
+5.4. Small versus large teacher
+A common finding is that, to train a small model,
+it is preferable to distill from a smaller teacher.
+7
+
+Gemma 3 Technical Report
+10
+1
+10
+2
+Total training tokens (B)
+0.006
+0.004
+0.002
+0.000
+0.002
+Perplexity
+Figure 8 | Small versus large teacher. Relative
+difference of perplexity when using a small and
+large teacher as a function of the token size of
+training. Smaller numbers means distilling from
+a larger teacher is better.
+We suspect this is because these studies are often
+performed in settings where the regularization ef-
+fect of using a worse teacher surpasses the benefit
+of using a better teacher. We train a student with
+2 teachers of different sizes, one large and one
+small, for different training horizons. In Fig. 8,
+we observe that for short training horizons, the
+smaller teacher is better, but the trend is reversed
+for longer training.
+5.5. Vision encoder
+Resolution DocVQA InfoVQA TextVQA
+256 31.9 23.1 44.1
+448 45.4 31.6 53.5
+896 59.8 33.7 58.0
+Table 7 | Impact of image encoder input reso-
+lution. We measure performance using a short
+schedule 2B Gemma model on a few evaluation
+benchmarks to observe the effect of input image
+resolution on vision encoder pre-training.
+Impact of image resolution. We use a vision
+encoder based on SigLIP (Zhai et al., 2023). The
+vision encoder is frozen, and only the language
+model is trained. Each image in this multimodal
+data is represented by 256 image tokens from
+the respective vision encoder. The higher resolu-
+tion encoders thus use average pooling to reduce
+their output to 256 tokens. For instance, the 896
+resolution encoder has a 4x4 average pooling on
+its output. As shown in Table 7, higher resolution
+encoders perform than smaller ones.
+DocVQA InfoVQA TextVQA
+4B 72.8 44.1 58.9
+4B w/ P&S 81.0 57.0 60.8
+Δ (+8.2) (+12.9) (+1.9)
+27B 85.6 59.4 68.6
+27B w/ P&S 90.4 76.4 70.2
+Δ (+4.8) (+17.0) (+1.6)
+Table 8 | Impact of P&S. 4-shot evaluation re-
+sults on the valid set, with and without P&S on a
+pre-trained checkpoint. Boosts are on tasks asso-
+ciated with images with varying aspect ratios, or
+involving reading text on images.
+Pan & Scan. P&S enables capturing images at
+close to their native aspect ratio and image reso-
+lution. In Table 8, we compare our 27B IT model
+with and without P&S. As expected, the ability
+to treat images with close to native resolution
+greatly helps with tasks that require some form
+of reading text on images, which is particularly
+important for visual language models.
+6. Memorization and Privacy
+Large language models may produce near-copies
+of some text used in training (Biderman et al.,
+2023; Carlini et al., 2021, 2022; Ippolito et al.,
+2022; Nasr et al., 2023). Several prior reports
+have released audits that quantify this risk by
+measuring the memorization rate (Anil et al.,
+2023; Chowdhery et al., 2022; Gemini Team,
+2023, 2024; Gemma Team, 2024a,b; LLaMa
+Team, 2024). This “memorization rate”
+1
+is de-
+fined as the ratio of generations from the model
+that match its training data compared to all model
+generations using the following setup. We fol-
+low the methodology described in Gemma Team
+1
+"We do not state or imply [here] that a model "contains"
+its training data in the sense that there is a copy of that data
+in the model. Rather, a model memorizes attributes of its
+training data such that in certain cases it is statistically able
+to generate such training data when following rules and
+using information about features of its training data that it
+does contain."
+8
+
+Gemma 3 Technical Report
+Gemma 3
+1B
+Gemma 3
+4B
+Gemma 3
+12B
+Gemma 3
+27B
+Gemma 2
+2B
+Gemma 2
+9B
+Gemma 2
+27B
+Gemini 1.5
+Flash
+Gemma
+2B
+Gemma
+7B
+PaLM
+Small
+Model
+0.0001
+0.001
+0.01
+0.1
+1
+10
+% Memorized
+Total Memorization Rate
+Memorization Type
+Exact Approximate
+Figure 9 | Total memorization rates for both ex-
+act and approximate memorization. Gemma 3
+models memorize significantly less than all prior
+models. *No results for approximate memoriza-
+tion on these models.
+(2024b) to measure it. Specifically, we subsam-
+ple a large portion of training data distributed
+uniformly across different corpora and test for
+discoverable extraction (Nasr et al., 2023) of this
+content using a prefix of length 50 and a suffix of
+length 50. We denote text as either “exactly mem-
+orized” if all tokens in the continuation match
+the source suffix or “approximately memorized”
+if they match up to an edit distance of 10%.
+Figure 9 compares the memorization rates
+across Gemma and Gemini models; these models
+are ordered in reverse chronological order, with
+the newest Gemma 3 models on the left. We find
+that Gemma 3 models memorize long-form text
+at a much lower rate than prior models (note the
+log y-axis). We observe only a marginal differ-
+ence in the memorization rates between the 4B,
+12B, and 27B models, with 1B memorizing less
+than these larger models. Further, we find that a
+larger proportion of text is characterized as ap-
+proximately memorized, with a relative increase
+in approximate memorization compared to exact
+memorization of roughly 24x on average.
+We also study the rate at which the generations
+may contain personal information. To identify po-
+tentially personal information, we use the Google
+Cloud Sensitive Data Protection (SDP) service.
+2
+SDP uses broad detection rules to identify text
+that may contain personal information. SDP is
+2
+https://cloud.google.com/sensitive-data-protection
+designed to have high recall and does not con-
+sider the context in which the information may
+appear, which leads to many false positives. Thus,
+we are likely overestimating the true amount of
+potentially personal information contained in the
+outputs classified as memorized. SDP also pro-
+vides broad severity levels: low, medium, and
+high. We classify text as personal if SDP clas-
+sifies it as personal information at any severity
+level. We observed no personal information in
+the outputs characterized as memorization for all
+Gemma 3 models. This indicates a low rate of
+personal data, below our detection thresholds, in
+outputs classified as memorization.
+7. Responsibility, Safety, Security
+Responsibility, safety, and security are of utmost
+importance in the development of Gemma mod-
+els. To reduce risks to Gemma 3 users, we have
+continued to integrate enhanced internal safety
+processes that span the development workflow,
+in line with recent Google AI models (Gemini
+Team, 2024). This focuses on safety mitigation at
+training time, and robust and transparent model
+evaluations for the new image-to-text capabilities
+we have introduced.
+7.1. Governance & Assessment
+Our approach to assessing the benefits and risks
+of Gemma is reflective of that outlined for Gemma
+1 (Gemma Team, 2024a), taking into account the
+changes in supported modalities. We continue to
+believe that openness in AI can spread the bene-
+fits of these technologies across society, but must
+be evaluated against the risk of malicious uses
+that can cause harm on both individual and in-
+stitutional levels (Weidinger et al., 2021). Since
+the inaugural Gemma launch, we have seen these
+models drive a number of socially beneficial ap-
+plications, such as our own ShieldGemma 2, a 4B
+image safety classifier built with Gemma 3, which
+provides a ready-made solution for image safety,
+outputting safety labels across dangerous content,
+sexually explicit, and violence categories.
+Releasing Gemma 3 models required specific
+attention to changes in model capabilities and
+9
+
+Gemma 3 Technical Report
+close monitoring of the evolving risks of existing
+multimodal LLMs (Lin et al., 2024), as well as an
+understanding of the ways in which models are
+being used in the wild. Although we are yet to
+receive any reports of malicious use for Gemma,
+we remain committed to investigating any such
+reporting, and work with the academic and de-
+veloper communities, as well as conduct our own
+monitoring, to flag such cases.
+Despite advancements in capabilities, we be-
+lieve that, given the number of larger powerful
+open models available, this release will have a
+negligible effect on the overall risk landscape.
+7.2.
+Safety policies and train-time mitigations
+A key pillar of Gemma’s approach to safety is to
+align fine-tuned models with Google’s safety poli-
+cies, in line with Gemini models (Gemini Team,
+2023). They are designed to help prevent our
+models from generating harmful content, i.e.,
+• Child sexual abuse and exploitation
+• Revealing personally identifiable information
+that can lead to harm (e.g., Social Security
+numbers)
+• Hate speech and harassment
+•
+Dangerous or malicious content (including
+promoting self-harm or instructing in harm-
+ful activities)
+• Sexually explicit content
+• Medical advice that runs contrary to scientific
+or medical consensus
+We undertook considerable safety filtering of our
+pre-training data to reduce the likelihood of our
+pre-trained and fine-tuned checkpoints producing
+harmful content. For fine-tuned models, we also
+use both SFT and RLHF to steer the model away
+from undesirable behavior.
+7.3. Assurance Evaluations
+We also run our IT models through a set of base-
+line assurance evaluations to understand the po-
+tential harms that our models can cause. As we
+champion open models, we also recognize that
+the irreversible nature of weight releases requires
+rigorous risk assessment. Our internal safety pro-
+cesses are designed accordingly, and for previ-
+ous Gemma models we have also undertaken
+evaluations of capabilities relevant to extreme
+risks (Phuong et al., 2024; Shevlane et al., 2023).
+As we continue to develop and share open mod-
+els, we will follow the heuristic that thoroughly
+evaluating a more capable model often provides
+sufficient assurance for less capable ones. As such,
+we prioritised a streamlined set of evaluations for
+Gemma 3, reserving in-depth dangerous capabil-
+ity assessments for cases where a specific model
+may present a potentially heightened risk (as de-
+scribed below on CBRN evaluations). We balance
+development speed with targeted safety testing,
+ensuring our evaluations are well-focused and
+efficient, while upholding the commitments laid
+out in our Frontier Safety Framework.
+Baseline Evaluations
+Baseline assurance captures the model violation
+rate for safety policies, using a large number of
+synthetic adversarial user queries, and human
+raters to label the answers as policy violating or
+not. Overall, Gemma 3 violation rate is signifi-
+cantly low overall on these safety policies.
+Chemical, Biological, Radiological and Nuclear
+(CBRN) knowledge
+Owing to enhanced performance on STEM-
+related tasks, we evaluated knowledge relevant
+to biological, radiological, and nuclear risks using
+an internal dataset of closed-ended, knowledge-
+based multiple choice questions. For evaluations
+of chemical knowledge, we employed a closed-
+ended knowledge-based approach on chemical
+hazards developed by Macknight et al. Our eval-
+uation suggests that the knowledge of Gemma 3
+models in these domains is low.
+7.4.
+Our approach to responsible open models
+Designing safe, secure, and responsible applica-
+tions requires a system-level approach, working
+to mitigate risks associated with each specific use
+case and environment. We will continue to adopt
+assessments and safety mitigations proportion-
+ate to the potential risks from our models, and
+10
+
+Gemma 3 Technical Report
+will only share these with the community when
+we are confident that the benefits significantly
+outweigh the foreseeable risks.
+8. Discussion and Conclusion
+In this work, we have presented Gemma 3, the
+latest addition to the Gemma family of open lan-
+guage models for text, image, and code. In this
+version, we focus on adding image understanding
+and long context while improving multilinguality
+and STEM-related abilities. Our model sizes and
+architectures are designed to be compatible with
+standard hardware, and most of our architecture
+improvements are tailored to fit this hardware
+while maintaining performance.
