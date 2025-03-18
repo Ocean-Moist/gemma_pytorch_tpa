@@ -59,7 +59,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         max_seq_len = config.max_position_embeddings
         head_dim = config.head_dim
         vocab_size = config.vocab_size
-        
+
         # Initialize tokenizer if available
         if hasattr(config, 'tokenizer'):
             self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
@@ -740,7 +740,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 if is_first_token:
                     token_id = next_token[0].item()
                     # If first generated token is suspicious (like '<', '!', etc)
-                    if token_id >= self.tokenizer.vocab_size - 100 or token_id < 10:
+                    if token_id >= self.tokenizer.n_words - 100 or token_id < 10:
                         print(f"WARNING: First generated token {token_id} looks suspicious, using a better token")
                         # Use a more common token (e.g., space or newline) instead
                         safer_tokens = [13, 28, 29]  # Common tokens like space, newline
