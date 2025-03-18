@@ -220,8 +220,29 @@ class GemmaTensorProductAttention(nn.Module):
             scores = torch.tanh(scores)
             scores = scores * self.attn_logit_softcapping
         
-        # Apply attention mask
-        scores = scores + mask
+        # Apply attention mask with proper broadcasting
+        # Check and handle dimension mismatch between scores and mask
+        if scores.shape[-1] != mask.shape[-1]:
+            # Log the mismatch for debugging
+            print(f"Warning: Shape mismatch between scores {scores.shape} and mask {mask.shape}")
+            
+            # Adapt mask to match the scores shape
+            if mask.shape[-1] > scores.shape[-1]:
+                # Take the relevant slice of mask if it's too large
+                mask_applicable = mask[:, :, :, :scores.shape[-1]]
+            else:
+                # Expand mask if it's too small (though this should be rare)
+                padding = torch.full(
+                    (mask.shape[0], mask.shape[1], mask.shape[2], scores.shape[-1] - mask.shape[-1]),
+                    torch.finfo(scores.dtype).min,
+                    device=mask.device,
+                    dtype=mask.dtype
+                )
+                mask_applicable = torch.cat([mask, padding], dim=-1)
+            
+            scores = scores + mask_applicable
+        else:
+            scores = scores + mask
         
         # Apply softmax to get attention weights
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)

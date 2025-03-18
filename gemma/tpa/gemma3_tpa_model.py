@@ -173,16 +173,31 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             
             # Create sliding window local mask if needed 
             if self.config.sliding_window_size is not None:
-                local_mask_tensor = torch.logical_and(
-                    attn_mask,
-                    torch.triu(torch.ones((1, 1, max_len, max_len), dtype=torch.bool, device=input_token_ids.device), 
-                             diagonal=-(self.config.sliding_window_size-1))
-                )
+                # Create proper sliding window mask
+                # Ensure the sliding window is created with the correct size and properly aligned
+                window_size = self.config.sliding_window_size
+                
+                # Create the base causal mask
+                local_mask_bool = torch.ones((batch_size, 1, max_len, max_len), dtype=torch.bool, device=input_token_ids.device)
+                local_mask_bool = torch.tril(local_mask_bool)  # Lower triangular for causal attention
+                
+                # Create the sliding window upper bound mask
+                # Allow attention to positions within window_size steps before current position
+                if window_size > 0:
+                    window_mask = torch.triu(torch.ones((1, 1, max_len, max_len), dtype=torch.bool, device=input_token_ids.device), 
+                                          diagonal=-(window_size-1))
+                    # Apply both masks - this limits attention to only the local window in the causal region
+                    local_mask_bool = torch.logical_and(local_mask_bool, window_mask)
+                
+                # Convert bool mask to attention values (0 for attend, min_value for don't attend)
                 local_mask_tensor = torch.where(
-                    local_mask_tensor, 0, torch.tensor(min_dtype, dtype=torch.float32, device=input_token_ids.device)
+                    local_mask_bool, 0, torch.tensor(min_dtype, dtype=torch.float32, device=input_token_ids.device)
                 )
+                
+                print(f"Created sliding window mask with shape {local_mask_tensor.shape}, window size: {window_size}")
             else:
                 local_mask_tensor = attn_mask_tensor
+                print(f"Using standard causal mask with shape {local_mask_tensor.shape}")
             
             # Create TPA KV caches if not provided
             if kv_caches is None:
@@ -326,20 +341,30 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 sliding_window_size = self.config.sliding_window_size
                 print(f"Creating sliding window mask with window size: {sliding_window_size}")
                 
-                # Create upper triangular mask with -window_size offset diagonal
-                # This mask allows attention only within sliding_window_size tokens before current position
-                upper_triangular = torch.triu(
-                    torch.ones((1, 1, sequence_length, sequence_length), 
-                              dtype=torch.bool, device=device),
-                    diagonal=-(sliding_window_size-1)
-                )
+                # Create proper sliding window mask with correct dimensions
+                # Ensure the causal mask has correct batch shape
+                local_mask_bool = causal_mask.clone()
                 
-                # Combine causal mask with sliding window mask
-                local_mask = torch.logical_and(causal_mask, upper_triangular)
+                # Add the window size constraint if it's positive
+                if sliding_window_size > 0:
+                    # Create upper triangular mask with -window_size offset diagonal
+                    # This mask allows attention only within sliding_window_size tokens before current position
+                    window_mask = torch.triu(
+                        torch.ones((batch_size, 1, sequence_length, sequence_length), 
+                                  dtype=torch.bool, device=device),
+                        diagonal=-(sliding_window_size-1)
+                    )
+                    
+                    # Combine causal mask with sliding window mask
+                    local_mask = torch.logical_and(local_mask_bool, window_mask)
+                else:
+                    local_mask = local_mask_bool
+                    
+                print(f"Created sliding window local mask with shape {local_mask.shape}")
             else:
                 # Without sliding window, local mask is just the causal mask
                 local_mask = causal_mask
-                print("No sliding window specified, using standard causal mask for local attention")
+                print(f"Using standard causal mask with shape {causal_mask.shape} for local attention")
                 
             return causal_mask, local_mask
         
@@ -397,16 +422,30 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             print(f"Error creating multimodal attention mask: {e}, falling back to standard mask")
             # Fallback to standard causal mask if there's an error
             if hasattr(self.config, 'sliding_window_size') and self.config.sliding_window_size is not None:
-                local_mask = torch.logical_and(
-                    causal_mask,
-                    torch.triu(
-                        torch.ones((1, 1, sequence_length, sequence_length), 
+                sliding_window_size = self.config.sliding_window_size
+                print(f"Creating fallback sliding window mask with window size: {sliding_window_size}")
+                
+                # Create proper sliding window mask with correct dimensions
+                local_mask_bool = causal_mask.clone()
+                
+                # Add the window size constraint if it's positive
+                if sliding_window_size > 0:
+                    # Create upper triangular mask with -window_size offset diagonal
+                    window_mask = torch.triu(
+                        torch.ones((batch_size, 1, sequence_length, sequence_length), 
                                   dtype=torch.bool, device=device),
-                        diagonal=-(self.config.sliding_window_size-1)
+                        diagonal=-(sliding_window_size-1)
                     )
-                )
+                    
+                    # Combine causal mask with sliding window mask
+                    local_mask = torch.logical_and(local_mask_bool, window_mask)
+                else:
+                    local_mask = local_mask_bool
+                    
+                print(f"Created fallback sliding window mask with shape {local_mask.shape}")
             else:
                 local_mask = causal_mask
+                print(f"Using standard causal mask as fallback with shape {causal_mask.shape}")
                 
             return causal_mask, local_mask
 
