@@ -28,7 +28,7 @@ from gemma import config
 from gemma import model as gemma_model
 from gemma import tokenizer as gemma_tokenizer
 from gemma.tpa.tpa_model import GemmaTPAModel, create_tpa_kv_caches
-from gemma.tpa.gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
+from gemma.tpa.gemma3_tpa_model_modular import Gemma3ForMultimodalLMwithTPA
 
 # Define flags
 FLAGS = flags.FLAGS

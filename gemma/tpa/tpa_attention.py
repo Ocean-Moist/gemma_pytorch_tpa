@@ -1,12 +1,243 @@
 """Tensor Product Attention implementation for Gemma."""
 
 import torch
+import math
 from torch import nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Mapping
 
 from .. import config as gemma_config
 from .. import model as gemma_model
+
+
+class ContextualTensorProductAttention(nn.Module):
+    """
+    Implementation of Contextual Tensor Product Attention from the T6 paper.
+    
+    This approach factorizes QKV activations using contextual low-rank components
+    rather than factorizing weight matrices, resulting in greater KV cache savings.
+    """
+    def __init__(
+        self,
+        config,
+        dim_model,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        q_rank=6,  # Default from T6 paper
+        k_rank=2,  # Default from T6 paper
+        v_rank=2   # Default from T6 paper
+    ):
+        super().__init__()
+        self.dim_model = dim_model
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.q_rank = q_rank
+        self.k_rank = k_rank
+        self.v_rank = v_rank
+        
+        # Using 1/sqrt(head_dim) for scaling
+        self.scale = 1.0 / math.sqrt(head_dim)
+        
+        # Contextual factor matrices (A factors)
+        self.W_A_q = nn.Linear(dim_model, num_heads * q_rank, bias=False)
+        self.W_A_k = nn.Linear(dim_model, num_kv_heads * k_rank, bias=False)
+        self.W_A_v = nn.Linear(dim_model, num_kv_heads * v_rank, bias=False)
+        
+        # Contextual factor matrices (B factors)
+        self.W_B_q = nn.Linear(dim_model, q_rank * head_dim, bias=False)
+        self.W_B_k = nn.Linear(dim_model, k_rank * head_dim, bias=False)
+        self.W_B_v = nn.Linear(dim_model, v_rank * head_dim, bias=False)
+        
+        # Output projection
+        self.o_proj = nn.Linear(num_heads * head_dim, dim_model, bias=False)
+        
+        # Initialize weights properly
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize the weights with specific distribution for better stability."""
+        # Initialize with normal distribution for A factors
+        nn.init.normal_(self.W_A_q.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.W_A_k.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.W_A_v.weight, mean=0.0, std=0.02)
+        
+        # Initialize with normal distribution for B factors
+        nn.init.normal_(self.W_B_q.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.W_B_k.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.W_B_v.weight, mean=0.0, std=0.02)
+        
+        # Output projection uses Xavier/Glorot initialization
+        nn.init.xavier_uniform_(self.o_proj.weight)
+    
+    def forward(
+        self,
+        hidden_states,
+        freqs_cis,
+        kv_write_indices,
+        kv_cache,
+        mask=None,
+        local_mask=None,
+    ):
+        batch_size, seq_len, _ = hidden_states.size()
+        
+        # Compute A factors
+        A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
+        A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
+        A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+        
+        # Compute B factors
+        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
+        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, self.head_dim)
+        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, self.head_dim)
+        
+        # Apply rotary position embeddings to B_q and B_k if needed
+        if freqs_cis is not None:
+            # For each position, apply RoPE to the B factors
+            B_q = self._apply_rope_to_factor(B_q, freqs_cis)
+            B_k = self._apply_rope_to_factor(B_k, freqs_cis)
+        
+        # Handle KV cache for autoregressive decoding
+        if kv_cache is not None:
+            # Unpack the factorized KV cache
+            k_cache_A, k_cache_B, v_cache_A, v_cache_B = kv_cache
+            
+            # Write new values to KV cache if needed
+            if kv_write_indices is not None and kv_write_indices.numel() > 0:
+                # Update the cache at specified positions
+                if kv_write_indices.numel() == 1:
+                    # Single position update (common during generation)
+                    idx = kv_write_indices.item()
+                    k_cache_A[:, idx] = A_k[:, 0]
+                    k_cache_B[:, idx] = B_k[:, 0]
+                    v_cache_A[:, idx] = A_v[:, 0]
+                    v_cache_B[:, idx] = B_v[:, 0]
+                else:
+                    # Update multiple positions (e.g., during prefill)
+                    for i, idx in enumerate(kv_write_indices):
+                        idx = idx.item()
+                        if i < seq_len:
+                            k_cache_A[:, idx] = A_k[:, i]
+                            k_cache_B[:, idx] = B_k[:, i]
+                            v_cache_A[:, idx] = A_v[:, i]
+                            v_cache_B[:, idx] = B_v[:, i]
+            
+            # Determine context length from cache
+            ctx_len = k_cache_A.size(1) if kv_write_indices is None else max(kv_write_indices.max().item() + 1, 1)
+            
+            # Use cached values
+            A_k = k_cache_A[:, :ctx_len]
+            B_k = k_cache_B[:, :ctx_len]
+            A_v = v_cache_A[:, :ctx_len]
+            B_v = v_cache_B[:, :ctx_len]
+        else:
+            # No cache, use current sequence values
+            ctx_len = seq_len
+        
+        # Contextual tensor factorization for Q
+        # Reshape for batch matmul: [batch_size*seq_len, num_heads, q_rank] x [batch_size*seq_len, q_rank, head_dim]
+        A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
+        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, self.head_dim)
+        
+        # Compute Q via matrix multiplication of factors
+        Q = torch.bmm(A_q_flat, B_q_flat)
+        Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        Q = Q / self.q_rank  # Scale by rank as in T6 paper
+        
+        # Transpose to [batch_size, num_heads, seq_len, head_dim]
+        Q = Q.transpose(1, 2)
+        Q = Q * self.scale  # Apply attention scaling
+        
+        # Expand K and V for multi-query attention if needed
+        if self.num_kv_heads != self.num_heads:
+            # For multi-query attention - repeat KV heads
+            repeat_factor = self.num_heads // self.num_kv_heads
+            
+            # Repeat the A factors for keys and values
+            A_k = A_k.unsqueeze(3).expand(-1, -1, -1, repeat_factor, -1)
+            A_k = A_k.reshape(batch_size, ctx_len, self.num_heads, self.k_rank)
+            
+            A_v = A_v.unsqueeze(3).expand(-1, -1, -1, repeat_factor, -1)
+            A_v = A_v.reshape(batch_size, ctx_len, self.num_heads, self.v_rank)
+        
+        # Compute K using tensorized attention
+        # Reshape for batch matmul
+        A_k_flat = A_k.reshape(batch_size * ctx_len, self.num_heads, self.k_rank) 
+        B_k_flat = B_k.reshape(batch_size * ctx_len, self.k_rank, self.head_dim)
+        
+        K = torch.bmm(A_k_flat, B_k_flat)
+        K = K.reshape(batch_size, ctx_len, self.num_heads, self.head_dim)
+        K = K / self.k_rank  # Scale by rank
+        
+        # Compute V using tensorized attention
+        A_v_flat = A_v.reshape(batch_size * ctx_len, self.num_heads, self.v_rank)
+        B_v_flat = B_v.reshape(batch_size * ctx_len, self.v_rank, self.head_dim)
+        
+        V = torch.bmm(A_v_flat, B_v_flat)
+        V = V.reshape(batch_size, ctx_len, self.num_heads, self.head_dim)
+        V = V / self.v_rank  # Scale by rank
+        
+        # Transpose K and V to [batch_size, num_heads, ctx_len, head_dim]
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
+        
+        # Compute attention scores
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1))
+        
+        # Apply attention mask if provided
+        if mask is not None:
+            attention_scores = attention_scores + mask
+        
+        # Apply local mask if provided (for sliding window attention)
+        if local_mask is not None:
+            attention_scores = attention_scores + local_mask
+            
+        # Normalize attention scores
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        
+        # Apply attention weights to values
+        context = torch.matmul(attention_probs, V)
+        
+        # Reshape context tensor
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        
+        # Apply output projection
+        output = self.o_proj(context)
+        
+        # Prepare KV cache for next step if needed
+        present_key_value = (A_k, B_k, A_v, B_v) if kv_cache is not None else None
+        
+        return output, present_key_value, attention_probs
+    
+    def _apply_rope_to_factor(self, factor, freqs_cis):
+        """Apply rotary position embeddings to B factors."""
+        # factor shape: [batch_size, seq_len, rank, head_dim]
+        # freqs_cis shape: [seq_len, head_dim//2]
+        
+        batch_size, seq_len, rank, head_dim = factor.shape
+        
+        # Reshape for applying RoPE
+        factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
+        
+        # Convert to complex for RoPE application
+        factor_complex = torch.view_as_complex(
+            torch.stack(torch.chunk(factor_reshaped.float(), 2, dim=-1), dim=-1)
+        )
+        
+        # Reshape freqs_cis for broadcasting
+        freqs_cis = freqs_cis.view(seq_len, 1, head_dim // 2)
+        freqs_cis = freqs_cis.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+        freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
+        
+        # Apply complex multiplication
+        factor_rotated = torch.view_as_real(factor_complex * freqs_cis).type_as(factor)
+        factor_rotated = torch.cat(torch.chunk(factor_rotated, 2, dim=-1), dim=-2)
+        
+        # Reshape back to original shape
+        factor_rotated = factor_rotated.reshape(batch_size, seq_len, rank, head_dim)
+        
+        return factor_rotated
 
 class GemmaTensorProductAttention(nn.Module):
     """
