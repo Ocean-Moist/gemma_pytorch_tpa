@@ -602,9 +602,16 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # Get logits for the last token
                 logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
                 
-                # Sample next token
-                next_token = self.sampler.sample(
-                    logits=logits,
+                # Sample next token using the forward method of the sampler
+                # The sampler's forward method expects embedding and hidden_states
+                # We need to create a dummy position tensor (just 0) for output_positions
+                dummy_pos = torch.zeros(1, dtype=torch.long, device=device)
+                
+                # Use sampler's forward method
+                next_token, _ = self.sampler(
+                    embedding=embedder_weight,
+                    hidden_states=hidden_states,
+                    output_positions=dummy_pos,
                     temperatures=temperatures_tensor,
                     top_ps=top_ps_tensor,
                     top_ks=top_ks_tensor,
