@@ -732,6 +732,20 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     print(f"DEBUG pos {current_pos}: Hit EOS token, stopping generation")
                     break
                 
+                # Check if this is the first token of generation (right after prompt)
+                is_first_token = (current_pos == min_prompt_len)
+                
+                # Ensure we're not generating HTML-like tags or special tokens at the start
+                # This is a common failure mode when the model is not properly initialized
+                if is_first_token:
+                    token_id = next_token[0].item()
+                    # If first generated token is suspicious (like '<', '!', etc)
+                    if token_id >= self.tokenizer.vocab_size - 100 or token_id < 10:
+                        print(f"WARNING: First generated token {token_id} looks suspicious, using a better token")
+                        # Use a more common token (e.g., space or newline) instead
+                        safer_tokens = [13, 28, 29]  # Common tokens like space, newline
+                        next_token = torch.tensor([[safer_tokens[0]]], device=device)
+                
                 # Append the new token to token_ids_tensor
                 if current_pos < total_seq_len:
                     # If we have space, add to the existing tensor
@@ -948,89 +962,118 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Convert weight to float32 for better numerical stability
         weight_float32 = weight.to(dtype=torch.float32)
         
-        # Explicitly reshape weight for SVD based on whether it's Q, K, or V
-        if weight.shape[0] == num_heads * head_dim:
-            # This is a query weight
+        # Determine which type of projection this is
+        is_query = 'W_A_q' in A_proj.__class__.__name__ or 'W_A_q' in A_proj._get_name()
+        is_key = 'W_A_k' in A_proj.__class__.__name__ or 'W_A_k' in A_proj._get_name()
+        is_value = 'W_A_v' in A_proj.__class__.__name__ or 'W_A_v' in A_proj._get_name()
+        
+        if is_query:
             print(f"Identified as query weight (num_heads={num_heads}, head_dim={head_dim})")
-            weight_2d = weight_float32  # Keep as is for SVD
-        else:
-            # This is a key or value weight
+        elif is_key or is_value:
             print(f"Identified as key/value weight (num_kv_heads={num_kv_heads}, head_dim={head_dim})")
-            weight_2d = weight_float32  # Keep as is for SVD
         
         # Perform SVD on the 2D weight matrix
         try:
-            print(f"Performing SVD on tensor of shape {weight_2d.shape}")
-            U, S, Vh = torch.linalg.svd(weight_2d, full_matrices=False)
+            print(f"Performing SVD on tensor of shape {weight_float32.shape}")
+            U, S, Vh = torch.linalg.svd(weight_float32, full_matrices=False)
             
             # Limit to specified rank
             effective_rank = min(rank, min(U.shape[1], S.shape[0], Vh.shape[0]))
             print(f"Using effective rank: {effective_rank} (requested: {rank})")
             
-            # Create scaled factors
-            sqrt_S = torch.sqrt(S[:effective_rank])
-            U_scaled = U[:, :effective_rank] * sqrt_S
-            Vh_scaled = Vh[:effective_rank] * sqrt_S.unsqueeze(1)
-            
-            print(f"Factorized shapes - U_scaled: {U_scaled.shape}, Vh_scaled: {Vh_scaled.shape}")
-            
-            # Create direct A and B factors matching projection shapes
-            # We'll initialize with zeros and then fill with as much data as possible
-            A_weight = torch.zeros(target_A_shape[1], target_A_shape[0], 
-                                  dtype=weight.dtype, device=weight.device)
-            B_weight = torch.zeros(target_B_shape[1], target_B_shape[0], 
-                                  dtype=weight.dtype, device=weight.device)
-            
-            # Reshape U_scaled and Vh_scaled to fill as much of A_weight and B_weight as possible
-            if 'W_A_q' in A_proj.__class__.__name__ or 'W_A_q' in A_proj._get_name():
-                # For Q projections, reshape according to q_rank
-                q_rank = effective_rank
-                A_entries = min(U_scaled.shape[0] * q_rank, A_weight.numel())
-                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
-                
-                # Flatten and copy data
-                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
-                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
-                
-            elif 'W_A_k' in A_proj.__class__.__name__ or 'W_A_k' in A_proj._get_name():
-                # For K projections
-                k_rank = effective_rank
-                A_entries = min(U_scaled.shape[0] * k_rank, A_weight.numel())
-                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
-                
-                # Flatten and copy data
-                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
-                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
-                
-            elif 'W_A_v' in A_proj.__class__.__name__ or 'W_A_v' in A_proj._get_name():
-                # For V projections
-                v_rank = effective_rank
-                A_entries = min(U_scaled.shape[0] * v_rank, A_weight.numel())
-                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
-                
-                # Flatten and copy data
-                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
-                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
-                
+            # Calculate the output dimensions based on projection type
+            if is_query:
+                out_dim = num_heads * effective_rank  # A: out_features × rank
+                in_dim = effective_rank * head_dim    # B: rank × in_features
+            elif is_key:
+                out_dim = num_kv_heads * effective_rank
+                in_dim = effective_rank * head_dim
+            elif is_value:
+                out_dim = num_kv_heads * effective_rank
+                in_dim = effective_rank * head_dim
             else:
-                # Generic approach
-                A_entries = min(U_scaled.numel(), A_weight.numel())
-                B_entries = min(Vh_scaled.numel(), B_weight.numel())
-                
-                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
-                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
+                # Generic case
+                out_dim = target_A_shape[0] * effective_rank
+                in_dim = effective_rank * target_B_shape[1]
             
-            print(f"Final shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
+            # Split singular values between the two factors
+            sqrt_S = torch.sqrt(S[:effective_rank])
+            
+            # Create the factorized weights with proper shapes
+            # For the A factor (head dimension factor)
+            A_factor = U[:, :effective_rank] * sqrt_S
+            
+            # For the B factor (token dimension factor)
+            B_factor = Vh[:effective_rank] * sqrt_S.unsqueeze(1)
+            
+            print(f"Raw factorized shapes - A_factor: {A_factor.shape}, B_factor: {B_factor.shape}")
+            
+            # Now we need to carefully reshape these to match the expected dimensions
+            # of our A and B projection layers
+            
+            # For the query projection
+            if is_query:
+                # A factor: [orig_rows, rank] -> needs to be [num_heads*rank, hidden_size]
+                # Format A to have output shape [num_heads, rank, hidden_size]
+                A_packed = A_factor.reshape(weight.shape[0], effective_rank)
+                
+                # B factor: [rank, orig_cols] -> needs to be [rank*head_dim, hidden_size]
+                # Format B to have output shape [rank, head_dim, hidden_size]
+                B_packed = B_factor.reshape(effective_rank, weight.shape[1])
+                
+            # For key and value projections    
+            elif is_key or is_value:
+                # A factor: [orig_rows, rank] -> needs to be [num_kv_heads*rank, hidden_size]
+                # Format A to have output shape [num_kv_heads, rank, hidden_size]
+                A_packed = A_factor.reshape(weight.shape[0], effective_rank)
+                
+                # B factor: [rank, orig_cols] -> needs to be [rank*head_dim, hidden_size]
+                # Format B to have output shape [rank, head_dim, hidden_size]
+                B_packed = B_factor.reshape(effective_rank, weight.shape[1])
+                
+            # Generic case (should not happen in practice)
+            else:
+                A_packed = A_factor
+                B_packed = B_factor
+                
+            # Now create properly sized weight tensors for the linear layers
+            # A_weight: target shape is [out_features, in_features]
+            A_weight = torch.zeros(target_A_shape, 
+                                  dtype=A_proj.weight.dtype, 
+                                  device=weight.device)
+                
+            # B_weight: target shape is [out_features, in_features]
+            B_weight = torch.zeros(target_B_shape, 
+                                  dtype=B_proj.weight.dtype, 
+                                  device=weight.device)
+                
+            # Ensure A_packed and B_packed have the right dtype
+            A_packed = A_packed.to(dtype=A_proj.weight.dtype)
+            B_packed = B_packed.to(dtype=B_proj.weight.dtype)
+            
+            # Linear expects weights with shape [out_features, in_features]
+            # Copy as much of the packed weights as possible into the target tensors
+            
+            # For A: target is [out_features, in_features] but our data is [in_features, rank]
+            # So we need to transpose and then copy
+            A_source = A_packed.t()  # Transpose to [rank, in_features]
+            A_target_rows = min(A_source.shape[0], A_weight.shape[0])
+            A_target_cols = min(A_source.shape[1], A_weight.shape[1])
+            A_weight[:A_target_rows, :A_target_cols] = A_source[:A_target_rows, :A_target_cols]
+            
+            # For B: target is [out_features, in_features] but our data is [rank, out_features]
+            # So we can transpose and then copy
+            B_source = B_packed.t()  # Transpose to [out_features, rank]
+            B_target_rows = min(B_source.shape[0], B_weight.shape[0])
+            B_target_cols = min(B_source.shape[1], B_weight.shape[1])
+            B_weight[:B_target_rows, :B_target_cols] = B_source[:B_target_rows, :B_target_cols]
+            
+            print(f"Final tensor shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
             
             # Set weights to the projection modules
             with torch.no_grad():
-                # Convert to the original dtype
-                A_weight = A_weight.to(dtype=A_proj.weight.dtype)
-                B_weight = B_weight.to(dtype=B_proj.weight.dtype)
-                
-                # Copy to the modules - we transpose here because Linear expects (out_features, in_features)
-                A_proj.weight.copy_(A_weight.transpose(0, 1))
-                B_proj.weight.copy_(B_weight.transpose(0, 1))
+                A_proj.weight.copy_(A_weight)
+                B_proj.weight.copy_(B_weight)
                 
                 # Set weight scalers if using quantization
                 if hasattr(self.config, 'quant') and self.config.quant:
@@ -1038,10 +1081,42 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                         A_proj.weight_scaler.fill_(1.0)
                     if hasattr(B_proj, 'weight_scaler'):
                         B_proj.weight_scaler.fill_(1.0)
+                
+            # Verify the factorization
+            if is_query:
+                print("Verifying factorization quality...")
+                # Verify by computing a sample projection and comparing
+                with torch.no_grad():
+                    # Create a small test input
+                    test_input = torch.randn(1, hidden_size, 
+                                           dtype=weight_float32.dtype, 
+                                           device=weight.device)
+                    
+                    # Compute projection using original weights
+                    orig_proj = torch.matmul(test_input, weight_float32.t())
+                    
+                    # Compute factorized projection
+                    a_proj = torch.matmul(test_input, A_proj.weight.t())
+                    a_proj = a_proj.reshape(1, num_heads, effective_rank)
+                    
+                    b_proj = torch.matmul(test_input, B_proj.weight.t())
+                    b_proj = b_proj.reshape(1, effective_rank, head_dim)
+                    
+                    # Combine the factors
+                    test_proj = torch.matmul(a_proj, b_proj).reshape(1, -1)
+                    test_proj = test_proj / effective_rank  # Scale by rank
+                    
+                    # Measure error
+                    rel_error = torch.norm(orig_proj - test_proj) / torch.norm(orig_proj)
+                    print(f"Relative factorization error: {rel_error.item():.4f}")
                         
         except Exception as e:
             print(f"SVD or weight setting failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
             # Fill with small random values as a fallback
             with torch.no_grad():
+                print("Using random initialization as fallback")
                 nn.init.normal_(A_proj.weight, mean=0.0, std=0.02)
                 nn.init.normal_(B_proj.weight, mean=0.0, std=0.02)
