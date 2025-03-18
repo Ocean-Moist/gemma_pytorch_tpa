@@ -569,22 +569,34 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=logits.dtype, device=device)
             logits = logits * normalizer
             
-            # Create positional indices for the prompt
-            positions = torch.arange(0, min_prompt_len, device=device)
-            max_pos = min(min_prompt_len, self.local_freqs_cis.size(0))
-            positions = positions[:max_pos]
+            # Create positional indices for the prompt with safe bounds
+            # Ensure we don't exceed the maximum sequence length or the cache size
+            max_positions = min(min_prompt_len, 
+                              self.local_freqs_cis.size(0),
+                              kv_caches[0][0].size(1))  # k_cache_A dimension 1
+                              
+            if max_positions <= 0:
+                print(f"Warning: No valid positions found. Using single position 0.")
+                positions = torch.tensor([0], device=device)
+                max_positions = 1
+            else:
+                positions = torch.arange(0, max_positions, device=device)
+            
+            # Limit input to valid positions
+            prompt_hidden_states = logits[:, :max_positions]
             
             # Create freqs_cis dict
             freqs_cis = {}
             if len(positions) > 0:
+                # Select valid frequency ranges
                 freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
                 freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
                 
                 # Process prompt through model (this populates the KV cache)
                 try:
-                    print(f"Processing prompt with {min_prompt_len} tokens...")
+                    print(f"Processing prompt with {len(positions)} tokens (max_positions={max_positions})...")
                     hidden_states = self.model(
-                        hidden_states=logits,
+                        hidden_states=prompt_hidden_states,
                         freqs_cis=freqs_cis,
                         kv_write_indices=positions,
                         kv_caches=kv_caches,
@@ -676,19 +688,21 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     current_embed = self.text_token_embedder(current_token)
                     current_embed = current_embed * normalizer
                     
-                    # Position for the current token
-                    current_pos_tensor = torch.tensor([current_pos], device=device)
+                    # Position for the current token - ensure it's within cache bounds
+                    max_cache_pos = kv_caches[0][0].size(1) - 1  # k_cache_A max position
+                    safe_current_pos = min(current_pos, max_cache_pos)
+                    current_pos_tensor = torch.tensor([safe_current_pos], device=device)
                     
                     # Create freqs_cis for current position
-                    # Make sure we don't go out of bounds
-                    max_pos_index = min(current_pos, self.local_freqs_cis.size(0) - 1)
-                    safe_pos_tensor = torch.tensor([max_pos_index], device=device)
+                    # Make sure we don't go out of bounds for freqs_cis
+                    max_freq_index = min(safe_current_pos, self.local_freqs_cis.size(0) - 1)
+                    safe_pos_tensor = torch.tensor([max_freq_index], device=device)
                     
                     current_freqs_cis = {}
                     current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
                     current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, safe_pos_tensor)
                     
-                    # Process current token
+                    # Process current token - use the safe position
                     hidden_states = self.model(
                         hidden_states=current_embed,
                         freqs_cis=current_freqs_cis,

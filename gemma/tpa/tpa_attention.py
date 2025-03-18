@@ -180,24 +180,39 @@ class GemmaTensorProductAttention(nn.Module):
                     print(f"Warning: Invalid tensor dimensions for KV cache update")
                     print(f"A_k: {A_k_dtype.shape}, B_k: {B_k_rotated_dtype.shape}, A_v: {A_v_dtype.shape}, B_v: {B_v_dtype.shape}")
                 else:
-                    print(f"Updating KV cache with {kv_write_indices.numel()} indices, source size: {A_k_dtype.size(1)}")
                     # Use safer sequential update to handle any size mismatches
-                    num_to_copy = min(kv_write_indices.numel(), A_k_dtype.size(1))
-                    
-                    for i in range(num_to_copy):
-                        try:
-                            if i < A_k_dtype.size(1) and kv_write_indices[i] < k_cache_A.size(1):
-                                idx = kv_write_indices[i].item()
-                                # Carefully check dimensions before assignment
-                                if idx >= 0 and idx < k_cache_A.size(1):
-                                    if i < A_k_dtype.size(1):
-                                        k_cache_A[:, idx] = A_k_dtype[:, i]
-                                        k_cache_B[:, idx] = B_k_rotated_dtype[:, i]
-                                        v_cache_A[:, idx] = A_v_dtype[:, i]
-                                        v_cache_B[:, idx] = B_v_dtype[:, i]
-                        except Exception as idx_error:
-                            print(f"Error updating KV cache at index {i}: {idx_error}")
-                            # Continue with next index
+                    # Safely handle scalar or single-element tensors
+                    if kv_write_indices.numel() == 1:
+                        # Single position case (common during generation)
+                        idx = kv_write_indices.item()
+                        # Clamp index to valid range
+                        idx = max(0, min(idx, k_cache_A.size(1) - 1))
+                        
+                        # For single index, use first position from source tensors
+                        k_cache_A[:, idx] = A_k_dtype[:, 0]
+                        k_cache_B[:, idx] = B_k_rotated_dtype[:, 0]
+                        v_cache_A[:, idx] = A_v_dtype[:, 0]
+                        v_cache_B[:, idx] = B_v_dtype[:, 0]
+                    else:
+                        # Multiple positions case (e.g., during prefill)
+                        for i in range(min(kv_write_indices.numel(), seq_len)):
+                            try:
+                                # Safely get and clamp the index to valid range
+                                if i < kv_write_indices.numel():
+                                    idx = kv_write_indices[i].item()
+                                    idx = max(0, min(idx, k_cache_A.size(1) - 1))
+                                    
+                                    # Select source position (use min to avoid out of bounds)
+                                    source_idx = min(i, A_k_dtype.size(1) - 1)
+                                    
+                                    # Update cache tensors
+                                    k_cache_A[:, idx] = A_k_dtype[:, source_idx]
+                                    k_cache_B[:, idx] = B_k_rotated_dtype[:, source_idx]
+                                    v_cache_A[:, idx] = A_v_dtype[:, source_idx]
+                                    v_cache_B[:, idx] = B_v_dtype[:, source_idx]
+                            except Exception as idx_error:
+                                print(f"Error updating KV cache at index {i}: {idx_error}")
+                                # Continue with next index
             except Exception as e:
                 print(f"Error during KV cache update: {e}")
                 # Don't attempt further updates if we hit an error

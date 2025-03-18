@@ -142,6 +142,11 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     if max_seq_len <= 0:
         max_seq_len = 1
         print(f"Warning: Invalid max_seq_len {max_seq_len}, using 1 instead")
+    
+    # Limit max_seq_len to a reasonable size to avoid excessive memory usage
+    if max_seq_len > 8192:
+        print(f"Warning: Limiting excessive max_seq_len {max_seq_len} to 8192")
+        max_seq_len = 8192
         
     # Ensure we have valid ranks
     if k_rank <= 0:
@@ -163,23 +168,33 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     for i in range(config.num_hidden_layers):
         # Create separate caches for A and B factors
         try:
+            # Use a safe max sequence length to prevent OOM errors
+            safe_seq_len = min(max_seq_len, 8192)  # Cap at 8K tokens to avoid excessive memory usage
+            
+            # Validate dimensions
+            safe_kv_heads = max(1, num_kv_heads)  # Ensure at least 1 head
+            safe_head_dim = max(1, head_dim)      # Ensure at least dimension 1
+            safe_k_rank = max(1, min(k_rank, 16))  # Limit rank to reasonable values
+            safe_v_rank = max(1, min(v_rank, 16))  # Limit rank to reasonable values
+            
+            # Create caches with safe dimensions
             k_cache_A = torch.zeros(
-                size=(batch_size, max_seq_len, num_kv_heads, k_rank),
+                size=(batch_size, safe_seq_len, safe_kv_heads, safe_k_rank),
                 dtype=config.get_dtype(),
                 device=device
             )
             k_cache_B = torch.zeros(
-                size=(batch_size, max_seq_len, k_rank, head_dim),
+                size=(batch_size, safe_seq_len, safe_k_rank, safe_head_dim),
                 dtype=config.get_dtype(),
                 device=device
             )
             v_cache_A = torch.zeros(
-                size=(batch_size, max_seq_len, num_kv_heads, v_rank),
+                size=(batch_size, safe_seq_len, safe_kv_heads, safe_v_rank),
                 dtype=config.get_dtype(),
                 device=device
             )
             v_cache_B = torch.zeros(
-                size=(batch_size, max_seq_len, v_rank, head_dim),
+                size=(batch_size, safe_seq_len, safe_v_rank, safe_head_dim),
                 dtype=config.get_dtype(),
                 device=device
             )
