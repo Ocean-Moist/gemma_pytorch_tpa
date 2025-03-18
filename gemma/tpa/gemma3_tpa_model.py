@@ -501,7 +501,19 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         # Copy non-attention weights directly
         print("Copying non-attention weights...")
-        self.text_token_embedder.load_state_dict(standard_model.text_token_embedder.state_dict())
+        
+        # Handle different attribute naming between model types
+        if hasattr(standard_model, 'text_token_embedder'):
+            # For Gemma3 multimodal models
+            print("Using Gemma3 multimodal model attribute names...")
+            self.text_token_embedder.load_state_dict(standard_model.text_token_embedder.state_dict())
+        elif hasattr(standard_model, 'embedder'):
+            # For standard GemmaForCausalLM models
+            print("Using standard Gemma model attribute names...")
+            self.text_token_embedder.load_state_dict(standard_model.embedder.state_dict())
+        else:
+            raise ValueError("Could not find a compatible embedding layer in the standard model")
+            
         self.sampler.load_state_dict(standard_model.sampler.state_dict())
         
         if hasattr(standard_model, 'siglip_vision_model') and hasattr(self, 'siglip_vision_model'):
