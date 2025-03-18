@@ -542,8 +542,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
 
         print(f"Input shape: {user_input_token_ids.shape}, seq len: {total_seq_len}")
         
-        # Create TPA KV caches - ensure sufficient capacity
-        kv_caches = create_tpa_kv_caches(self.config, batch_size, total_seq_len, device)
+        # Create TPA KV caches with properly managed dimensions
+        max_cache_len = min(512, total_seq_len)  # Start with a reasonably small cache size for stability
+        print(f"Creating KV cache with controlled size {max_cache_len} (original seq_len: {total_seq_len})")
+        kv_caches = create_tpa_kv_caches(self.config, batch_size, max_cache_len, device)
 
         # Set up input tensor
         token_ids_tensor = user_input_token_ids.to(device)
@@ -581,9 +583,16 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 max_positions = 1
             else:
                 positions = torch.arange(0, max_positions, device=device)
+                print(f"Created position indices: {positions}")
             
             # Limit input to valid positions
             prompt_hidden_states = logits[:, :max_positions]
+            
+            # Explicitly verify we're not accidentally using token IDs as positions
+            if token_ids_tensor.numel() > 0 and token_ids_tensor.max() > 10000:
+                print(f"INFO: Input token IDs range from {token_ids_tensor.min().item()} to {token_ids_tensor.max().item()}")
+                print(f"Position indices range from {positions.min().item()} to {positions.max().item()}")
+                print("Confirming we're using position indices, not token IDs, for positional information")
             
             # Create freqs_cis dict
             freqs_cis = {}

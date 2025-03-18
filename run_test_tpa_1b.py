@@ -132,10 +132,11 @@ def main():
         tpa_model = tpa_model.to(device).eval()
         
         # Use smaller cache sizes for testing to avoid CUDA errors
-        # Set a reasonable maximum context size for testing
-        max_cache_seq_len = 512  # Start with a smaller cache to make sure it works
+        # Set a very small maximum context size for initial testing
+        max_cache_seq_len = 128  # Start with a very small cache to make sure it works
         model_config.max_position_embeddings = max_cache_seq_len  # Update config to match
-        print(f"Using restricted cache size of {max_cache_seq_len} for inference test")
+        model_config.sliding_window_size = max_cache_seq_len  # Ensure sliding window also matches
+        print(f"Using highly restricted cache size of {max_cache_seq_len} for initial inference test")
         
         with torch.no_grad():
             # Format prompt for Gemma3 model

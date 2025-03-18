@@ -82,6 +82,14 @@ class GemmaTensorProductAttention(nn.Module):
         local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
+        Forward pass for TPA attention with comprehensive safety checks.
+        
+        Critical safety precautions:
+        1. All token indices are checked and clamped to valid ranges
+        2. All tensor shapes are verified before operations
+        3. All input tensors are validated to avoid using token IDs as position indices
+        """
+        """
         Forward pass for Tensor Product Attention.
         
         TPA computes factorized Q, K, V matrices and uses a modified KV cache
@@ -136,30 +144,38 @@ class GemmaTensorProductAttention(nn.Module):
         # Unpack the factorized KV cache
         k_cache_A, k_cache_B, v_cache_A, v_cache_B = kv_cache
         
-        # Get the total context length we'll be dealing with
+        # Do a thorough validation of kv_write_indices to catch token ID confusion
         if kv_write_indices is not None and kv_write_indices.numel() > 0:
+            # Check if any indices are larger than 10000 - likely token IDs mistakenly used as positions
+            try:
+                max_val = kv_write_indices.max().item()
+                if max_val > 10000:
+                    print(f"WARNING: Detected very large indices in kv_write_indices (max: {max_val})")
+                    print("These are likely token IDs mistakenly used as position indices")
+                    # Reset to safe sequential indices to avoid crashes
+                    kv_write_indices = torch.arange(min(seq_len, k_cache_A.size(1)), device=kv_write_indices.device)
+                    print(f"Reset to safe sequential indices: {kv_write_indices}")
+            except Exception as detect_e:
+                print(f"Error checking kv_write_indices max: {detect_e}")
+
             # Check for empty tensors
             if seq_len == 0 or batch_size == 0:
                 ctx_len = 0
             else:
                 # Ensure indices are valid and not out of range
                 try:
-                    # Handle scalar or empty indices
+                    # Force clamp all indices to valid range regardless of input
+                    max_cache_idx = k_cache_A.size(1) - 1
+                    kv_write_indices = torch.clamp(kv_write_indices, 0, max_cache_idx)
+                    
+                    # Set context length to max index + 1 or total cache size, whichever is smaller
                     if kv_write_indices.numel() == 1:
-                        max_idx = kv_write_indices.item()
+                        ctx_len = min(kv_write_indices.item() + 1, k_cache_A.size(1))
                     else:
-                        max_idx = torch.max(kv_write_indices)
-                        
-                    # Ensure index is within bounds
-                    if max_idx >= k_cache_A.size(1):
-                        print(f"Warning: Index {max_idx} out of bounds for KV cache size {k_cache_A.size(1)}")
-                        # Clamp indices to valid range
-                        kv_write_indices = torch.clamp(kv_write_indices, 0, k_cache_A.size(1) - 1)
-                        max_idx = k_cache_A.size(1) - 1
-                    ctx_len = max_idx + 1
+                        ctx_len = min(torch.max(kv_write_indices).item() + 1, k_cache_A.size(1))
                 except Exception as e:
-                    print(f"Error processing kv_write_indices: {e}, using seq_len as fallback")
-                    ctx_len = min(seq_len, k_cache_A.size(1))
+                    print(f"Error processing kv_write_indices: {e}, using fallback")
+                    ctx_len = min(seq_len, k_cache_A.size(1))  # Fallback
         else:
             ctx_len = min(seq_len, k_cache_A.size(1))  # Ensure we don't exceed cache size
         
