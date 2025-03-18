@@ -33,7 +33,7 @@ from .modules.tucker_factorization import (
 from .modules.contextual_factorization import (
     contextual_tensor_decomposition,
     apply_contextual_tensor_decomposition,
-    convert_from_standard_weights
+    convert_from_standard_weights as cf_convert_from_standard_weights
 )
 from .modules.tensor_product_utils import (
     register_freqs_cis,
@@ -510,6 +510,27 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         """Apply T6-style contextual tensor factorization to all layers."""
         return apply_contextual_tensor_decomposition(
             self.model, 
+            q_rank=self.config.q_rank,
+            k_rank=self.config.k_rank,
+            v_rank=self.config.v_rank
+        )
+        
+    def convert_from_standard_weights(self, standard_model):
+        """
+        Convert from standard Gemma model to TPA model.
+        
+        This method copies weights from a standard Gemma model to this TPA model,
+        converting attention weights using contextual tensor factorization.
+        
+        Args:
+            standard_model: Standard Gemma model to convert from
+            
+        Returns:
+            self: The converted TPA model
+        """
+        return cf_convert_from_standard_weights(
+            standard_model,
+            self,
             q_rank=self.config.q_rank,
             k_rank=self.config.k_rank,
             v_rank=self.config.v_rank
