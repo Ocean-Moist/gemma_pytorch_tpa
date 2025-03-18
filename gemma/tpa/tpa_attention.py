@@ -287,6 +287,17 @@ class GemmaTensorProductAttention(nn.Module):
         
         batch_size, seq_len, rank, head_dim = factor.shape
         
+        # Handle empty sequence case (seq_len=0)
+        if seq_len == 0 or batch_size == 0:
+            return factor
+        
+        # Ensure freqs_cis has enough positions
+        if freqs_cis.size(0) < seq_len:
+            raise ValueError(f"freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
+            
+        # Take only needed positions from freqs_cis
+        freqs_cis = freqs_cis[:seq_len]
+        
         # Reshape for applying RoPE
         factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
         
@@ -296,8 +307,8 @@ class GemmaTensorProductAttention(nn.Module):
         )
         
         # Reshape freqs_cis for broadcasting
-        freqs_cis = freqs_cis.view(1, seq_len, 1, head_dim // 2)
-        freqs_cis = freqs_cis.repeat(batch_size, 1, 1, 1)
+        freqs_cis = freqs_cis.view(seq_len, 1, head_dim // 2)
+        freqs_cis = freqs_cis.unsqueeze(0).repeat(batch_size, 1, 1, 1)
         freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
         
         # Apply complex multiplication
