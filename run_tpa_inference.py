@@ -11,8 +11,9 @@ import torch
 import traceback
 from pathlib import Path
 
-from gemma import tokenizer
+from gemma import tokenizer, config
 from gemma.tpa.gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
+import torch.serialization
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run inference with TPA Gemma model")
@@ -38,7 +39,21 @@ def main():
     try:
         # Load TPA model
         print(f"Loading TPA model from {args.model}")
-        checkpoint = torch.load(args.model, map_location="cpu")
+        
+        # Handle PyTorch 2.6+ security restrictions
+        print("Adding GemmaConfig to safe globals for PyTorch loading...")
+        # Add GemmaConfig to the safe globals list
+        torch.serialization.add_safe_globals([config.GemmaConfig])
+        
+        try:
+            # First try with weights_only=True (safe mode)
+            checkpoint = torch.load(args.model, map_location="cpu", weights_only=True)
+            print("Model loaded with weights_only=True")
+        except Exception as e:
+            print(f"Warning: Failed to load with weights_only=True: {e}")
+            print("Trying with weights_only=False (less secure, but needed for older models)")
+            checkpoint = torch.load(args.model, map_location="cpu", weights_only=False)
+            print("Model loaded with weights_only=False")
         
         # Get model config
         if "config" in checkpoint:
