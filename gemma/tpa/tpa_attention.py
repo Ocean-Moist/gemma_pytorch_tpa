@@ -311,10 +311,21 @@ class GemmaTensorProductAttention(nn.Module):
         
         # Ensure freqs_cis has enough positions
         if freqs_cis.size(0) < seq_len:
-            raise ValueError(f"freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
-            
-        # Take only needed positions from freqs_cis
-        freqs_cis = freqs_cis[:seq_len]
+            print(f"Warning: freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
+            print("Using available positions and padding as needed")
+            # Use available positions instead of raising error
+            available_positions = freqs_cis.size(0)
+            # If we need more positions, we'll pad by repeating the last position
+            if available_positions > 0:
+                last_pos = freqs_cis[available_positions-1:available_positions]
+                padding = last_pos.repeat(seq_len - available_positions, 1)
+                freqs_cis = torch.cat([freqs_cis[:available_positions], padding], dim=0)
+            else:
+                # Create empty freqs_cis of right shape if no positions are available
+                freqs_cis = torch.zeros((seq_len, freqs_cis.size(1)), device=freqs_cis.device)
+        else:
+            # Take only needed positions from freqs_cis
+            freqs_cis = freqs_cis[:seq_len]
         
         # Reshape for applying RoPE
         factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)

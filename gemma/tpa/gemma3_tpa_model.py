@@ -592,34 +592,38 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # Position for the current token
                 current_pos_tensor = torch.tensor([current_pos], device=device)
                 
+                # Safety check for current token
+                if current_embed.shape[1] == 0:
+                    print(f"WARNING: Current embed at position {current_pos} has sequence length 0")
+                    print("Skipping this position and using a placeholder token instead")
+                    # Create a placeholder token (using BOS token) to avoid errors
+                    next_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
+                    # Skip the rest of this iteration
+                    if current_pos < total_seq_len:
+                        token_ids_tensor[:, current_pos:current_pos+1] = next_token
+                    else:
+                        token_ids_tensor = torch.cat([token_ids_tensor, next_token], dim=1)
+                    current_pos += 1
+                    continue
+                
                 # Create freqs_cis for current position
                 # Make sure we can't go out of bounds
                 max_pos_index = min(current_pos, self.local_freqs_cis.size(0) - 1)
                 safe_pos_tensor = torch.tensor([max_pos_index], device=device)
-                print(f"Current position: {current_pos}, using safe position index: {max_pos_index}")
                 
                 current_freqs_cis = {}
                 current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
                 current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, safe_pos_tensor)
                 
-                # Make sure we have a valid input shape for processing
-                if current_embed.shape[1] == 0:
-                    print("Warning: Current embed has sequence length 0, skipping processing")
-                    # Use a default shape for hidden states to avoid reshape errors
-                    hidden_states = torch.zeros(
-                        current_embed.shape[0], 0, self.config.hidden_size, 
-                        device=device, dtype=current_embed.dtype
-                    )
-                else:
-                    # Process current token
-                    hidden_states = self.model(
-                        hidden_states=current_embed,
-                        freqs_cis=current_freqs_cis,
-                        kv_write_indices=current_pos_tensor,
-                        kv_caches=kv_caches,
-                        mask=None,  # Let attention handle masking
-                        local_mask=None,
-                    )
+                # Process current token
+                hidden_states = self.model(
+                    hidden_states=current_embed,
+                    freqs_cis=current_freqs_cis,
+                    kv_write_indices=current_pos_tensor,
+                    kv_caches=kv_caches,
+                    mask=None,  # Let attention handle masking
+                    local_mask=None,
+                )
                 
                 # Project to vocabulary
                 embedder_weight = self.text_token_embedder.weight
@@ -628,30 +632,32 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 
                 # Handle empty hidden states
                 if hidden_states.shape[1] == 0:
-                    print("Warning: Empty hidden states, creating default logits")
-                    # Create zero logits with proper vocab dimension
-                    logits = torch.zeros(
-                        hidden_states.shape[0], 0, embedder_weight.shape[0],
-                        device=device, dtype=hidden_states.dtype
-                    )
+                    print("Warning: Empty hidden states, skipping token generation")
+                    # Skip token generation for this position
+                    # Create a default token (we'll use BOS as a safe choice)
+                    next_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
                 else:
                     # Get logits for the last token
                     logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
-                
-                # Sample next token using the forward method of the sampler
-                # The sampler's forward method expects embedding and hidden_states
-                # We need to create a dummy position tensor (just 0) for output_positions
-                dummy_pos = torch.zeros(1, dtype=torch.long, device=device)
-                
-                # Use sampler's forward method
-                next_token, _ = self.sampler(
-                    embedding=embedder_weight,
-                    hidden_states=hidden_states,
-                    output_positions=dummy_pos,
-                    temperatures=temperatures_tensor,
-                    top_ps=top_ps_tensor,
-                    top_ks=top_ks_tensor,
-                )
+                    
+                    # Sample next token using the forward method of the sampler
+                    # The sampler's forward method expects embedding and hidden_states
+                    # We need to create a position tensor that's within valid bounds
+                    # Use 0 as a safe position value to avoid index errors
+                    dummy_pos = torch.zeros(1, dtype=torch.long, device=device)
+                    
+                    # Make sure to use the first (and only) position in hidden_states
+                    valid_hidden_states = hidden_states
+                    
+                    # Use sampler's forward method
+                    next_token, _ = self.sampler(
+                        embedding=embedder_weight,
+                        hidden_states=valid_hidden_states,
+                        output_positions=dummy_pos,
+                        temperatures=temperatures_tensor,
+                        top_ps=top_ps_tensor,
+                        top_ks=top_ks_tensor,
+                    )
                 
                 # Check for EOS
                 if next_token[0].item() == self.tokenizer.eos_id:

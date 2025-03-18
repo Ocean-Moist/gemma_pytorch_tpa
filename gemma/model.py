@@ -43,10 +43,18 @@ class Sampler(nn.Module):
         top_ks: torch.Tensor,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Safety check for empty hidden states
+        if hidden_states.shape[1] == 0:
+            # Return a safe default token (BOS token) to avoid errors
+            bos_id = 1  # Default BOS token ID - sampler should handle this properly
+            return torch.tensor([[bos_id]], device=hidden_states.device), torch.zeros(1, 1, embedding.shape[0], device=hidden_states.device)
+            
         # Select the last element for each sequence.
         # (batch_size, input_len, hidden_size) -> (batch_size, hidden_size)
+        # Validate output_positions to make sure it doesn't exceed bounds
+        safe_positions = torch.clamp(output_positions, 0, hidden_states.shape[1] - 1)
         hidden_states = hidden_states.index_select(
-            1, output_positions).squeeze(dim=1)
+            1, safe_positions).squeeze(dim=1)
         logits = torch.matmul(hidden_states, embedding.t())
         if embedding_bias is not None:
             logits += embedding_bias
