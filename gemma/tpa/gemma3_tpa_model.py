@@ -6,7 +6,7 @@ import json
 import gc
 from torch import nn
 from PIL import Image
-from typing import Any, List, Sequence, Tuple, Union, Optional
+from typing import Any, List, Sequence, Tuple, Union, Optional, Mapping
 
 from .. import model as gemma_model
 from .. import config as gemma_config
@@ -24,38 +24,54 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     ):
         super().__init__()
         self.dtype = config.get_dtype()
-        assert config.architecture == gemma_config.Architecture.GEMMA_3
+        # Allow non-Gemma3 models or make architecture check optional
+        self.is_multimodal = (config.architecture == gemma_config.Architecture.GEMMA_3 and 
+                              hasattr(config, 'vision_config') and 
+                              config.vision_config is not None)
+        
         self.config = config
         max_seq_len = config.max_position_embeddings
         head_dim = config.head_dim
         vocab_size = config.vocab_size
-        self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
+        self.tokenizer = tokenizer.Tokenizer(config.tokenizer) if hasattr(config, 'tokenizer') else None
         self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
         self.model = GemmaTPAModel(config)
         self.sampler = gemma_model.Sampler(vocab_size, config)
 
-        if config.vision_config is None:
-            raise ValueError('vision_config must be provided for Gemma3.')
-        self.siglip_vision_model = siglip_vision_model.SiglipVisionModel(config.vision_config)
-        # transformer/embedder/mm_soft_embedding_norm
-        self.mm_soft_embedding_norm = gemma_model.RMSNorm(config.vision_config.embedding_dim,
-                                                         eps = config.rms_norm_eps)
-        # transformer/embedder/mm_input_projection
-        self.mm_input_projection = gemma_model.Linear(config.vision_config.embedding_dim, config.hidden_size, config.quant)
+        # Handle multimodal components only if the model is multimodal
+        if self.is_multimodal:
+            self.siglip_vision_model = siglip_vision_model.SiglipVisionModel(config.vision_config)
+            # transformer/embedder/mm_soft_embedding_norm
+            self.mm_soft_embedding_norm = gemma_model.RMSNorm(config.vision_config.embedding_dim,
+                                                           eps = config.rms_norm_eps)
+            # transformer/embedder/mm_input_projection
+            self.mm_input_projection = gemma_model.Linear(config.vision_config.embedding_dim, config.hidden_size, config.quant)
 
-        if config.rope_wave_length is None:
-            raise ValueError('rope_wave_length must be provided for Gemma3.')
-        rope_lengths = config.rope_wave_length
+        # Set up RoPE frequencies, with different handling for different model types
         defaults = {
                 gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
                 gemma_config.AttentionType.GLOBAL: 10_000,
             }
-        self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
-                gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]
-            ))
-        self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
-                gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]
-            ), rope_scaling_factor=config.rope_scaling_factor)
+            
+        if hasattr(config, 'rope_wave_length') and config.rope_wave_length is not None:
+            # Gemma3 style
+            rope_lengths = config.rope_wave_length
+            rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
+            
+            self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+                    gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]
+                ))
+            self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+                    gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]
+                ), rope_scaling_factor=rope_scaling_factor)
+        else:
+            # Standard Gemma style
+            theta = getattr(config, 'rope_theta', 10_000)
+            rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
+            
+            self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=theta)
+            self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=theta, 
+                                    rope_scaling_factor=rope_scaling_factor)
 
     def _register_freqs_cis(
         self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
@@ -67,17 +83,80 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     @torch.no_grad()
     def forward(self,
             input_token_ids: torch.Tensor, # B x L
-            image_patches: torch.Tensor, # B x N x C x H x W (3x896x896)
-            image_presence_mask: torch.Tensor, # B x N
-            input_positions: torch.Tensor,
-            kv_caches: List[Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]],
-            mask: torch.Tensor,
-            output_positions: torch.Tensor,
-            temperatures: Union[torch.Tensor, None],
-            top_ps: torch.Tensor,
-            top_ks: torch.Tensor,
-            local_mask: torch.Tensor | None = None,
+            image_patches: Optional[torch.Tensor] = None, # B x N x C x H x W (3x896x896)
+            image_presence_mask: Optional[torch.Tensor] = None, # B x N
+            input_positions: Optional[torch.Tensor] = None,
+            kv_caches: Optional[List[Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]]] = None,
+            mask: Optional[torch.Tensor] = None,
+            output_positions: Optional[torch.Tensor] = None,
+            temperatures: Optional[Union[torch.Tensor, None]] = None,
+            top_ps: Optional[torch.Tensor] = None,
+            top_ks: Optional[torch.Tensor] = None,
+            local_mask: Optional[torch.Tensor] = None,
             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with flexibility to handle both multimodal and text-only models."""
+        # For standard text-only model inference (used with non-multimodal models)
+        if input_positions is None:
+            # Simple text-only inference case
+            logits = self.text_token_embedder(input_token_ids)
+            normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=logits.dtype, device=logits.device)
+            logits = logits * normalizer
+            
+            # Forward through TPA model - need to create positional indices
+            seq_len = input_token_ids.size(1)
+            batch_size = input_token_ids.size(0)
+            pos_indices = torch.arange(0, seq_len, device=input_token_ids.device)
+            
+            # Create freqs_cis dictionary
+            freqs_cis = {}
+            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, pos_indices)
+            freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, pos_indices)
+            
+            # Create attention mask for causal decoding
+            max_len = seq_len
+            attn_mask = torch.tril(torch.ones((batch_size, 1, max_len, max_len), dtype=torch.bool, device=input_token_ids.device))
+            min_dtype = torch.finfo(self.dtype).min
+            attn_mask_tensor = torch.where(attn_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=input_token_ids.device))
+            
+            # Create sliding window local mask if needed 
+            if self.config.sliding_window_size is not None:
+                local_mask_tensor = torch.logical_and(
+                    attn_mask,
+                    torch.triu(torch.ones((1, 1, max_len, max_len), dtype=torch.bool, device=input_token_ids.device), 
+                             diagonal=-(self.config.sliding_window_size-1))
+                )
+                local_mask_tensor = torch.where(
+                    local_mask_tensor, 0, torch.tensor(min_dtype, dtype=torch.float32, device=input_token_ids.device)
+                )
+            else:
+                local_mask_tensor = attn_mask_tensor
+            
+            # Create TPA KV caches if not provided
+            if kv_caches is None:
+                kv_caches = create_tpa_kv_caches(self.config, batch_size, seq_len, input_token_ids.device)
+            
+            # Simple write indices for full sequence
+            kv_write_indices = torch.arange(0, seq_len, device=input_token_ids.device)
+            
+            # Forward through model
+            hidden_states = self.model(
+                hidden_states=logits,
+                freqs_cis=freqs_cis,
+                kv_write_indices=kv_write_indices,
+                kv_caches=kv_caches,
+                mask=attn_mask_tensor,
+                local_mask=local_mask_tensor,
+            )
+            
+            # Project to vocabulary
+            embedder_weight = self.text_token_embedder.weight
+            if self.config.quant:
+                embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+                
+            # Compute logits
+            return torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
+            
+        # Regular multimodal forward pass
         freqs_cis = {}
         freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
                 self.local_freqs_cis.index_select(0, input_positions)
@@ -88,7 +167,9 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         hidden_states = self.text_token_embedder(input_token_ids)
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
-        if image_patches is not None and self.config.vision_config is not None:
+        
+        # Handle image input for multimodal models
+        if self.is_multimodal and image_patches is not None:
             # the input has images
             B, N, C, H, W = image_patches.shape
             # Flatten and Pass to SiglipVisionModel, and apply SiglipVisionModel Exit
@@ -205,22 +286,70 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         top_k: int = 64,
     ) -> Sequence[str]:
         """Generates responses for given prompts using Gemma model with TPA."""
-        # Inference only.
-        processing_result = gemma3_preprocessor.tokenize_raw_input(
-                self.tokenizer, prompts, self.config, output_len, device
-            )
-        batch_size = processing_result["batch_size"]
-        user_input_token_ids = processing_result["user_input_token_ids"]
-        image_batch = processing_result["image_batch"]
-        min_prompt_len = processing_result["min_prompt_len"]
-        max_prompt_len = processing_result["max_prompt_len"]
-        total_seq_len = processing_result["max_seq_len"]
-        image_presence_mask = processing_result["image_presence_mask"]
+        # Handle different model types
+        if self.is_multimodal:
+            # Process multimodal input with Gemma3 preprocessor
+            processing_result = gemma3_preprocessor.tokenize_raw_input(
+                    self.tokenizer, prompts, self.config, output_len, device
+                )
+            batch_size = processing_result["batch_size"]
+            user_input_token_ids = processing_result["user_input_token_ids"]
+            image_batch = processing_result["image_batch"]
+            min_prompt_len = processing_result["min_prompt_len"]
+            max_prompt_len = processing_result["max_prompt_len"]
+            total_seq_len = processing_result["max_seq_len"]
+            image_presence_mask = processing_result["image_presence_mask"]
+        else:
+            # Handle text-only model case
+            if self.tokenizer is None and hasattr(self.config, 'tokenizer'):
+                self.tokenizer = tokenizer.Tokenizer(self.config.tokenizer)
+            elif self.tokenizer is None:
+                # Look for tokenizer in common locations
+                tokenizer_path = "tokenizer/tokenizer.model"
+                if os.path.exists("gemma_models/tokenizer.model"):
+                    tokenizer_path = "gemma_models/tokenizer.model"
+                self.tokenizer = tokenizer.Tokenizer(tokenizer_path)
+                
+            # Basic preprocessing for text-only prompts
+            batch_size = len(prompts)
+            
+            # Extract text prompts
+            text_prompts = []
+            for p in prompts:
+                if isinstance(p, str):
+                    text_prompts.append(p)
+                elif isinstance(p, tuple) and len(p) > 0 and isinstance(p[0], str):
+                    text_prompts.append(p[0])
+                else:
+                    raise ValueError(f"Unsupported prompt type: {type(p)}")
+            
+            # Tokenize prompts
+            tokenized_prompts = [torch.tensor(self.tokenizer.encode(p), dtype=torch.long) for p in text_prompts]
+            max_prompt_len = max(len(p) for p in tokenized_prompts)
+            
+            # Create padded tensor
+            user_input_token_ids = torch.full((batch_size, max_prompt_len), 
+                                             self.tokenizer.pad_id,
+                                             dtype=torch.long, device=device)
+            
+            # Fill padded tensor with tokenized prompts
+            for i, tokens in enumerate(tokenized_prompts):
+                user_input_token_ids[i, :len(tokens)] = tokens
+                
+            # Set generation parameters
+            min_prompt_len = max_prompt_len
+            total_seq_len = max_prompt_len + output_len
+            
+            # None for text-only model
+            image_batch = None
+            image_presence_mask = None
 
         # Create attention mask.
         min_dtype = torch.finfo(self.dtype).min
-        if self.config.sliding_window_size is None:
-            raise ValueError('gemma 3 model requires sliding_window size')
+        
+        # Set a default sliding window for non-multimodal models if needed
+        if self.config.sliding_window_size is None and not hasattr(self.config, 'sliding_window_size'):
+            self.config.sliding_window_size = 1024  # Default size for Gemma models
         boolean_mask, local_boolean_mask = self.create_attention_mask(user_input_token_ids, total_seq_len)
         mask_tensor = torch.where(boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
         local_mask_tensor = torch.where(local_boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
