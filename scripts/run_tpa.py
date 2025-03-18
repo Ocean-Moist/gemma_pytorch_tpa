@@ -188,6 +188,8 @@ def main(_):
   # Construct the model config
   if _VARIANT.value == "1b":
       model_config = config.get_config_for_1b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
+      # Add a dummy vision_config=None to explicitly indicate this is a text-only model
+      model_config.vision_config = None
   elif _VARIANT.value == "4b":
       model_config = config.get_config_for_4b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
   elif _VARIANT.value == "12b":
