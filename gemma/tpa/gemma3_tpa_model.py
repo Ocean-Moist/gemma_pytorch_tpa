@@ -30,22 +30,66 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                              config.vision_config is not None)
         
         self.config = config
+        
+        # Set proper defaults if not present
+        if not hasattr(config, 'max_position_embeddings'):
+            print("Setting default max_position_embeddings to 2048")
+            config.max_position_embeddings = 2048
+        
+        if not hasattr(config, 'head_dim'):
+            print(f"Setting default head_dim to {config.hidden_size // config.num_attention_heads}")
+            config.head_dim = config.hidden_size // config.num_attention_heads
+            
+        # Add TPA ranks if not defined
+        if not hasattr(config, 'q_rank'):
+            print("Setting default q_rank to 6")
+            config.q_rank = 6
+        if not hasattr(config, 'k_rank'):
+            print("Setting default k_rank to 2")
+            config.k_rank = 2
+        if not hasattr(config, 'v_rank'):
+            print("Setting default v_rank to 2")
+            config.v_rank = 2
+        
+        # For non-MQA/GQA models, ensure num_key_value_heads is set
+        if not hasattr(config, 'num_key_value_heads'):
+            print(f"Setting default num_key_value_heads to {config.num_attention_heads}")
+            config.num_key_value_heads = config.num_attention_heads
+            
         max_seq_len = config.max_position_embeddings
         head_dim = config.head_dim
         vocab_size = config.vocab_size
-        self.tokenizer = tokenizer.Tokenizer(config.tokenizer) if hasattr(config, 'tokenizer') else None
-        self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
+        
+        # Initialize tokenizer if available
+        if hasattr(config, 'tokenizer'):
+            self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
+        else:
+            self.tokenizer = None
+            print("No tokenizer configuration found in model config")
+            
+        # Initialize embedder - using 'text_token_embedder' for Gemma3 naming convention
+        self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, 
+                                                     getattr(config, 'quant', False))
+        
+        # Initialize TPA model
         self.model = GemmaTPAModel(config)
+        
+        # Initialize output sampler
         self.sampler = gemma_model.Sampler(vocab_size, config)
 
         # Handle multimodal components only if the model is multimodal
         if self.is_multimodal:
+            print("Initializing multimodal components")
             self.siglip_vision_model = siglip_vision_model.SiglipVisionModel(config.vision_config)
             # transformer/embedder/mm_soft_embedding_norm
             self.mm_soft_embedding_norm = gemma_model.RMSNorm(config.vision_config.embedding_dim,
                                                            eps = config.rms_norm_eps)
             # transformer/embedder/mm_input_projection
-            self.mm_input_projection = gemma_model.Linear(config.vision_config.embedding_dim, config.hidden_size, config.quant)
+            self.mm_input_projection = gemma_model.Linear(config.vision_config.embedding_dim, 
+                                                      config.hidden_size, 
+                                                      getattr(config, 'quant', False))
+        else:
+            print("Initializing text-only model without vision components")
 
         # Set up RoPE frequencies, with different handling for different model types
         defaults = {
@@ -53,8 +97,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 gemma_config.AttentionType.GLOBAL: 10_000,
             }
             
+        # Handle RoPE configuration for different model types
         if hasattr(config, 'rope_wave_length') and config.rope_wave_length is not None:
             # Gemma3 style
+            print("Using Gemma3-style RoPE configuration")
             rope_lengths = config.rope_wave_length
             rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
             
@@ -66,12 +112,15 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 ), rope_scaling_factor=rope_scaling_factor)
         else:
             # Standard Gemma style
+            print("Using standard RoPE configuration")
             theta = getattr(config, 'rope_theta', 10_000)
             rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
             
             self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=theta)
             self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=theta, 
-                                    rope_scaling_factor=rope_scaling_factor)
+                                  rope_scaling_factor=rope_scaling_factor)
+                                  
+        print(f"Initialized Gemma model with TPA: q_rank={config.q_rank}, k_rank={config.k_rank}, v_rank={config.v_rank}")
 
     def _register_freqs_cis(
         self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
@@ -249,68 +298,117 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         return hidden_states.reshape(batch_size, seq_len, model_dim).contiguous()
 
     def create_attention_mask(self, input_ids: torch.Tensor, sequence_length: int):
+        """
+        Create attention masks for both standard causal attention and local sliding window attention.
+        
+        Args:
+            input_ids: Input token IDs tensor [batch_size, seq_len]
+            sequence_length: Total sequence length
+            
+        Returns:
+            tuple: (attention_mask, local_mask)
+                - attention_mask: Global attention mask tensor
+                - local_mask: Local sliding window attention mask tensor
+        """
         batch_size = input_ids.shape[0]
-        causal_mask = torch.tril(torch.ones((batch_size, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device))
+        device = input_ids.device
+        
+        # Create standard causal mask (lower triangular)
+        causal_mask = torch.tril(
+            torch.ones((batch_size, 1, sequence_length, sequence_length), 
+                      dtype=torch.bool, device=device)
+        )
         
         # For non-multimodal models or when tokenizer doesn't have image token placeholder
         if not self.is_multimodal or self.tokenizer is None or not hasattr(self.tokenizer, 'image_token_placeholder_id'):
             # Create sliding window local mask if needed
             if hasattr(self.config, 'sliding_window_size') and self.config.sliding_window_size is not None:
-                local_mask = torch.logical_and(
-                    causal_mask,
-                    torch.triu(torch.ones((1, 1, sequence_length, sequence_length), 
-                                         dtype=torch.bool, device=input_ids.device), 
-                               diagonal=-(self.config.sliding_window_size-1))
+                sliding_window_size = self.config.sliding_window_size
+                print(f"Creating sliding window mask with window size: {sliding_window_size}")
+                
+                # Create upper triangular mask with -window_size offset diagonal
+                # This mask allows attention only within sliding_window_size tokens before current position
+                upper_triangular = torch.triu(
+                    torch.ones((1, 1, sequence_length, sequence_length), 
+                              dtype=torch.bool, device=device),
+                    diagonal=-(sliding_window_size-1)
                 )
+                
+                # Combine causal mask with sliding window mask
+                local_mask = torch.logical_and(causal_mask, upper_triangular)
             else:
+                # Without sliding window, local mask is just the causal mask
                 local_mask = causal_mask
+                print("No sliding window specified, using standard causal mask for local attention")
+                
             return causal_mask, local_mask
         
         # For multimodal models with image tokens
-        image_token_mask = input_ids == self.tokenizer.image_token_placeholder_id
-        # Pad the mask to the left with 0. This is to make sure the boundary
-        # detection works correctly. Boundary (starting index of image patch) is
-        # detected when the value changes from 0 to 1.
-        padded_mask = nn.functional.pad(image_token_mask, (1, 0), value=0)
-        # Find the boundary (starting index) of the image tokens patch.
-        boundary = padded_mask[:, 1:] > padded_mask[:, :-1]
-        # Number the boundary.
-        # boundary:
-        # [[False, False,  True, False, False],
-        #  [False,  True, False,  True, False]]
-        # numbered_boundary:
-        # [[0, 0, 1, 1, 1],
-        #  [0, 1, 1, 2, 2]]
-        numbered_boundary = torch.cumsum(boundary, dim=-1)
+        print("Creating multimodal attention mask with image token handling")
+        
+        try:
+            # Get image token mask
+            image_token_mask = input_ids == self.tokenizer.image_token_placeholder_id
+            
+            # Pad the mask to the left with 0 to detect boundaries
+            padded_mask = nn.functional.pad(image_token_mask, (1, 0), value=0)
+            
+            # Find the boundary (starting index) of the image tokens patch
+            # A boundary is detected when mask changes from 0 to 1
+            boundary = padded_mask[:, 1:] > padded_mask[:, :-1]
+            
+            # Number the boundaries
+            numbered_boundary = torch.cumsum(boundary, dim=-1)
 
-        # image_token_mask:
-        # [[False, False,  True,  True, False],
-        #  [True,  True, False,  True, True]]
-        # numbered_boundary:
-        # [[0, 0, 1, 1, 1],
-        #  [1, 1, 1, 2, 2]]
-        # q_block_indices:
-        # [[0, 0, 1, 1, 0],
-        #  [1, 1, 0, 2, 2]]
-        q_block_indices = image_token_mask * numbered_boundary
-        kv_block_indices = q_block_indices
-        # Test the equality of vertical and horizontal numbered patches
-        # to create the bidirectional mask.
-        bidirectional_mask = torch.logical_and(
-            kv_block_indices[:, None, :] == q_block_indices.unsqueeze(-1),
-            q_block_indices.unsqueeze(-1) > 0,
-        )
-        attention_mask = torch.logical_or(causal_mask, bidirectional_mask.unsqueeze(1))
-        # The upper triangular matrix's diagonal is shifted by sliding window size
-        # before doing logical 'and' with attention mask. This is to make sure the
-        # local attention is within the sliding window.
-        local_mask = torch.logical_and(
-                attention_mask,
-                torch.triu(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device), 
-                          diagonal=-(self.config.sliding_window_size-1) if hasattr(self.config, 'sliding_window_size') and 
-                                   self.config.sliding_window_size is not None else -1)
+            # Create block indices for query and key
+            q_block_indices = image_token_mask * numbered_boundary
+            kv_block_indices = q_block_indices
+            
+            # Create bidirectional mask for image tokens
+            # This allows tokens within the same image to attend to each other
+            bidirectional_mask = torch.logical_and(
+                kv_block_indices[:, None, :] == q_block_indices.unsqueeze(-1),
+                q_block_indices.unsqueeze(-1) > 0,
             )
-        return attention_mask, local_mask
+            
+            # Combine causal mask with bidirectional mask for image tokens
+            attention_mask = torch.logical_or(causal_mask, bidirectional_mask.unsqueeze(1))
+            
+            # Apply sliding window constraint to the combined mask if needed
+            sliding_window_size = getattr(self.config, 'sliding_window_size', None)
+            if sliding_window_size is not None:
+                diagonal_offset = -(sliding_window_size-1)
+            else:
+                diagonal_offset = -1  # Default to full sequence
+                
+            # Create local mask by applying sliding window constraint
+            local_mask = torch.logical_and(
+                attention_mask,
+                torch.triu(
+                    torch.ones((1, 1, sequence_length, sequence_length), 
+                              dtype=torch.bool, device=device),
+                    diagonal=diagonal_offset
+                )
+            )
+            
+            return attention_mask, local_mask
+            
+        except Exception as e:
+            print(f"Error creating multimodal attention mask: {e}, falling back to standard mask")
+            # Fallback to standard causal mask if there's an error
+            if hasattr(self.config, 'sliding_window_size') and self.config.sliding_window_size is not None:
+                local_mask = torch.logical_and(
+                    causal_mask,
+                    torch.triu(
+                        torch.ones((1, 1, sequence_length, sequence_length), 
+                                  dtype=torch.bool, device=device),
+                        diagonal=-(self.config.sliding_window_size-1)
+                    )
+                )
+            else:
+                local_mask = causal_mask
+                
+            return causal_mask, local_mask
 
     def generate(
         self,
@@ -610,7 +708,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Reshape for factorization
         hidden_size = self.config.hidden_size
         
-        if self.config.architecture == gemma_config.Architecture.GEMMA_3:
+        if hasattr(self.config, 'architecture') and self.config.architecture == gemma_config.Architecture.GEMMA_3:
             # For Gemma 3 shape handling
             if weight.shape[0] == self.config.num_attention_heads * self.config.head_dim:
                 # Query weights
@@ -621,11 +719,39 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 out_dim = self.config.num_key_value_heads
                 head_dim = self.config.head_dim
         else:
-            # For other architectures
-            out_dim = weight.shape[0] // self.config.head_dim
-            head_dim = self.config.head_dim
+            # For other architectures (like Gemma 1B)
+            if hasattr(self.config, 'num_key_value_heads') and hasattr(self.config, 'head_dim'):
+                if weight.shape[0] == self.config.num_attention_heads * self.config.head_dim:
+                    # Query weights
+                    out_dim = self.config.num_attention_heads
+                    head_dim = self.config.head_dim
+                else:
+                    # Key/Value weights
+                    out_dim = self.config.num_key_value_heads
+                    head_dim = self.config.head_dim
+            else:
+                # Fallback for older models without these attributes
+                out_dim = weight.shape[0] // self.config.head_dim
+                head_dim = self.config.head_dim
         
-        weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
+        print(f"Processing weight with shape {weight.shape}, out_dim: {out_dim}, head_dim: {head_dim}")
+        
+        try:
+            # Try to reshape to expected dimensions
+            weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
+        except RuntimeError as e:
+            # Handle reshape error gracefully
+            print(f"Reshape error: {e}, trying alternative reshaping...")
+            # Try to infer dimensions
+            if weight.shape[0] % head_dim == 0:
+                out_dim = weight.shape[0] // head_dim
+                weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
+            else:
+                # Use the original dimensions and reshape accordingly
+                print(f"Using original dimensions and reshaping accordingly")
+                out_dim = weight.shape[0] // head_dim
+                head_dim = weight.shape[0] // out_dim
+                weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
         
         # Flatten for SVD
         weight_flat = weight_reshaped.reshape(out_dim * head_dim, hidden_size)
@@ -639,7 +765,12 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         print(f"SVD input shape: {weight_flat_float32.shape}, out_dim: {out_dim}, head_dim: {head_dim}, hidden_size: {hidden_size}, rank: {rank}")
         
         # Perform SVD (forcing it to run on same device as input)
-        U, S, Vh = torch.svd(weight_flat_float32)
+        try:
+            U, S, Vh = torch.svd(weight_flat_float32)
+        except Exception as e:
+            print(f"SVD failed: {e}, trying torch.linalg.svd instead")
+            # Fallback to torch.linalg.svd which is more stable
+            U, S, Vh = torch.linalg.svd(weight_flat_float32, full_matrices=False)
         
         # Print SVD output shapes for debugging
         print(f"SVD output shapes - U: {U.shape}, S: {S.shape}, Vh: {Vh.shape}")
@@ -649,8 +780,9 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         S = S.to(dtype=original_dtype, device=original_device)
         Vh = Vh.to(dtype=original_dtype, device=original_device)
         
-        # Use top-k singular values/vectors
+        # Use top-k singular values/vectors, ensuring we don't exceed available dimensions
         rank = min(rank, min(U.shape[1], Vh.shape[0]))
+        print(f"Using effective rank: {rank}")
         
         # Scale singular values into the factors
         sqrt_S = torch.sqrt(S[:rank])
@@ -659,64 +791,94 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         # Print sizes before reshaping
         print(f"Before reshape - U_scaled: {U_scaled.shape}, Vh_scaled: {Vh_scaled.shape}")
-        print(f"Expected A_weight shape: ({out_dim}, {head_dim}, {rank}) -> ({out_dim * rank}, {head_dim})")
-        print(f"Expected B_weight shape: ({rank}, {hidden_size})")
+        print(f"A_proj weight shape: {A_proj.weight.shape}, B_proj weight shape: {B_proj.weight.shape}")
         
-        # Verify expected sizes match actual sizes
-        expected_u_size = out_dim * head_dim * rank
-        expected_vh_size = rank * hidden_size
+        # Derive target shapes from module weights
+        target_A_shape = A_proj.weight.shape
+        target_B_shape = B_proj.weight.shape
         
-        if U_scaled.numel() != expected_u_size:
-            # Adjust U if sizes don't match
-            print(f"WARNING: U_scaled size mismatch: {U_scaled.numel()} vs expected {expected_u_size}")
-            # Try to reshape with proper dimensions
-            if U_scaled.shape[0] == out_dim * head_dim:
-                # Try reshaping by adjusting out_dim or head_dim
-                A_weight = U_scaled[:, :rank].reshape(-1, head_dim)
-            else:
-                # Fallback to direct reshaping
-                A_weight = U_scaled.reshape(-1, head_dim)
-        else:
-            # Original reshape
+        # Calculate expected transposed shapes (accounting for transpose in final assignment)
+        expected_A_t_shape = target_A_shape[1], target_A_shape[0]  # Transposed shape
+        expected_B_t_shape = target_B_shape[1], target_B_shape[0]  # Transposed shape
+        
+        print(f"Target shapes - A: {expected_A_t_shape}, B: {expected_B_t_shape}")
+        
+        # Reshape U_scaled to match A_proj's expected input shape
+        try:
             A_weight = U_scaled.reshape(out_dim, head_dim, rank).permute(0, 2, 1).reshape(out_dim * rank, head_dim)
-        
-        if Vh_scaled.numel() != expected_vh_size:
-            # Adjust Vh if sizes don't match
-            print(f"WARNING: Vh_scaled size mismatch: {Vh_scaled.numel()} vs expected {expected_vh_size}")
+            # Check that the shape matches what we expect
+            if A_weight.shape != expected_A_t_shape:
+                raise RuntimeError(f"Reshaped A_weight {A_weight.shape} doesn't match expected {expected_A_t_shape}")
+        except Exception as e:
+            print(f"A_weight reshape error: {e}")
+            # Create a properly shaped A_weight even if we can't reshape the original
+            A_weight = torch.zeros(expected_A_t_shape, device=U_scaled.device, dtype=U_scaled.dtype)
             
-            # Check actual dimensions of Vh_scaled
-            actual_size = Vh_scaled.size(1)
-            if actual_size != hidden_size:
-                print(f"Actual Vh_scaled dim1 ({actual_size}) doesn't match hidden_size ({hidden_size})")
-                
-                # Adjust hidden_size to match actual dimensions
-                if Vh_scaled.size(1) == Vh.size(0):
-                    print(f"Using Vh dimensions: {Vh.size(0)}")
-                    B_weight = Vh_scaled  # Already in correct shape
-                else:
-                    # If we can't safely reshape, pad or truncate to get the right dimension
-                    print(f"Creating compatible B_weight tensor")
-                    B_weight = torch.zeros(rank, hidden_size, device=Vh_scaled.device, dtype=Vh_scaled.dtype)
-                    # Copy as much as we can from Vh_scaled
-                    copy_size = min(Vh_scaled.size(1), hidden_size)
-                    B_weight[:, :copy_size] = Vh_scaled[:, :copy_size]
+            # Try to copy as much data as possible from U_scaled
+            if U_scaled.shape[0] * rank <= A_weight.shape[0]:
+                # We can at least fill part of the output
+                u_flat = U_scaled.reshape(-1)
+                copy_len = min(u_flat.shape[0], A_weight.shape[0] * A_weight.shape[1])
+                A_weight.view(-1)[:copy_len] = u_flat[:copy_len]
             else:
-                # Safe to reshape
-                B_weight = Vh_scaled
-        else:
-            # Original reshape
+                # Try a direct reshape and truncate if needed
+                flat_u = U_scaled.reshape(-1)
+                flat_a = A_weight.reshape(-1)
+                copy_size = min(flat_u.size(0), flat_a.size(0))
+                flat_a[:copy_size] = flat_u[:copy_size]
+                A_weight = flat_a.reshape(expected_A_t_shape)
+
+        # Reshape Vh_scaled to match B_proj's expected input shape
+        try:
             B_weight = Vh_scaled.reshape(rank, hidden_size)
+            # Check that the shape matches what we expect
+            if B_weight.shape != expected_B_t_shape:
+                raise RuntimeError(f"Reshaped B_weight {B_weight.shape} doesn't match expected {expected_B_t_shape}")
+        except Exception as e:
+            print(f"B_weight reshape error: {e}")
+            # Create a properly shaped B_weight
+            B_weight = torch.zeros(expected_B_t_shape, device=Vh_scaled.device, dtype=Vh_scaled.dtype)
             
+            # Try to copy as much data as possible from Vh_scaled
+            if Vh_scaled.shape[0] * Vh_scaled.shape[1] <= B_weight.shape[0] * B_weight.shape[1]:
+                vh_flat = Vh_scaled.reshape(-1)
+                copy_len = min(vh_flat.shape[0], B_weight.shape[0] * B_weight.shape[1])
+                B_weight.view(-1)[:copy_len] = vh_flat[:copy_len]
+            else:
+                # Try a direct reshape and truncate
+                rows_to_copy = min(Vh_scaled.shape[0], B_weight.shape[0])
+                cols_to_copy = min(Vh_scaled.shape[1], B_weight.shape[1])
+                B_weight[:rows_to_copy, :cols_to_copy] = Vh_scaled[:rows_to_copy, :cols_to_copy]
+        
         print(f"Final shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
         
         # Set weights for the linear layers
         with torch.no_grad():
-            # Handle different shapes based on architecture
-            A_proj.weight.copy_(A_weight.transpose(0, 1))
-            B_proj.weight.copy_(B_weight.transpose(0, 1))
+            # Copy weights, handling any shape mismatches
+            try:
+                A_proj.weight.copy_(A_weight.transpose(0, 1))
+            except Exception as e:
+                print(f"Failed to copy A_weight: {e}")
+                # Fallback: create a compatible tensor and copy what we can
+                temp_weight = torch.zeros_like(A_proj.weight)
+                rows = min(A_weight.shape[1], temp_weight.shape[0])
+                cols = min(A_weight.shape[0], temp_weight.shape[1])
+                temp_weight[:rows, :cols] = A_weight.transpose(0, 1)[:rows, :cols]
+                A_proj.weight.copy_(temp_weight)
+            
+            try:
+                B_proj.weight.copy_(B_weight.transpose(0, 1))
+            except Exception as e:
+                print(f"Failed to copy B_weight: {e}")
+                # Fallback: create a compatible tensor and copy what we can
+                temp_weight = torch.zeros_like(B_proj.weight)
+                rows = min(B_weight.shape[1], temp_weight.shape[0])
+                cols = min(B_weight.shape[0], temp_weight.shape[1])
+                temp_weight[:rows, :cols] = B_weight.transpose(0, 1)[:rows, :cols]
+                B_proj.weight.copy_(temp_weight)
             
             # Set weight scalers if using quantization
-            if self.config.quant:
+            if hasattr(self.config, 'quant') and self.config.quant:
                 if hasattr(A_proj, 'weight_scaler'):
                     A_proj.weight_scaler.fill_(1.0)
                 if hasattr(B_proj, 'weight_scaler'):

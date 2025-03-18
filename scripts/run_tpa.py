@@ -190,6 +190,9 @@ def main(_):
       model_config = config.get_config_for_1b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
       # Add a dummy vision_config=None to explicitly indicate this is a text-only model
       model_config.vision_config = None
+      # Set architecture type for 1B model (it's not a Gemma 3 model)
+      if hasattr(gemma_config, 'Architecture'):
+          model_config.architecture = gemma_config.Architecture.GEMMA
   elif _VARIANT.value == "4b":
       model_config = config.get_config_for_4b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
   elif _VARIANT.value == "12b":
@@ -203,6 +206,11 @@ def main(_):
   model_config.v_rank = _V_RANK.value
   model_config.quant = _QUANT.value
   
+  # Set sliding window size if not defined (needed for proper attention masking)
+  if not hasattr(model_config, 'sliding_window_size'):
+      print("Setting default sliding_window_size to 4096")
+      model_config.sliding_window_size = 4096
+  
   # Seed random
   random.seed(_SEED.value)
   np.random.seed(_SEED.value)
@@ -214,118 +222,183 @@ def main(_):
   # Set up timing measurements
   start_time = time()
   
+  # Initialize tokenizer first (so the model can use it)
+  print(f"Loading tokenizer from {_TOKENIZER_PATH.value}...")
+  gemma_tok = gemma_tokenizer.Tokenizer(_TOKENIZER_PATH.value)
+  
+  # Store tokenizer path in config so model can load it if needed
+  model_config.tokenizer = _TOKENIZER_PATH.value
+  
   # Create and load the model
   with _set_default_tensor_type(model_config.get_dtype()):
     if _CONVERT.value:
       print(f"Loading standard Gemma model from {_CKPT.value}...")
       
-      # Load the model checkpoint
-      checkpoint = torch.load(_CKPT.value, map_location="cpu")
-      
-      # Create standard model
-      standard_model = gemma_model.GemmaForCausalLM(model_config)
-      standard_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-      standard_model.eval()
-      
-      load_time = time()
-      print(f"Standard model loaded in {load_time - start_time:.2f} seconds")
-      
-      print("Converting to TPA model...")
-      
-      # Use the existing TPA model and conversion method from our codebase
-      # This model class handles multimodal and non-multimodal models
-      tpa_model = Gemma3ForMultimodalLMwithTPA(model_config)
-      convert_start = time()
-      
-      # Convert using our existing implementation
-      tpa_model.convert_from_standard_weights(standard_model)
-      
-      convert_time = time() - convert_start
-      print(f"Model converted to TPA in {convert_time:.2f} seconds")
-      
-      if _SAVE_TPA.value:
-        print(f"Saving TPA model to {_SAVE_TPA.value}...")
-        save_dir = os.path.dirname(_SAVE_TPA.value)
-        if save_dir:
-          os.makedirs(save_dir, exist_ok=True)
-        torch.save({
-            'model_state_dict': tpa_model.state_dict(),
-            'config': model_config
-        }, _SAVE_TPA.value)
-        print(f"TPA model saved successfully")
-      
-      # Clear standard model from memory
-      del standard_model
-      if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-      
-      model = tpa_model
+      try:
+          # Load the model checkpoint
+          checkpoint = torch.load(_CKPT.value, map_location="cpu")
+          
+          # Create standard model
+          standard_model = gemma_model.GemmaForCausalLM(model_config)
+          standard_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+          standard_model.eval()
+          
+          load_time = time()
+          print(f"Standard model loaded in {load_time - start_time:.2f} seconds")
+          
+          print("Converting to TPA model...")
+          
+          # Use the existing TPA model and conversion method from our codebase
+          # This model class handles multimodal and non-multimodal models
+          tpa_model = Gemma3ForMultimodalLMwithTPA(model_config)
+          convert_start = time()
+          
+          # Convert using our existing implementation
+          print("Starting weight conversion process...")
+          tpa_model.convert_from_standard_weights(standard_model)
+          
+          convert_time = time() - convert_start
+          print(f"Model converted to TPA in {convert_time:.2f} seconds")
+          
+          if _SAVE_TPA.value:
+              print(f"Saving TPA model to {_SAVE_TPA.value}...")
+              save_dir = os.path.dirname(_SAVE_TPA.value)
+              if save_dir:
+                  os.makedirs(save_dir, exist_ok=True)
+              torch.save({
+                  'model_state_dict': tpa_model.state_dict(),
+                  'config': model_config
+              }, _SAVE_TPA.value)
+              print(f"TPA model saved successfully")
+          
+          # Clear standard model from memory
+          del standard_model
+          if torch.cuda.is_available():
+              torch.cuda.empty_cache()
+          
+          model = tpa_model
+      except Exception as e:
+          print(f"Error converting model: {e}")
+          import traceback
+          traceback.print_exc()
+          return
       
     else:
       print(f"Loading TPA model from {_CKPT.value}...")
-      checkpoint = torch.load(_CKPT.value, map_location="cpu")
-      
-      if "config" in checkpoint:
-          model_config = checkpoint["config"]
-      
-      # Create TPA model
-      # The Gemma3ForMultimodalLMwithTPA class works for both multimodal and non-multimodal models
-      model = Gemma3ForMultimodalLMwithTPA(model_config)
-      model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-      
-      load_time = time()
-      print(f"TPA model loaded in {load_time - start_time:.2f} seconds")
+      try:
+          checkpoint = torch.load(_CKPT.value, map_location="cpu")
+          
+          if "config" in checkpoint:
+              model_config = checkpoint["config"]
+              print("Using config from checkpoint")
+          else:
+              print("Using provided config (checkpoint doesn't contain config)")
+          
+          # Create TPA model
+          # The Gemma3ForMultimodalLMwithTPA class works for both multimodal and non-multimodal models
+          model = Gemma3ForMultimodalLMwithTPA(model_config)
+          
+          # Store tokenizer in the model for convenience
+          model.tokenizer = gemma_tok
+          
+          model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+          
+          load_time = time()
+          print(f"TPA model loaded in {load_time - start_time:.2f} seconds")
+      except Exception as e:
+          print(f"Error loading TPA model: {e}")
+          import traceback
+          traceback.print_exc()
+          return
     
     # Move model to device
-    model = model.to(device).eval()
-    to_device_time = time()
-    print(f"Model moved to {device} in {to_device_time - load_time:.2f} seconds")
-  
-  # Initialize tokenizer
-  tokenizer = gemma_tokenizer.Tokenizer(_TOKENIZER_PATH.value)
+    try:
+        model = model.to(device).eval()
+        to_device_time = time()
+        print(f"Model moved to {device} in {to_device_time - load_time:.2f} seconds")
+    except Exception as e:
+        print(f"Error moving model to device {device}: {e}")
+        return
   
   # Generate response
   print(f"Generating response with temperature={_TEMPERATURE.value}, top_p={_TOP_P.value}, top_k={_TOP_K.value}...")
   generate_start = time()
   
-  # Use the model's built-in generate method
-  prompt = [(_PROMPT.value,)]  # Format compatible with Gemma3 models
-  outputs = model.generate(
-    prompts=prompt,
-    device=device,
-    output_len=_OUTPUT_LEN.value,
-    temperature=_TEMPERATURE.value,
-    top_p=_TOP_P.value,
-    top_k=_TOP_K.value
-  )
-  
-  # Extract the generated text
-  generated_text = outputs[0]
-  
-  generate_end = time()
-  
-  # Print the generated text
-  print("\n" + "="*50)
-  print(f"PROMPT: {_PROMPT.value}")
-  print(f"RESULT: {generated_text}")
-  print("="*50)
-  
-  # Print performance metrics
-  generation_time = generate_end - generate_start
-  tokens_generated = len(generated_text.split())  # Rough estimate
-  tokens_per_second = tokens_generated / generation_time
-  
-  print(f"\nPerformance metrics:")
-  print(f"Total generation time: {generation_time:.2f} seconds")
-  print(f"Tokens generated: {tokens_generated}")
-  print(f"Tokens per second: {tokens_per_second:.2f}")
-  
-  # Print memory usage statistics if on CUDA
-  if device.type == "cuda" and torch.cuda.is_available():
-    memory_allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)  # Convert to GB
-    memory_reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)  # Convert to GB
-    print(f"Memory allocated: {memory_allocated:.2f} GB")
-    print(f"Memory reserved:  {memory_reserved:.2f} GB")
+  try:
+      # Use the model's built-in generate method
+      prompt = [(_PROMPT.value,)]  # Format compatible with Gemma3 models
+      outputs = model.generate(
+          prompts=prompt,
+          device=device,
+          output_len=_OUTPUT_LEN.value,
+          temperature=_TEMPERATURE.value,
+          top_p=_TOP_P.value,
+          top_k=_TOP_K.value
+      )
+      
+      # Extract the generated text
+      generated_text = outputs[0]
+      
+      generate_end = time()
+      
+      # Print the generated text
+      print("\n" + "="*50)
+      print(f"PROMPT: {_PROMPT.value}")
+      print(f"RESULT: {generated_text}")
+      print("="*50)
+      
+      # Print performance metrics
+      generation_time = generate_end - generate_start
+      tokens_generated = len(generated_text.split())  # Rough estimate
+      tokens_per_second = tokens_generated / generation_time
+      
+      print(f"\nPerformance metrics:")
+      print(f"Total generation time: {generation_time:.2f} seconds")
+      print(f"Tokens generated: {tokens_generated}")
+      print(f"Tokens per second: {tokens_per_second:.2f}")
+      
+      # Print memory usage statistics if on CUDA
+      if device.type == "cuda" and torch.cuda.is_available():
+          memory_allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)  # Convert to GB
+          memory_reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)  # Convert to GB
+          print(f"Memory allocated: {memory_allocated:.2f} GB")
+          print(f"Memory reserved:  {memory_reserved:.2f} GB")
+          
+          # Calculate memory savings from using TPA
+          # Standard KV cache would use 2 * batch_size * max_seq_len * num_heads * head_dim * bytes_per_element
+          # TPA KV cache uses (k_rank + v_rank) * (num_heads + head_dim) * batch_size * max_seq_len * bytes_per_element
+          
+          batch_size = 1  # Generally 1 for inference
+          seq_len = model_config.max_position_embeddings
+          num_heads = model_config.num_attention_heads
+          head_dim = model_config.head_dim
+          
+          # Calculate bytes per element based on dtype
+          bytes_per_element = 2  # 2 bytes for bfloat16/float16, 4 bytes for float32
+          
+          # Standard KV cache size (in bytes)
+          standard_kv_size = 2 * batch_size * seq_len * num_heads * head_dim * bytes_per_element
+          
+          # TPA KV cache size (in bytes)
+          tpa_kv_size = (_K_RANK.value + _V_RANK.value) * (num_heads + head_dim) * batch_size * seq_len * bytes_per_element
+          
+          # Convert to GB
+          standard_kv_gb = standard_kv_size / (1024 ** 3)
+          tpa_kv_gb = tpa_kv_size / (1024 ** 3)
+          
+          # Calculate reduction ratio
+          reduction_ratio = standard_kv_size / tpa_kv_size
+          
+          print(f"\nMemory efficiency:")
+          print(f"Standard KV cache size: {standard_kv_gb:.2f} GB")
+          print(f"TPA KV cache size: {tpa_kv_gb:.2f} GB")
+          print(f"Reduction ratio: {reduction_ratio:.2f}x")
+          
+      print("\nTPA inference completed successfully!")
+  except Exception as e:
+      print(f"Error during generation: {e}")
+      import traceback
+      traceback.print_exc()
 
 
 if __name__ == '__main__':
