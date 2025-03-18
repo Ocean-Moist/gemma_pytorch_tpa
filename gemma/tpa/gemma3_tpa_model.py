@@ -655,19 +655,27 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                                 sorted_indices_to_remove[..., 0] = 0
                                 
-                                # Create a mask in the original logits space
-                                filtering_mask = torch.zeros_like(batch_logits, dtype=torch.bool)
-                                # Get the indices that should be removed
-                                indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                                # Set those indices to True in the mask (safely, with bounds checking)
-                                valid_indices = (indices_to_remove >= 0) & (indices_to_remove < batch_logits.size(-1))
-                                if valid_indices.any():
-                                    # Only scatter using valid indices
-                                    filtering_mask.scatter_(0, indices_to_remove[valid_indices], True)
-                                # Apply the mask
-                                batch_logits = torch.where(filtering_mask,
-                                                        torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
-                                                        batch_logits)
+                                # Instead of using scatter which has dimension issues,
+                                # create a simple direct implementation for nucleus sampling
+                                # Get the indices we want to keep (logical NOT of sorted_indices_to_remove)
+                                sorted_indices_to_keep = ~sorted_indices_to_remove
+                                
+                                # Create an empty logits tensor filled with -inf
+                                filtered_logits = torch.full_like(batch_logits, -float('inf'))
+                                
+                                # Only keep the logits we want to retain
+                                if sorted_indices_to_keep.any():
+                                    # Get the indices and values to keep
+                                    keep_indices = sorted_indices[sorted_indices_to_keep]
+                                    keep_values = sorted_logits[sorted_indices_to_keep]
+                                    
+                                    # Use a simple loop to set values
+                                    for idx, val in zip(keep_indices.tolist(), keep_values.tolist()):
+                                        if 0 <= idx < filtered_logits.size(0):  # Safety check
+                                            filtered_logits[idx] = val
+                                
+                                # Use the filtered logits
+                                batch_logits = filtered_logits
                             
                             # Sample from the filtered distribution
                             probs = F.softmax(batch_logits, dim=-1)
@@ -776,19 +784,27 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                             sorted_indices_to_remove[..., 0] = 0
                             
-                            # Create a mask in the original logits space
-                            filtering_mask = torch.zeros_like(batch_logits, dtype=torch.bool)
-                            # Get the indices that should be removed
-                            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                            # Set those indices to True in the mask (safely, with bounds checking)
-                            valid_indices = (indices_to_remove >= 0) & (indices_to_remove < batch_logits.size(-1))
-                            if valid_indices.any():
-                                # Only scatter using valid indices
-                                filtering_mask.scatter_(0, indices_to_remove[valid_indices], True)
-                            # Apply the mask
-                            batch_logits = torch.where(filtering_mask,
-                                                    torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
-                                                    batch_logits)
+                            # Instead of using scatter which has dimension issues,
+                            # create a simple direct implementation for nucleus sampling
+                            # Get the indices we want to keep (logical NOT of sorted_indices_to_remove)
+                            sorted_indices_to_keep = ~sorted_indices_to_remove
+                            
+                            # Create an empty logits tensor filled with -inf
+                            filtered_logits = torch.full_like(batch_logits, -float('inf'))
+                            
+                            # Only keep the logits we want to retain
+                            if sorted_indices_to_keep.any():
+                                # Get the indices and values to keep
+                                keep_indices = sorted_indices[sorted_indices_to_keep]
+                                keep_values = sorted_logits[sorted_indices_to_keep]
+                                
+                                # Use a simple loop to set values
+                                for idx, val in zip(keep_indices.tolist(), keep_values.tolist()):
+                                    if 0 <= idx < filtered_logits.size(0):  # Safety check
+                                        filtered_logits[idx] = val
+                            
+                            # Use the filtered logits
+                            batch_logits = filtered_logits
                         
                         # Sample from the filtered distribution
                         probs = F.softmax(batch_logits, dim=-1)
