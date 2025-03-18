@@ -683,7 +683,26 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         if Vh_scaled.numel() != expected_vh_size:
             # Adjust Vh if sizes don't match
             print(f"WARNING: Vh_scaled size mismatch: {Vh_scaled.numel()} vs expected {expected_vh_size}")
-            B_weight = Vh_scaled.reshape(-1, hidden_size)
+            
+            # Check actual dimensions of Vh_scaled
+            actual_size = Vh_scaled.size(1)
+            if actual_size != hidden_size:
+                print(f"Actual Vh_scaled dim1 ({actual_size}) doesn't match hidden_size ({hidden_size})")
+                
+                # Adjust hidden_size to match actual dimensions
+                if Vh_scaled.size(1) == Vh.size(0):
+                    print(f"Using Vh dimensions: {Vh.size(0)}")
+                    B_weight = Vh_scaled  # Already in correct shape
+                else:
+                    # If we can't safely reshape, pad or truncate to get the right dimension
+                    print(f"Creating compatible B_weight tensor")
+                    B_weight = torch.zeros(rank, hidden_size, device=Vh_scaled.device, dtype=Vh_scaled.dtype)
+                    # Copy as much as we can from Vh_scaled
+                    copy_size = min(Vh_scaled.size(1), hidden_size)
+                    B_weight[:, :copy_size] = Vh_scaled[:, :copy_size]
+            else:
+                # Safe to reshape
+                B_weight = Vh_scaled
         else:
             # Original reshape
             B_weight = Vh_scaled.reshape(rank, hidden_size)
