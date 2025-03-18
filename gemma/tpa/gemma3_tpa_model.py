@@ -24,10 +24,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     ):
         super().__init__()
         self.dtype = config.get_dtype()
-        # Allow non-Gemma3 models or make architecture check optional
-        self.is_multimodal = (config.architecture == gemma_config.Architecture.GEMMA_3 and 
-                              hasattr(config, 'vision_config') and 
-                              config.vision_config is not None)
+        # Check for multimodal model by detecting vision_config
+        # Remove architecture check to allow non-Gemma3 models (like 1B text-only)
+        self.is_multimodal = (hasattr(config, 'vision_config') and 
+                             config.vision_config is not None)
         
         self.config = config
         max_seq_len = config.max_position_embeddings
