@@ -109,6 +109,15 @@ def main():
             print(f"Generation time: {gen_time:.2f} seconds")
             print(f"Generation speed: {args.max_tokens/gen_time:.2f} tokens/second")
             
+            # Add debugging info about token generation
+            result = outputs[0]
+            if result.strip() == args.prompt.strip():
+                print("\nWARNING: Model returned only the prompt without generating any new text!")
+                print("This suggests a problem with model weights or conversion. Check that:")
+                print("1. The model weights were properly converted to TPA format")
+                print("2. Ensure the model checkpoint is from a properly trained model")
+                print("3. Verify the embedding and attention layers are correctly initialized")
+            
             # Calculate memory usage
             if device.type == "cuda":
                 mem_allocated = torch.cuda.memory_allocated(device) / (1024**3)

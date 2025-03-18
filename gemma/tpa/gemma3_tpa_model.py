@@ -528,9 +528,18 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             p = user_input_token_ids[i]
             input_token_ids_tensor[i, :min_prompt_len] = p[:min_prompt_len]
 
-        # Don't pre-create any masks - let the attention layers handle it
-        # Don't use index_select operations on masks during generation
-        
+        # Pre-create masks for better stability during generation
+        if hasattr(self, 'create_attention_mask') and min_prompt_len > 0:
+            print("Creating attention masks...")
+            global_mask, local_mask = self.create_attention_mask(
+                input_token_ids_tensor, total_seq_len)
+            print(f"Created masks with shapes: global={global_mask.shape}, local={local_mask.shape}")
+        else:
+            global_mask = None
+            local_mask = None
+            print("Letting attention layers handle mask creation")
+            
+        # Set up sampling parameters
         temperatures_tensor = None if not temperature else torch.tensor(
                 [temperature] * batch_size, dtype=torch.float32, device=device)
         top_ps_tensor = torch.tensor([top_p] * batch_size, dtype=torch.float32, device=device)
@@ -538,6 +547,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         # Track current position in the sequence
         current_pos = min_prompt_len
+        
+        # Debug info
+        print(f"DEBUG: Original input token shape: {token_ids_tensor.shape}")
+        print(f"DEBUG: First few tokens: {token_ids_tensor[:, :min(10, token_ids_tensor.shape[1])].tolist()}")
+        print(f"Starting generation at position {current_pos}")
         
         # Prefill the KV cache with the prompt tokens first
         with torch.no_grad():
@@ -560,34 +574,61 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             max_pos = min(min_prompt_len, self.local_freqs_cis.size(0))
             positions = positions[:max_pos]
             
-            # Create freqs_cis dict
+            # Create freqs_cis dict - handle potentially empty positions
             freqs_cis = {}
-            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
-            freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
-            
-            # Use positions as KV write indices
-            kv_write_indices = positions
-            
-            print(f"Processing prompt with length {min_prompt_len}")
-            
-            # Process prompt through model (this populates the KV cache)
-            _ = self.model(
-                hidden_states=logits,
-                freqs_cis=freqs_cis,
-                kv_write_indices=kv_write_indices,
-                kv_caches=kv_caches,
-                mask=None,  # Let the attention handle masking
-                local_mask=None,
-            )
+            if len(positions) > 0:
+                freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
+                freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
+                
+                # Use positions as KV write indices
+                kv_write_indices = positions
+                
+                print(f"Processing prompt with length {min_prompt_len}, positions shape: {positions.shape}")
+                
+                # Process prompt through model (this populates the KV cache)
+                try:
+                    _ = self.model(
+                        hidden_states=logits,
+                        freqs_cis=freqs_cis,
+                        kv_write_indices=kv_write_indices,
+                        kv_caches=kv_caches,
+                        mask=global_mask,  # Use pre-created mask if available
+                        local_mask=local_mask,
+                    )
+                    print("Prompt processing completed successfully")
+                except Exception as e:
+                    print(f"ERROR during prompt processing: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("WARNING: Empty positions tensor, skipping prompt processing")
             
             # Now generate tokens one by one
             for i in range(output_len):
                 # Get the current token only
-                current_token = token_ids_tensor[:, current_pos-1:current_pos] if current_pos > 0 else token_ids_tensor[:, 0:1]
+                if current_pos > 0 and current_pos-1 < token_ids_tensor.shape[1]:
+                    current_token = token_ids_tensor[:, current_pos-1:current_pos]
+                elif token_ids_tensor.shape[1] > 0:
+                    current_token = token_ids_tensor[:, 0:1]
+                else:
+                    # Emergency fallback if token tensor is empty
+                    print(f"WARNING: token_ids_tensor is empty at position {current_pos}, using BOS token")
+                    current_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
+                
+                print(f"DEBUG: Current token at position {current_pos}: {current_token.tolist()}")
                 
                 # Embed the current token
-                current_embed = self.text_token_embedder(current_token)
-                current_embed = current_embed * normalizer
+                try:
+                    current_embed = self.text_token_embedder(current_token)
+                    current_embed = current_embed * normalizer
+                    print(f"DEBUG: Embedded token shape: {current_embed.shape}")
+                except Exception as e:
+                    print(f"ERROR embedding token at position {current_pos}: {e}")
+                    # Create a placeholder embed with proper dimensions
+                    current_embed = torch.zeros(
+                        current_token.shape[0], current_token.shape[1], self.config.hidden_size,
+                        device=device, dtype=torch.float32 if device.type == "cpu" else torch.bfloat16
+                    )
                 
                 # Position for the current token
                 current_pos_tensor = torch.tensor([current_pos], device=device)
