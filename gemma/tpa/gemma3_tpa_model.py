@@ -76,6 +76,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     def _register_freqs_cis(
         self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
     ):
+        # Ensure rope_scaling_factor is not None
+        if rope_scaling_factor is None:
+            rope_scaling_factor = 1
+            
         self.register_buffer(
                 name, gemma_model.precompute_freqs_cis(head_dim, max_seq_len * 2, theta=theta, rope_scaling_factor=rope_scaling_factor)
             )

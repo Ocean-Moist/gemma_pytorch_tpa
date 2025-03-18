@@ -94,6 +94,11 @@ def precompute_freqs_cis(dim: int,
                          rope_scaling_factor:int = 1) -> torch.Tensor:
     """Precomputes the frequency cis."""
     freqs = 1.0 / (theta**(torch.arange(0, dim, 2)[:(dim // 2)].float() / dim))
+    
+    # Handle None value for rope_scaling_factor
+    if rope_scaling_factor is None:
+        rope_scaling_factor = 1
+        
     freqs = freqs/rope_scaling_factor
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
