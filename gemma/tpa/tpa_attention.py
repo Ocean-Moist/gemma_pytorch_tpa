@@ -187,19 +187,26 @@ class GemmaTensorProductAttention(nn.Module):
         K_A = K_A.to(dtype=torch.float32)
         K_B = K_B.to(dtype=torch.float32)
         
-        # Build full K matrix by multiplying factors
-        # [batch_size, ctx_len, num_kv_heads, head_dim]
-        K = torch.matmul(
-            K_A.view(batch_size * ctx_len, self.num_kv_heads, self.k_rank),
-            K_B.view(batch_size * ctx_len, self.k_rank, self.head_dim)
-        ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.k_rank)
+        # Expand K_A if we're using grouped query attention (before matmul)
+        if self.num_kv_heads != self.num_heads:
+            # [batch_size, ctx_len, num_heads, k_rank]
+            K_A = torch.repeat_interleave(K_A, self.num_queries_per_kv, dim=2)
+            # Build full K matrix by multiplying expanded factors
+            # [batch_size, ctx_len, num_heads, head_dim]
+            K = torch.matmul(
+                K_A.view(batch_size * ctx_len, self.num_heads, self.k_rank),
+                K_B.view(batch_size * ctx_len, self.k_rank, self.head_dim)
+            ).view(batch_size, ctx_len, self.num_heads, self.head_dim).div(self.k_rank)
+        else:
+            # Build full K matrix by multiplying factors
+            # [batch_size, ctx_len, num_kv_heads, head_dim]
+            K = torch.matmul(
+                K_A.view(batch_size * ctx_len, self.num_kv_heads, self.k_rank),
+                K_B.view(batch_size * ctx_len, self.k_rank, self.head_dim)
+            ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.k_rank)
         
         # Convert back to original dtype
         K = K.to(dtype=hidden_states.dtype)
-        
-        # Expand K if we're using grouped query attention (num_kv_heads < num_heads)
-        if self.num_kv_heads != self.num_heads:
-            K = torch.repeat_interleave(K, self.num_queries_per_kv, dim=2)
         
         # [batch_size, num_heads, ctx_len, head_dim]
         K = K.transpose(1, 2)
@@ -265,19 +272,26 @@ class GemmaTensorProductAttention(nn.Module):
         V_A = V_A.to(dtype=torch.float32)
         V_B = V_B.to(dtype=torch.float32)
         
-        # Build full V matrix by multiplying factors
-        # [batch_size, ctx_len, num_kv_heads, head_dim]
-        V = torch.matmul(
-            V_A.view(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
-            V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
-        ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank)
+        # Expand V_A if we're using grouped query attention (before matmul)
+        if self.num_kv_heads != self.num_heads:
+            # [batch_size, ctx_len, num_heads, v_rank]
+            V_A = torch.repeat_interleave(V_A, self.num_queries_per_kv, dim=2)
+            # Build full V matrix by multiplying expanded factors
+            # [batch_size, ctx_len, num_heads, head_dim]
+            V = torch.matmul(
+                V_A.view(batch_size * ctx_len, self.num_heads, self.v_rank),
+                V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
+            ).view(batch_size, ctx_len, self.num_heads, self.head_dim).div(self.v_rank)
+        else:
+            # Build full V matrix by multiplying factors
+            # [batch_size, ctx_len, num_kv_heads, head_dim]
+            V = torch.matmul(
+                V_A.view(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
+                V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
+            ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank)
         
         # Convert back to original dtype
         V = V.to(dtype=hidden_states.dtype)
-        
-        # Expand V if we're using grouped query attention
-        if self.num_kv_heads != self.num_heads:
-            V = torch.repeat_interleave(V, self.num_queries_per_kv, dim=2)
         
         # [batch_size, num_heads, ctx_len, head_dim]
         V = V.transpose(1, 2)
