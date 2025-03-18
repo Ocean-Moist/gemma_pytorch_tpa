@@ -129,9 +129,13 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Ensure rope_scaling_factor is not None
         if rope_scaling_factor is None:
             rope_scaling_factor = 1
-            
+        
+        # Create a large enough freqs_cis buffer to avoid index out of bounds errors
+        # Double the max_seq_len to ensure we have enough positions
+        freqs_cis_len = max(max_seq_len * 4, 8192)
+        
         self.register_buffer(
-                name, gemma_model.precompute_freqs_cis(head_dim, max_seq_len * 2, theta=theta, rope_scaling_factor=rope_scaling_factor)
+                name, gemma_model.precompute_freqs_cis(head_dim, freqs_cis_len, theta=theta, rope_scaling_factor=rope_scaling_factor)
             )
 
     @torch.no_grad()

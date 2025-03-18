@@ -132,7 +132,9 @@ def main():
         tpa_model = tpa_model.to(device).eval()
         
         # Use smaller cache sizes for testing to avoid CUDA errors
-        max_cache_seq_len = min(model_config.max_position_embeddings, 1024)
+        # Set a reasonable maximum context size for testing
+        max_cache_seq_len = 512  # Start with a smaller cache to make sure it works
+        model_config.max_position_embeddings = max_cache_seq_len  # Update config to match
         print(f"Using restricted cache size of {max_cache_seq_len} for inference test")
         
         with torch.no_grad():

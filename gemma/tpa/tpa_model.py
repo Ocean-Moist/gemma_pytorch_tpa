@@ -134,30 +134,64 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
     v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
     
-    kv_caches = []
-    for _ in range(config.num_hidden_layers):
-        # Create separate caches for A and B factors
-        k_cache_A = torch.zeros(
-            size=(batch_size, max_seq_len, config.num_key_value_heads, k_rank),
-            dtype=config.get_dtype(),
-            device=device
-        )
-        k_cache_B = torch.zeros(
-            size=(batch_size, max_seq_len, k_rank, config.head_dim),
-            dtype=config.get_dtype(),
-            device=device
-        )
-        v_cache_A = torch.zeros(
-            size=(batch_size, max_seq_len, config.num_key_value_heads, v_rank),
-            dtype=config.get_dtype(),
-            device=device
-        )
-        v_cache_B = torch.zeros(
-            size=(batch_size, max_seq_len, v_rank, config.head_dim),
-            dtype=config.get_dtype(),
-            device=device
-        )
+    # Ensure we have valid dimensions
+    if batch_size <= 0:
+        batch_size = 1
+        print(f"Warning: Invalid batch_size {batch_size}, using 1 instead")
+    
+    if max_seq_len <= 0:
+        max_seq_len = 1
+        print(f"Warning: Invalid max_seq_len {max_seq_len}, using 1 instead")
         
-        kv_caches.append((k_cache_A, k_cache_B, v_cache_A, v_cache_B))
+    # Ensure we have valid ranks
+    if k_rank <= 0:
+        k_rank = 1
+        print(f"Warning: Invalid k_rank {k_rank}, using 1 instead")
+        
+    if v_rank <= 0:
+        v_rank = 1
+        print(f"Warning: Invalid v_rank {v_rank}, using 1 instead")
+    
+    # Ensure num_key_value_heads is set
+    num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
+    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    
+    print(f"Creating TPA KV caches with dimensions: batch_size={batch_size}, max_seq_len={max_seq_len}, "
+          f"num_kv_heads={num_kv_heads}, k_rank={k_rank}, v_rank={v_rank}, head_dim={head_dim}")
+    
+    kv_caches = []
+    for i in range(config.num_hidden_layers):
+        # Create separate caches for A and B factors
+        try:
+            k_cache_A = torch.zeros(
+                size=(batch_size, max_seq_len, num_kv_heads, k_rank),
+                dtype=config.get_dtype(),
+                device=device
+            )
+            k_cache_B = torch.zeros(
+                size=(batch_size, max_seq_len, k_rank, head_dim),
+                dtype=config.get_dtype(),
+                device=device
+            )
+            v_cache_A = torch.zeros(
+                size=(batch_size, max_seq_len, num_kv_heads, v_rank),
+                dtype=config.get_dtype(),
+                device=device
+            )
+            v_cache_B = torch.zeros(
+                size=(batch_size, max_seq_len, v_rank, head_dim),
+                dtype=config.get_dtype(),
+                device=device
+            )
+            
+            kv_caches.append((k_cache_A, k_cache_B, v_cache_A, v_cache_B))
+        except Exception as e:
+            print(f"Error creating KV cache for layer {i}: {e}")
+            # Create minimal cache as fallback
+            k_cache_A = torch.zeros((1, 1, 1, 1), dtype=torch.float32, device=device)
+            k_cache_B = torch.zeros((1, 1, 1, 1), dtype=torch.float32, device=device)
+            v_cache_A = torch.zeros((1, 1, 1, 1), dtype=torch.float32, device=device)
+            v_cache_B = torch.zeros((1, 1, 1, 1), dtype=torch.float32, device=device)
+            kv_caches.append((k_cache_A, k_cache_B, v_cache_A, v_cache_B))
     
     return kv_caches

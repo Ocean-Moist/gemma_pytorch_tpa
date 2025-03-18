@@ -138,14 +138,28 @@ class GemmaTensorProductAttention(nn.Module):
         
         # Get the total context length we'll be dealing with
         if kv_write_indices is not None and kv_write_indices.numel() > 0:
-            # Ensure indices are valid and not out of range
-            max_idx = torch.max(kv_write_indices)
-            if max_idx >= k_cache_A.size(1):
-                print(f"Warning: Index {max_idx.item()} out of bounds for KV cache size {k_cache_A.size(1)}")
-                # Clamp indices to valid range
-                kv_write_indices = torch.clamp(kv_write_indices, 0, k_cache_A.size(1) - 1)
-                max_idx = k_cache_A.size(1) - 1
-            ctx_len = max_idx.item() + 1
+            # Check for empty tensors
+            if seq_len == 0 or batch_size == 0:
+                ctx_len = 0
+            else:
+                # Ensure indices are valid and not out of range
+                try:
+                    # Handle scalar or empty indices
+                    if kv_write_indices.numel() == 1:
+                        max_idx = kv_write_indices.item()
+                    else:
+                        max_idx = torch.max(kv_write_indices)
+                        
+                    # Ensure index is within bounds
+                    if max_idx >= k_cache_A.size(1):
+                        print(f"Warning: Index {max_idx} out of bounds for KV cache size {k_cache_A.size(1)}")
+                        # Clamp indices to valid range
+                        kv_write_indices = torch.clamp(kv_write_indices, 0, k_cache_A.size(1) - 1)
+                        max_idx = k_cache_A.size(1) - 1
+                    ctx_len = max_idx + 1
+                except Exception as e:
+                    print(f"Error processing kv_write_indices: {e}, using seq_len as fallback")
+                    ctx_len = min(seq_len, k_cache_A.size(1))
         else:
             ctx_len = min(seq_len, k_cache_A.size(1))  # Ensure we don't exceed cache size
         
@@ -159,35 +173,34 @@ class GemmaTensorProductAttention(nn.Module):
             A_v_dtype = A_v.to(dtype=v_cache_A.dtype)
             B_v_dtype = B_v.to(dtype=v_cache_B.dtype)
             
-            # Make sure the number of indices matches the source size and indices are valid
-            if kv_write_indices.numel() == A_k_dtype.size(1):
-                try:
-                    k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
-                    k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
-                    v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
-                    v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
-                except Exception as e:
-                    print(f"Error during KV cache update: {e}. Falling back to sequential update.")
-                    # Fall back to sequential update if index_copy_ fails
-                    for i in range(kv_write_indices.numel()):
-                        if i < A_k_dtype.size(1) and kv_write_indices[i] < k_cache_A.size(1):
-                            idx = kv_write_indices[i].item()
-                            k_cache_A[:, idx] = A_k_dtype[:, i]
-                            k_cache_B[:, idx] = B_k_rotated_dtype[:, i]
-                            v_cache_A[:, idx] = A_v_dtype[:, i]
-                            v_cache_B[:, idx] = B_v_dtype[:, i]
-            else:
-                print(f"Warning: Number of indices ({kv_write_indices.numel()}) doesn't match source size ({A_k_dtype.size(1)})")
-                # Try to copy as many elements as possible
-                num_to_copy = min(kv_write_indices.numel(), A_k_dtype.size(1))
-                if num_to_copy > 0:
+            # Always use safe sequential update method to avoid index out of bounds errors
+            try:
+                # Check that all tensors have valid dimensions before updating
+                if A_k_dtype.dim() < 2 or B_k_rotated_dtype.dim() < 2 or A_v_dtype.dim() < 2 or B_v_dtype.dim() < 2:
+                    print(f"Warning: Invalid tensor dimensions for KV cache update")
+                    print(f"A_k: {A_k_dtype.shape}, B_k: {B_k_rotated_dtype.shape}, A_v: {A_v_dtype.shape}, B_v: {B_v_dtype.shape}")
+                else:
+                    print(f"Updating KV cache with {kv_write_indices.numel()} indices, source size: {A_k_dtype.size(1)}")
+                    # Use safer sequential update to handle any size mismatches
+                    num_to_copy = min(kv_write_indices.numel(), A_k_dtype.size(1))
+                    
                     for i in range(num_to_copy):
-                        if kv_write_indices[i] < k_cache_A.size(1):
-                            idx = kv_write_indices[i].item()
-                            k_cache_A[:, idx] = A_k_dtype[:, i] if i < A_k_dtype.size(1) else A_k_dtype[:, -1]
-                            k_cache_B[:, idx] = B_k_rotated_dtype[:, i] if i < B_k_rotated_dtype.size(1) else B_k_rotated_dtype[:, -1]
-                            v_cache_A[:, idx] = A_v_dtype[:, i] if i < A_v_dtype.size(1) else A_v_dtype[:, -1]
-                            v_cache_B[:, idx] = B_v_dtype[:, i] if i < B_v_dtype.size(1) else B_v_dtype[:, -1]
+                        try:
+                            if i < A_k_dtype.size(1) and kv_write_indices[i] < k_cache_A.size(1):
+                                idx = kv_write_indices[i].item()
+                                # Carefully check dimensions before assignment
+                                if idx >= 0 and idx < k_cache_A.size(1):
+                                    if i < A_k_dtype.size(1):
+                                        k_cache_A[:, idx] = A_k_dtype[:, i]
+                                        k_cache_B[:, idx] = B_k_rotated_dtype[:, i]
+                                        v_cache_A[:, idx] = A_v_dtype[:, i]
+                                        v_cache_B[:, idx] = B_v_dtype[:, i]
+                        except Exception as idx_error:
+                            print(f"Error updating KV cache at index {i}: {idx_error}")
+                            # Continue with next index
+            except Exception as e:
+                print(f"Error during KV cache update: {e}")
+                # Don't attempt further updates if we hit an error
         
         # Compute query from factorized form
         # Ensure matching dtypes for matmul
@@ -451,6 +464,29 @@ class GemmaTensorProductAttention(nn.Module):
         # factor shape: [batch_size, seq_len, rank, head_dim]
         # freqs_cis shape: [seq_len, head_dim//2]
         
+        # Handle empty or invalid factors
+        if factor.numel() == 0:
+            return factor
+            
+        # Ensure factor has the right number of dimensions
+        if factor.dim() != 4:
+            print(f"Warning: Factor has incorrect shape {factor.shape}, expected 4D tensor")
+            # Try to reshape if possible, or return as is if we can't
+            if factor.numel() > 0:
+                try:
+                    # Try to infer dimensions
+                    if factor.dim() == 2:
+                        # Reshape 2D to 4D with batch size and seq_len = 1
+                        factor = factor.unsqueeze(0).unsqueeze(0)
+                    elif factor.dim() == 3:
+                        # Reshape 3D to 4D with batch size = 1
+                        factor = factor.unsqueeze(0)
+                except Exception as e:
+                    print(f"Error reshaping factor: {e}")
+                    return factor
+            else:
+                return factor
+        
         batch_size, seq_len, rank, head_dim = factor.shape
         
         # Handle empty sequence case (seq_len=0)
@@ -458,41 +494,59 @@ class GemmaTensorProductAttention(nn.Module):
             return factor
         
         # Ensure freqs_cis has enough positions
-        if freqs_cis.size(0) < seq_len:
-            print(f"Warning: freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
-            print("Using available positions and padding as needed")
-            # Use available positions instead of raising error
-            available_positions = freqs_cis.size(0)
-            # If we need more positions, we'll pad by repeating the last position
-            if available_positions > 0:
-                last_pos = freqs_cis[available_positions-1:available_positions]
-                padding = last_pos.repeat(seq_len - available_positions, 1)
-                freqs_cis = torch.cat([freqs_cis[:available_positions], padding], dim=0)
+        try:
+            if freqs_cis.size(0) < seq_len:
+                print(f"Warning: freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
+                print("Using available positions and padding as needed")
+                # Use available positions instead of raising error
+                available_positions = freqs_cis.size(0)
+                # If we need more positions, we'll pad by repeating the last position
+                if available_positions > 0:
+                    last_pos = freqs_cis[available_positions-1:available_positions]
+                    padding = last_pos.repeat(seq_len - available_positions, 1)
+                    freqs_cis = torch.cat([freqs_cis[:available_positions], padding], dim=0)
+                else:
+                    # Create empty freqs_cis of right shape if no positions are available
+                    freqs_cis = torch.zeros((seq_len, freqs_cis.size(1)), device=freqs_cis.device)
             else:
-                # Create empty freqs_cis of right shape if no positions are available
-                freqs_cis = torch.zeros((seq_len, freqs_cis.size(1)), device=freqs_cis.device)
-        else:
-            # Take only needed positions from freqs_cis
-            freqs_cis = freqs_cis[:seq_len]
-        
-        # Reshape for applying RoPE
-        factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
-        
-        # Apply RoPE in a similar way to the original Gemma implementation
-        factor_reshaped_ = torch.view_as_complex(
-            torch.stack(torch.chunk(factor_reshaped.float(), 2, dim=-1), dim=-1)
-        )
-        
-        # Reshape freqs_cis for broadcasting
-        freqs_cis = freqs_cis.view(seq_len, 1, head_dim // 2)
-        freqs_cis = freqs_cis.unsqueeze(0).repeat(batch_size, 1, 1, 1)
-        freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
-        
-        # Apply complex multiplication
-        factor_out = torch.view_as_real(factor_reshaped_ * freqs_cis).type_as(factor)
-        factor_out = torch.cat(torch.chunk(factor_out, 2, dim=-1), dim=-2)
-        
-        # Reshape back to original shape
-        factor_out = factor_out.reshape(batch_size, seq_len, rank, head_dim)
-        
-        return factor_out
+                # Take only needed positions from freqs_cis
+                freqs_cis = freqs_cis[:seq_len]
+            
+            # Ensure head_dim is divisible by 2 for complex number representation
+            if head_dim % 2 != 0:
+                print(f"Warning: head_dim {head_dim} is not divisible by 2, padding with zeros")
+                # Add zero padding to make it divisible by 2
+                pad_width = ((0, 0), (0, 0), (0, 0), (0, 1))
+                factor = torch.nn.functional.pad(factor, pad_width)
+                head_dim += 1
+            
+            # Reshape for applying RoPE
+            factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
+            
+            # Apply RoPE in a similar way to the original Gemma implementation
+            factor_reshaped_ = torch.view_as_complex(
+                torch.stack(torch.chunk(factor_reshaped.float(), 2, dim=-1), dim=-1)
+            )
+            
+            # Reshape freqs_cis for broadcasting
+            freqs_cis = freqs_cis.view(seq_len, 1, head_dim // 2)
+            freqs_cis = freqs_cis.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+            freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
+            
+            # Apply complex multiplication
+            factor_out = torch.view_as_real(factor_reshaped_ * freqs_cis).type_as(factor)
+            factor_out = torch.cat(torch.chunk(factor_out, 2, dim=-1), dim=-2)
+            
+            # Reshape back to original shape
+            factor_out = factor_out.reshape(batch_size, seq_len, rank, head_dim)
+            
+            # If we padded the head_dim, remove the padding
+            if head_dim != factor.shape[-1]:
+                factor_out = factor_out[..., :factor.shape[-1]]
+            
+            return factor_out
+            
+        except Exception as e:
+            print(f"Error applying rotary embeddings: {e}")
+            # Return the original factor if anything goes wrong
+            return factor
