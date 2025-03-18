@@ -78,10 +78,9 @@ class GemmaTensorProductAttention(nn.Module):
         freqs_cis: torch.Tensor,
         kv_write_indices: torch.Tensor,
         kv_cache: Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
-        mask: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
         local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass for TPA attention. Will handle creating appropriate masks if needed."""
         """
         Forward pass for Tensor Product Attention.
         
@@ -93,8 +92,8 @@ class GemmaTensorProductAttention(nn.Module):
             freqs_cis: Rotary positional embedding tensor
             kv_write_indices: Indices for writing to KV cache
             kv_cache: TPA KV cache containing (k_cache_A, k_cache_B, v_cache_A, v_cache_B)
-            mask: Attention mask
-            local_mask: Local window attention mask (if applicable)
+            mask: Attention mask (optional, will create internal mask if None)
+            local_mask: Local window attention mask (optional)
             
         Returns:
             Output tensor after TPA attention
@@ -127,12 +126,14 @@ class GemmaTensorProductAttention(nn.Module):
             B_k = B_k_reshaped.reshape(batch_size, seq_len, self.k_rank, self.head_dim)
         
         # Apply rotary positional embedding to B factors
-        # Apply RoPE to B_q and B_k
         B_q_rotated = self._apply_rotary_emb_to_factor(B_q, freqs_cis)
         B_k_rotated = self._apply_rotary_emb_to_factor(B_k, freqs_cis)
         
         # Unpack the factorized KV cache
         k_cache_A, k_cache_B, v_cache_A, v_cache_B = kv_cache
+        
+        # Get the total context length we'll be dealing with
+        ctx_len = kv_write_indices[-1].item() + 1 if kv_write_indices is not None else seq_len
         
         # Write new values to KV cache
         if kv_write_indices is not None:
@@ -147,10 +148,7 @@ class GemmaTensorProductAttention(nn.Module):
             v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
             v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
         
-        # Use factorized form for query calculation
-        # Dynamically construct full Q matrix for current sequence
-        # Shape: [batch_size, seq_len, num_heads, head_dim]
-        
+        # Compute query from factorized form
         # Ensure matching dtypes for matmul
         A_q_float = A_q.to(dtype=torch.float32)
         B_q_rotated_float = B_q_rotated.to(dtype=torch.float32)
@@ -163,22 +161,12 @@ class GemmaTensorProductAttention(nn.Module):
         # Convert back to original dtype
         Q = Q.to(dtype=hidden_states.dtype)
         
-        # For the attention calculation, we'll work with K and V in factorized form
-        # This approach avoids materializing the full K and V matrices
-        # by computing Q·K directly from factors
-        
         # Prepare for attention calculation
         # [batch_size, num_heads, seq_len, head_dim]
         Q = Q.transpose(1, 2)
         Q = Q * self.scaling
         
-        # Calculate QK attention scores using factorized approach
-        # This computes (A_q B_q) · (A_k B_k)ᵀ using the distributive property
-        # to avoid materializing the full K matrix
-        
-        # First approach: materialize K for simplicity (can be optimized further)
-        # Here we're using cached K factors for all tokens in current context
-        ctx_len = seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len
+        # Get cached K factors for the context window
         K_A = k_cache_A[:, :ctx_len]
         K_B = k_cache_B[:, :ctx_len]
         
@@ -207,31 +195,50 @@ class GemmaTensorProductAttention(nn.Module):
         # [batch_size, num_heads, seq_len, ctx_len]
         scores = torch.matmul(Q, K.transpose(2, 3))
         
-        # Local mask handling is now done directly in the masking step
-        # We ignore mask inputs now and create proper masks ourselves
-        
         # Apply softcapping if specified
         if self.attn_logit_softcapping is not None:
             scores = scores / self.attn_logit_softcapping
             scores = torch.tanh(scores)
             scores = scores * self.attn_logit_softcapping
         
-        # Apply attention mask with proper broadcasting
-        # If mask is None, create a default causal mask
-        scores_shape = scores.shape  # [batch_size, num_heads, seq_len, ctx_len]
-        
         # Always create a new causal mask that exactly matches the scores dimensions
         min_value = torch.finfo(scores.dtype).min
+        scores_shape = scores.shape  # [batch_size, num_heads, seq_len, ctx_len]
         
-        # Create a new causal mask with exact dimensions needed
-        new_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
-        new_mask = torch.tril(new_mask)  # Make it lower triangular for causality
+        # Create causal attention mask
+        causal_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
+        causal_mask = torch.tril(causal_mask)  # Make it lower triangular for causality
         
+        # If sliding window is enabled, create a window constraint
+        if self.sliding_window_size is not None and self.sliding_window_size > 0:
+            # Create sliding window mask
+            window_size = min(self.sliding_window_size, ctx_len)
+            window_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
+            
+            # For each position, only allow attention to window_size tokens before it
+            for i in range(scores_shape[2]):  # For each query position
+                # Calculate the start of the valid window for this position
+                start_idx = max(0, i - window_size + 1)
+                
+                # Zero out attention to positions before the window start
+                if start_idx > 0:
+                    window_mask[:, :, i, :start_idx] = False
+            
+            # Combine causal mask with window mask
+            attention_mask = torch.logical_and(causal_mask, window_mask)
+        else:
+            # Just use causal mask
+            attention_mask = causal_mask
+            
         # Convert to attention values (0 for attend, min_value for don't attend)
-        mask_applicable = torch.where(new_mask, 0, torch.tensor(min_value, dtype=scores.dtype, device=scores.device))
+        mask_tensor = torch.where(
+            attention_mask, 
+            torch.tensor(0, dtype=scores.dtype, device=scores.device),
+            torch.tensor(min_value, dtype=scores.dtype, device=scores.device)
+        )
         
         # Apply the mask
-        scores = scores + mask_applicable
+        scores = scores + mask_tensor
         
         # Apply softmax to get attention weights
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)

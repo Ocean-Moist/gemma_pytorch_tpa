@@ -517,16 +517,6 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             image_batch = None
             image_presence_mask = None
 
-        # Create attention mask.
-        min_dtype = torch.finfo(self.dtype).min
-        
-        # Set a default sliding window for non-multimodal models if needed
-        if self.config.sliding_window_size is None and not hasattr(self.config, 'sliding_window_size'):
-            self.config.sliding_window_size = 1024  # Default size for Gemma models
-        boolean_mask, local_boolean_mask = self.create_attention_mask(user_input_token_ids, total_seq_len)
-        mask_tensor = torch.where(boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
-        local_mask_tensor = torch.where(local_boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
-
         # Create TPA KV caches
         kv_caches = create_tpa_kv_caches(self.config, batch_size, total_seq_len, device)
 
@@ -538,63 +528,109 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             p = user_input_token_ids[i]
             input_token_ids_tensor[i, :min_prompt_len] = p[:min_prompt_len]
 
-        input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
-        prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
-        # Don't use index_select on masks
-        # Let the attention modules create their own masks
-        curr_mask_tensor = None
-        curr_local_mask_tensor = None
+        # Don't pre-create any masks - let the attention layers handle it
+        # Don't use index_select operations on masks during generation
         
-        # Create output position tensor with zeros for safer indexing
-        output_positions_tensor = torch.zeros(1, dtype=torch.int64, device=device)
-        temperatures_tensor = None if not temperature else torch.FloatTensor(
-                [temperature] * batch_size).to(device)
-        top_ps_tensor = torch.FloatTensor([top_p] * batch_size).to(device)
-        top_ks_tensor = torch.LongTensor([top_k] * batch_size).to(device)
-        output_index = torch.tensor(min_prompt_len, dtype=torch.int64, device=device)
-
-        # Prefill up to min_prompt_len tokens, then treat other prefill as
-        # decode and ignore output.
-        for i in range(total_seq_len - min_prompt_len):
-            next_token_ids, _ = self(
-                    input_token_ids=input_token_ids_tensor,
-                    image_patches=image_batch,
-                    image_presence_mask=image_presence_mask,
-                    input_positions=input_positions_tensor,
+        temperatures_tensor = None if not temperature else torch.tensor(
+                [temperature] * batch_size, dtype=torch.float32, device=device)
+        top_ps_tensor = torch.tensor([top_p] * batch_size, dtype=torch.float32, device=device)
+        top_ks_tensor = torch.tensor([top_k] * batch_size, dtype=torch.int64, device=device)
+        
+        # Track current position in the sequence
+        current_pos = min_prompt_len
+        
+        # Prefill the KV cache with the prompt tokens first
+        with torch.no_grad():
+            # Process the entire prompt in one forward pass
+            logits = self.text_token_embedder(input_token_ids_tensor)
+            normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=logits.dtype, device=device)
+            logits = logits * normalizer
+            
+            # Create positional indices for the prompt
+            positions = torch.arange(0, min_prompt_len, device=device)
+            
+            # Create freqs_cis dict
+            freqs_cis = {}
+            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
+            freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
+            
+            # KV write indices for the prompt
+            kv_write_indices = positions
+            
+            # Process prompt through model (this populates the KV cache)
+            _ = self.model(
+                hidden_states=logits,
+                freqs_cis=freqs_cis,
+                kv_write_indices=kv_write_indices,
+                kv_caches=kv_caches,
+                mask=None,  # Let the attention handle masking
+                local_mask=None,
+            )
+            
+            # Now generate tokens one by one
+            for i in range(output_len):
+                # Get the current token only
+                current_token = token_ids_tensor[:, current_pos-1:current_pos] if current_pos > 0 else token_ids_tensor[:, 0:1]
+                
+                # Embed the current token
+                current_embed = self.text_token_embedder(current_token)
+                current_embed = current_embed * normalizer
+                
+                # Position for the current token
+                current_pos_tensor = torch.tensor([current_pos], device=device)
+                
+                # Create freqs_cis for current position
+                current_freqs_cis = {}
+                current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, current_pos_tensor)
+                current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, current_pos_tensor)
+                
+                # Process current token
+                hidden_states = self.model(
+                    hidden_states=current_embed,
+                    freqs_cis=current_freqs_cis,
+                    kv_write_indices=current_pos_tensor,
                     kv_caches=kv_caches,
-                    mask=curr_mask_tensor,
-                    output_positions=output_positions_tensor,
+                    mask=None,  # Let attention handle masking
+                    local_mask=None,
+                )
+                
+                # Project to vocabulary
+                embedder_weight = self.text_token_embedder.weight
+                if self.config.quant:
+                    embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+                
+                # Get logits for the last token
+                logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
+                
+                # Sample next token
+                next_token = self.sampler.sample(
+                    logits=logits,
                     temperatures=temperatures_tensor,
                     top_ps=top_ps_tensor,
                     top_ks=top_ks_tensor,
-                    local_mask=curr_local_mask_tensor,
                 )
-            curr_prompt_mask = prompt_mask_tensor.index_select(
-                    1, output_index).squeeze(dim=1)
-            curr_token_ids = token_ids_tensor.index_select(
-                    1, output_index).squeeze(dim=1)
-            output_token_ids = torch.where(curr_prompt_mask, curr_token_ids,
-                                           next_token_ids).unsqueeze(dim=1)
-            token_ids_tensor.index_copy_(1, output_index, output_token_ids)
-
-            input_token_ids_tensor = output_token_ids
-            
-            # For safety, don't try to index from the mask tensors anymore
-            # We'll let the attention layer create its own causal mask
-            input_positions_tensor = output_index.unsqueeze(dim=-1)
-            
-            # Use None for masks to let the attention handle it
-            curr_mask_tensor = None
-            curr_local_mask_tensor = None
-            
-            # Create output positions - use scalar value for safer indexing
-            output_positions_tensor = torch.zeros(1, dtype=torch.int64, device=device)
-            output_index = output_index + 1
-            image_batch = None
-            image_presence_mask = None
+                
+                # Check for EOS
+                if next_token[0].item() == self.tokenizer.eos_id:
+                    break
+                
+                # Append the new token to token_ids_tensor
+                if current_pos < total_seq_len:
+                    # If we have space, add to the existing tensor
+                    token_ids_tensor[:, current_pos:current_pos+1] = next_token
+                else:
+                    # If we need more space, concatenate
+                    token_ids_tensor = torch.cat([token_ids_tensor, next_token], dim=1)
+                
+                # Increment position
+                current_pos += 1
+                
+                # Clear any cached image inputs after first token
+                image_batch = None
+                image_presence_mask = None
 
         # Detokenization.
-        token_ids = token_ids_tensor.tolist()
+        token_ids = token_ids_tensor[:, :current_pos].tolist()
         results = []
         for i, tokens in enumerate(token_ids):
             output = tokens
