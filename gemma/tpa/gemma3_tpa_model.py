@@ -714,7 +714,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     # Debug the next token
                     token_id = next_token[0].item()
                     print(f"DEBUG pos {current_pos}: Generated token ID {token_id}")
-                    if token_id < self.tokenizer.vocab_size:
+                    if token_id < self.tokenizer.n_words:
                         try:
                             token_str = self.tokenizer.decode([token_id])
                             print(f"DEBUG pos {current_pos}: Token string: '{token_str}'")
