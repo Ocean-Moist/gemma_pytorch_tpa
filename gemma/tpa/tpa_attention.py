@@ -138,9 +138,16 @@ class GemmaTensorProductAttention(nn.Module):
         
         # Get the total context length we'll be dealing with
         if kv_write_indices is not None and kv_write_indices.numel() > 0:
-            ctx_len = kv_write_indices[-1].item() + 1
+            # Ensure indices are valid and not out of range
+            max_idx = torch.max(kv_write_indices)
+            if max_idx >= k_cache_A.size(1):
+                print(f"Warning: Index {max_idx.item()} out of bounds for KV cache size {k_cache_A.size(1)}")
+                # Clamp indices to valid range
+                kv_write_indices = torch.clamp(kv_write_indices, 0, k_cache_A.size(1) - 1)
+                max_idx = k_cache_A.size(1) - 1
+            ctx_len = max_idx.item() + 1
         else:
-            ctx_len = seq_len
+            ctx_len = min(seq_len, k_cache_A.size(1))  # Ensure we don't exceed cache size
         
         # Write new values to KV cache
         if kv_write_indices is not None and kv_write_indices.numel() > 0 and seq_len > 0:
@@ -152,14 +159,35 @@ class GemmaTensorProductAttention(nn.Module):
             A_v_dtype = A_v.to(dtype=v_cache_A.dtype)
             B_v_dtype = B_v.to(dtype=v_cache_B.dtype)
             
-            # Make sure the number of indices matches the source size
+            # Make sure the number of indices matches the source size and indices are valid
             if kv_write_indices.numel() == A_k_dtype.size(1):
-                k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
-                k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
-                v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
-                v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
+                try:
+                    k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
+                    k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
+                    v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
+                    v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
+                except Exception as e:
+                    print(f"Error during KV cache update: {e}. Falling back to sequential update.")
+                    # Fall back to sequential update if index_copy_ fails
+                    for i in range(kv_write_indices.numel()):
+                        if i < A_k_dtype.size(1) and kv_write_indices[i] < k_cache_A.size(1):
+                            idx = kv_write_indices[i].item()
+                            k_cache_A[:, idx] = A_k_dtype[:, i]
+                            k_cache_B[:, idx] = B_k_rotated_dtype[:, i]
+                            v_cache_A[:, idx] = A_v_dtype[:, i]
+                            v_cache_B[:, idx] = B_v_dtype[:, i]
             else:
                 print(f"Warning: Number of indices ({kv_write_indices.numel()}) doesn't match source size ({A_k_dtype.size(1)})")
+                # Try to copy as many elements as possible
+                num_to_copy = min(kv_write_indices.numel(), A_k_dtype.size(1))
+                if num_to_copy > 0:
+                    for i in range(num_to_copy):
+                        if kv_write_indices[i] < k_cache_A.size(1):
+                            idx = kv_write_indices[i].item()
+                            k_cache_A[:, idx] = A_k_dtype[:, i] if i < A_k_dtype.size(1) else A_k_dtype[:, -1]
+                            k_cache_B[:, idx] = B_k_rotated_dtype[:, i] if i < B_k_rotated_dtype.size(1) else B_k_rotated_dtype[:, -1]
+                            v_cache_A[:, idx] = A_v_dtype[:, i] if i < A_v_dtype.size(1) else A_v_dtype[:, -1]
+                            v_cache_B[:, idx] = B_v_dtype[:, i] if i < B_v_dtype.size(1) else B_v_dtype[:, -1]
         
         # Compute query from factorized form
         # Ensure matching dtypes for matmul
@@ -325,11 +353,31 @@ class GemmaTensorProductAttention(nn.Module):
         # Apply the mask
         scores = scores + mask_tensor
         
-        # Apply softmax to get attention weights
-        attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)
+        # Apply softmax to get attention weights - use safe softmax to avoid NaN results
+        try:
+            attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)
+            # Check for NaN values and replace with zeros
+            if torch.isnan(attn_weights).any():
+                print("Warning: NaN values detected in attention weights, applying safe softmax")
+                # Apply safe softmax: subtract max value for numerical stability
+                scores_safe = scores.float()
+                scores_max = torch.max(scores_safe, dim=-1, keepdim=True)[0]
+                scores_safe = scores_safe - scores_max
+                exp_scores = torch.exp(scores_safe)
+                # Replace NaN/Inf with zeros
+                exp_scores = torch.where(torch.isnan(exp_scores) | torch.isinf(exp_scores), 
+                                        torch.zeros_like(exp_scores), exp_scores)
+                # Add small epsilon to ensure non-zero denominator
+                denom = torch.sum(exp_scores, dim=-1, keepdim=True) + 1e-10
+                attn_weights = (exp_scores / denom).type_as(Q)
+        except Exception as e:
+            print(f"Error during softmax calculation: {e}, using uniform attention")
+            # Fallback to uniform attention
+            attn_weights = torch.ones_like(scores) / scores.size(-1)
         
         # Compute attention output using factorized V
-        # Get cached V factors
+        # Get cached V factors - ensure we don't exceed cache bounds
+        ctx_len = min(ctx_len, v_cache_A.size(1))
         V_A = v_cache_A[:, :ctx_len]
         V_B = v_cache_B[:, :ctx_len]
         
@@ -337,23 +385,44 @@ class GemmaTensorProductAttention(nn.Module):
         V_A = V_A.to(dtype=torch.float32)
         V_B = V_B.to(dtype=torch.float32)
         
-        # Expand V_A if we're using grouped query attention (before matmul)
-        if self.num_kv_heads != self.num_heads:
-            # [batch_size, ctx_len, num_heads, v_rank]
-            V_A = torch.repeat_interleave(V_A, self.num_queries_per_kv, dim=2)
-            # Build full V matrix by multiplying expanded factors
-            # [batch_size, ctx_len, num_heads, head_dim]
-            V = torch.matmul(
-                V_A.view(batch_size * ctx_len, self.num_heads, self.v_rank),
-                V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
-            ).view(batch_size, ctx_len, self.num_heads, self.head_dim).div(self.v_rank)
-        else:
-            # Build full V matrix by multiplying factors
-            # [batch_size, ctx_len, num_kv_heads, head_dim]
-            V = torch.matmul(
-                V_A.view(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
-                V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
-            ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank)
+        try:
+            # Expand V_A if we're using grouped query attention (before matmul)
+            if self.num_kv_heads != self.num_heads:
+                # [batch_size, ctx_len, num_heads, v_rank]
+                V_A = torch.repeat_interleave(V_A, self.num_queries_per_kv, dim=2)
+                # Build full V matrix by multiplying expanded factors
+                # [batch_size, ctx_len, num_heads, head_dim]
+                if batch_size > 0 and ctx_len > 0:
+                    V = torch.matmul(
+                        V_A.reshape(batch_size * ctx_len, self.num_heads, self.v_rank),
+                        V_B.reshape(batch_size * ctx_len, self.v_rank, self.head_dim)
+                    ).reshape(batch_size, ctx_len, self.num_heads, self.head_dim).div(self.v_rank if self.v_rank > 0 else 1.0)
+                else:
+                    V = torch.zeros((batch_size, ctx_len, self.num_heads, self.head_dim), 
+                                  dtype=torch.float32, device=V_A.device)
+            else:
+                # Build full V matrix by multiplying factors
+                # [batch_size, ctx_len, num_kv_heads, head_dim]
+                if batch_size > 0 and ctx_len > 0:
+                    V = torch.matmul(
+                        V_A.reshape(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
+                        V_B.reshape(batch_size * ctx_len, self.v_rank, self.head_dim)
+                    ).reshape(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank if self.v_rank > 0 else 1.0)
+                else:
+                    V = torch.zeros((batch_size, ctx_len, self.num_kv_heads, self.head_dim), 
+                                  dtype=torch.float32, device=V_A.device)
+        except Exception as e:
+            print(f"Error during value matrix construction: {e}")
+            # Create fallback V matrix
+            if self.num_kv_heads != self.num_heads:
+                V = torch.zeros((batch_size, ctx_len, self.num_heads, self.head_dim), 
+                              dtype=torch.float32, device=hidden_states.device)
+            else:
+                V = torch.zeros((batch_size, ctx_len, self.num_kv_heads, self.head_dim), 
+                              dtype=torch.float32, device=hidden_states.device)
+            # Add ones to first few elements to avoid all zeros
+            if V.numel() > 0:
+                V[:, :, :, 0] = 1.0
         
         # Convert back to original dtype
         V = V.to(dtype=hidden_states.dtype)

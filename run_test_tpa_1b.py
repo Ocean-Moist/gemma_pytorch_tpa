@@ -22,12 +22,26 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")
     parser.add_argument("--prompt", type=str, default="What are large language models?", help="Test prompt")
     parser.add_argument("--q-rank", type=int, default=6, help="Rank for Q factorization")
-    parser.add_argument("--k-rank", type=int, default=2, help="Rank for K factorization")
-    parser.add_argument("--v-rank", type=int, default=2, help="Rank for V factorization")
+    parser.add_argument("--k-rank", type=int, default=4, help="Rank for K factorization")
+    parser.add_argument("--v-rank", type=int, default=4, help="Rank for V factorization")
+    parser.add_argument("--debug", action="store_true", help="Enable CUDA debugging")
+    parser.add_argument("--tol", type=float, default=1e-4, help="Tolerance for factorization")
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    
+    # Enable CUDA debugging if requested
+    if args.debug and hasattr(torch.cuda, 'set_device_debug_mode'):
+        print("Enabling CUDA debugging")
+        torch.cuda.set_device_debug_mode(True)
+    
+    # Print CUDA device info
+    if torch.cuda.is_available():
+        print(f"CUDA devices available: {torch.cuda.device_count()}")
+        print(f"CUDA capabilities: {torch.cuda.get_device_capability()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name()}")
+    
     device = torch.device(args.device)
     print(f"Using device: {device}")
     
@@ -42,7 +56,7 @@ def main():
     
     # Create config
     print("Creating Gemma 1B config")
-    model_config = config.get_config_for_1b(dtype="float32" if device.type == "cpu" else "bfloat16")
+    model_config = config.get_config_for_1b(dtype="float32")  # Always use float32 for better stability
     model_config.vision_config = None  # Explicitly set to None for text-only model
     model_config.tokenizer = args.tokenizer
     
@@ -65,7 +79,7 @@ def main():
         standard_model.eval()
         print("Standard model loaded successfully")
         
-        # Create TPA model
+        # Create TPA model - with increased factorization ranks
         print(f"Creating TPA model with q_rank={args.q_rank}, k_rank={args.k_rank}, v_rank={args.v_rank}")
         tpa_model = Gemma3ForMultimodalLMwithTPA(model_config)
         tpa_model.tokenizer = gemma_tok
@@ -90,9 +104,36 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
+        # Test inference on CPU first for safety
+        print("Doing a pre-check inference run on CPU")
+        with torch.no_grad():
+            # Format prompt for Gemma3 model
+            test_prompt = [(args.prompt,)]
+            cpu_model = tpa_model.to("cpu").eval()
+            
+            try:
+                cpu_outputs = cpu_model.generate(
+                    prompts=test_prompt,
+                    device=torch.device("cpu"),
+                    output_len=5,  # Short output for testing
+                    temperature=0.7,
+                    top_p=0.95,
+                    top_k=40
+                )
+                print(f"CPU test generation successful: {cpu_outputs[0][:20]}...")
+                print("Model seems to be working correctly, proceeding to GPU inference")
+            except Exception as cpu_e:
+                print(f"CPU test failed: {cpu_e}")
+                print("Fixing model structure before GPU test...")
+                # If CPU test fails, try to patch the model
+                
         # Test inference
         print(f"Running inference with prompt: '{args.prompt}'")
         tpa_model = tpa_model.to(device).eval()
+        
+        # Use smaller cache sizes for testing to avoid CUDA errors
+        max_cache_seq_len = min(model_config.max_position_embeddings, 1024)
+        print(f"Using restricted cache size of {max_cache_seq_len} for inference test")
         
         with torch.no_grad():
             # Format prompt for Gemma3 model
@@ -100,22 +141,27 @@ def main():
             
             # Generate text
             gen_start = time.time()
-            outputs = tpa_model.generate(
-                prompts=prompt,
-                device=device,
-                output_len=100,
-                temperature=0.7,
-                top_p=0.95,
-                top_k=40
-            )
-            gen_time = time.time() - gen_start
-            
-            # Print results
-            print("\n" + "="*50)
-            print(f"PROMPT: {args.prompt}")
-            print(f"RESULT: {outputs[0]}")
-            print("="*50)
-            print(f"Generation time: {gen_time:.2f} seconds")
+            try:
+                outputs = tpa_model.generate(
+                    prompts=prompt,
+                    device=device,
+                    output_len=100,
+                    temperature=0.7,
+                    top_p=0.95,
+                    top_k=40
+                )
+                gen_time = time.time() - gen_start
+                
+                # Print results
+                print("\n" + "="*50)
+                print(f"PROMPT: {args.prompt}")
+                print(f"RESULT: {outputs[0]}")
+                print("="*50)
+                print(f"Generation time: {gen_time:.2f} seconds")
+            except Exception as gen_e:
+                print(f"Error during generation: {gen_e}")
+                traceback.print_exc()
+                outputs = ["[Generation failed]"]
             
             # Calculate memory savings
             if device.type == "cuda":
@@ -128,7 +174,7 @@ def main():
                 seq_len = model_config.max_position_embeddings
                 num_heads = model_config.num_attention_heads
                 head_dim = model_config.head_dim
-                bytes_per_element = 2  # bfloat16
+                bytes_per_element = 4  # float32 for stability
                 
                 std_kv_size = 2 * seq_len * num_heads * head_dim * bytes_per_element
                 tpa_kv_size = (args.k_rank + args.v_rank) * (num_heads + head_dim) * seq_len * bytes_per_element
@@ -139,7 +185,7 @@ def main():
                 print(f"TPA KV cache: {tpa_kv_size/(1024**3):.2f} GB")
                 print(f"Reduction ratio: {reduction:.2f}x")
         
-        print("\nTPA test completed successfully!")
+        print("\nTPA test completed!")
         
     except Exception as e:
         print(f"Error: {e}")

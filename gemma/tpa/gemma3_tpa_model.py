@@ -949,8 +949,25 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         if is_query:
             print(f"Identified as query weight (num_heads={num_heads}, head_dim={head_dim})")
+            # Use higher rank for query matrices to improve factorization quality
+            effective_rank = min(rank, min(weight.shape))
         elif is_key or is_value:
             print(f"Identified as key/value weight (num_kv_heads={num_kv_heads}, head_dim={head_dim})")
+            # For K/V matrices, see if we can increase rank for better factorization
+            # This is especially important for the high error cases we saw in logs
+            suggested_rank = min(4, min(weight.shape))  # Try to use rank 4 for K/V instead of 2
+            if rank < suggested_rank:
+                print(f"Increasing rank for K/V matrix from {rank} to {suggested_rank} for better factorization")
+                rank = suggested_rank
+            effective_rank = min(rank, min(weight.shape))
+        else:
+            effective_rank = min(rank, min(weight.shape))
+            
+        # For matrices with high dimensionality mismatch, increase rank
+        if max(weight.shape) / min(weight.shape) > 4:
+            old_rank = effective_rank
+            effective_rank = min(effective_rank * 2, min(weight.shape))
+            print(f"High dimension ratio detected, increasing rank from {old_rank} to {effective_rank}")
         
         # Perform SVD on the 2D weight matrix with improved stability
         try:
@@ -960,7 +977,12 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             if weight_float32.numel() > 10_000_000:  # For very large matrices
                 print("Large matrix detected, using chunked SVD approach")
                 # Use torch.pca_lowrank as a more memory-efficient alternative for large matrices
-                U, S, Vh = torch.pca_lowrank(weight_float32, q=rank, center=False, niter=2)
+                U, S, Vh = torch.pca_lowrank(weight_float32, q=effective_rank, center=False, niter=2)
+            elif min(weight_float32.shape) < effective_rank:
+                # For matrices where min dimension < requested rank, use compact representation
+                print(f"Matrix too small for requested rank, using compact SVD with rank {min(weight_float32.shape)}")
+                effective_rank = min(weight_float32.shape)
+                U, S, Vh = torch.linalg.svd(weight_float32, full_matrices=False)
             else:
                 # Standard SVD for smaller matrices
                 U, S, Vh = torch.linalg.svd(weight_float32, full_matrices=False)
@@ -978,7 +1000,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     print(f"Warning: Some singular values are very small. Adjusting max rank from {max_rank} to {len(valid_indices)}")
                     max_rank = len(valid_indices)
             
-            effective_rank = min(rank, max_rank)
+            effective_rank = min(effective_rank, max_rank)
             print(f"Using effective rank: {effective_rank} (requested: {rank})")
             
             if effective_rank <= 0:
