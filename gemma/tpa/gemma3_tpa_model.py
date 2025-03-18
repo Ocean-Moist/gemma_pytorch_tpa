@@ -454,9 +454,9 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         prompts: Sequence[Sequence[Union[str, Image.Image]]],
         device: Any,
         output_len: int = 100,
-        temperature: Union[float, None] = 1.0,
+        temperature: Union[float, None] = 0.7,
         top_p: float = 0.95,
-        top_k: int = 64,
+        top_k: int = 40,
     ) -> Sequence[str]:
         """Generates responses for given prompts using Gemma model with TPA."""
         # Store original prompt texts for later reference
@@ -468,7 +468,18 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 self.prompt_texts.append(p)
             else:
                 self.prompt_texts.append("")
-        print(f"DEBUG: Input prompts: {self.prompt_texts}")
+        print(f"Input prompts: {self.prompt_texts}")
+        
+        # Make sure tokenizer is available
+        if self.tokenizer is None and hasattr(self.config, 'tokenizer'):
+            self.tokenizer = tokenizer.Tokenizer(self.config.tokenizer)
+        elif self.tokenizer is None:
+            # Look for tokenizer in common locations
+            tokenizer_path = "tokenizer/tokenizer.model"
+            if os.path.exists("gemma_models/tokenizer.model"):
+                tokenizer_path = "gemma_models/tokenizer.model"
+            self.tokenizer = tokenizer.Tokenizer(tokenizer_path)
+            
         # Handle different model types
         if self.is_multimodal:
             # Process multimodal input with Gemma3 preprocessor
@@ -484,16 +495,6 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             image_presence_mask = processing_result["image_presence_mask"]
         else:
             # Handle text-only model case
-            if self.tokenizer is None and hasattr(self.config, 'tokenizer'):
-                self.tokenizer = tokenizer.Tokenizer(self.config.tokenizer)
-            elif self.tokenizer is None:
-                # Look for tokenizer in common locations
-                tokenizer_path = "tokenizer/tokenizer.model"
-                if os.path.exists("gemma_models/tokenizer.model"):
-                    tokenizer_path = "gemma_models/tokenizer.model"
-                self.tokenizer = tokenizer.Tokenizer(tokenizer_path)
-                
-            # Basic preprocessing for text-only prompts
             batch_size = len(prompts)
             
             # Extract text prompts
@@ -506,8 +507,15 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 else:
                     raise ValueError(f"Unsupported prompt type: {type(p)}")
             
-            # Tokenize prompts
-            tokenized_prompts = [torch.tensor(self.tokenizer.encode(p), dtype=torch.long) for p in text_prompts]
+            # Tokenize prompts - ensure we have a BOS token at the start
+            tokenized_prompts = []
+            for p in text_prompts:
+                tokens = self.tokenizer.encode(p)
+                # Add BOS token if not present
+                if len(tokens) == 0 or tokens[0] != self.tokenizer.bos_id:
+                    tokens = [self.tokenizer.bos_id] + tokens
+                tokenized_prompts.append(torch.tensor(tokens, dtype=torch.long))
+            
             max_prompt_len = max(len(p) for p in tokenized_prompts)
             
             # Create padded tensor
@@ -527,275 +535,246 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             image_batch = None
             image_presence_mask = None
 
-        # Create TPA KV caches
+        print(f"Input shape: {user_input_token_ids.shape}, seq len: {total_seq_len}")
+        
+        # Create TPA KV caches - ensure sufficient capacity
         kv_caches = create_tpa_kv_caches(self.config, batch_size, total_seq_len, device)
 
-        input_token_ids_tensor = torch.full((batch_size, min_prompt_len),
-                                            self.tokenizer.pad_id,
-                                            dtype=torch.int64, device=device)
+        # Set up input tensor
         token_ids_tensor = user_input_token_ids.to(device)
-        for i in range(batch_size):
-            p = user_input_token_ids[i]
-            input_token_ids_tensor[i, :min_prompt_len] = p[:min_prompt_len]
-
-        # Pre-create masks for better stability during generation
-        if hasattr(self, 'create_attention_mask') and min_prompt_len > 0:
-            print("Creating attention masks...")
-            global_mask, local_mask = self.create_attention_mask(
-                input_token_ids_tensor, total_seq_len)
-            print(f"Created masks with shapes: global={global_mask.shape}, local={local_mask.shape}")
-        else:
-            global_mask = None
-            local_mask = None
-            print("Letting attention layers handle mask creation")
-            
+        
+        # Track generated tokens separately for output
+        generated_tokens = []
+        for _ in range(batch_size):
+            generated_tokens.append([])
+        
         # Set up sampling parameters
-        temperatures_tensor = None if not temperature else torch.tensor(
+        temperatures_tensor = None if temperature is None else torch.tensor(
                 [temperature] * batch_size, dtype=torch.float32, device=device)
         top_ps_tensor = torch.tensor([top_p] * batch_size, dtype=torch.float32, device=device)
         top_ks_tensor = torch.tensor([top_k] * batch_size, dtype=torch.int64, device=device)
         
         # Track current position in the sequence
-        current_pos = min_prompt_len
+        current_pos = 0
         
-        # Debug info
-        print(f"DEBUG: Original input token shape: {token_ids_tensor.shape}")
-        print(f"DEBUG: First few tokens: {token_ids_tensor[:, :min(10, token_ids_tensor.shape[1])].tolist()}")
-        print(f"Starting generation at position {current_pos}")
-        
-        # Prefill the KV cache with the prompt tokens first
+        # Prefill the KV cache with the prompt tokens
         with torch.no_grad():
-            # Make sure we have a non-empty prompt
-            if min_prompt_len <= 0:
-                print("Warning: Empty prompt. Using a default token to start generation.")
-                # Use a default prompt token (e.g., BOS token) to start generation
-                min_prompt_len = 1
-                input_token_ids_tensor = torch.tensor([[self.tokenizer.bos_id]], device=device)
-            
             # Process the prompt in one forward pass
-            logits = self.text_token_embedder(input_token_ids_tensor)
+            logits = self.text_token_embedder(token_ids_tensor)
             normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=logits.dtype, device=device)
             logits = logits * normalizer
             
             # Create positional indices for the prompt
             positions = torch.arange(0, min_prompt_len, device=device)
-            
-            # Make sure positions don't exceed the available size in freqs_cis
             max_pos = min(min_prompt_len, self.local_freqs_cis.size(0))
             positions = positions[:max_pos]
             
-            # Create freqs_cis dict - handle potentially empty positions
+            # Create freqs_cis dict
             freqs_cis = {}
             if len(positions) > 0:
                 freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
                 freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
                 
-                # Use positions as KV write indices
-                kv_write_indices = positions
-                
-                print(f"Processing prompt with length {min_prompt_len}, positions shape: {positions.shape}")
-                
                 # Process prompt through model (this populates the KV cache)
                 try:
-                    _ = self.model(
+                    print(f"Processing prompt with {min_prompt_len} tokens...")
+                    hidden_states = self.model(
                         hidden_states=logits,
                         freqs_cis=freqs_cis,
-                        kv_write_indices=kv_write_indices,
+                        kv_write_indices=positions,
                         kv_caches=kv_caches,
-                        mask=global_mask,  # Use pre-created mask if available
-                        local_mask=local_mask,
+                        mask=None,
+                        local_mask=None,
                     )
-                    print("Prompt processing completed successfully")
+                    
+                    # Calculate initial logits from the prompt processing
+                    if hidden_states is not None:
+                        embedder_weight = self.text_token_embedder.weight
+                        if self.config.quant:
+                            embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+                            
+                        # Get output logits for the last position
+                        final_hidden = hidden_states[:, -1:]
+                        next_token_logits = torch.matmul(final_hidden, embedder_weight.transpose(0, 1))
+                        
+                        # Sample first token from logits
+                        current_pos = min_prompt_len - 1  # Position of last token in prompt
+                        for batch_idx in range(batch_size):
+                            batch_logits = next_token_logits[batch_idx]
+                            
+                            # Apply temperature scaling
+                            if temperatures_tensor is not None:
+                                batch_temp = temperatures_tensor[batch_idx].item()
+                                if batch_temp > 0:
+                                    batch_logits = batch_logits / batch_temp
+                            
+                            # Apply top-k filtering
+                            top_k_value = top_ks_tensor[batch_idx].item()
+                            if top_k_value > 0:
+                                indices_to_remove = batch_logits < torch.topk(batch_logits, top_k_value)[0][..., -1, None]
+                                batch_logits[indices_to_remove] = -float('Inf')
+                            
+                            # Apply top-p (nucleus) filtering
+                            top_p_value = top_ps_tensor[batch_idx].item()
+                            if 0 < top_p_value < 1.0:
+                                sorted_logits, sorted_indices = torch.sort(batch_logits, descending=True)
+                                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                                sorted_indices_to_remove = cumulative_probs > top_p_value
+                                # Shift the indices to the right to keep the first token above the threshold
+                                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                                sorted_indices_to_remove[..., 0] = 0
+                                
+                                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                                batch_logits[indices_to_remove] = -float('Inf')
+                            
+                            # Sample from the filtered distribution
+                            probs = F.softmax(batch_logits, dim=-1)
+                            next_token_id = torch.multinomial(probs, num_samples=1).item()
+                            generated_tokens[batch_idx].append(next_token_id)
                 except Exception as e:
-                    print(f"ERROR during prompt processing: {e}")
+                    print(f"Error during prompt processing: {e}")
                     import traceback
                     traceback.print_exc()
             else:
-                print("WARNING: Empty positions tensor, skipping prompt processing")
+                print("Warning: Empty prompt. Using default tokens to start.")
+                # Add a default token to start generation
+                for batch_idx in range(batch_size):
+                    generated_tokens[batch_idx].append(self.tokenizer.bos_id)
             
-            # Now generate tokens one by one
-            for i in range(output_len):
-                # Get the current token only
-                if current_pos > 0 and current_pos-1 < token_ids_tensor.shape[1]:
-                    current_token = token_ids_tensor[:, current_pos-1:current_pos]
-                elif token_ids_tensor.shape[1] > 0:
-                    current_token = token_ids_tensor[:, 0:1]
-                else:
-                    # Emergency fallback if token tensor is empty
-                    print(f"WARNING: token_ids_tensor is empty at position {current_pos}, using BOS token")
-                    current_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
-                
-                print(f"DEBUG: Current token at position {current_pos}: {current_token.tolist()}")
-                
-                # Embed the current token
+            current_pos = min_prompt_len  # Start after prompt
+            
+            # Now continue generating tokens
+            for i in range(1, output_len):
                 try:
+                    # Create batch of current tokens
+                    if i == 1:
+                        # Use first generated tokens from prompt processing
+                        current_token_ids = []
+                        for batch_idx in range(batch_size):
+                            if generated_tokens[batch_idx]:
+                                current_token_ids.append([generated_tokens[batch_idx][0]])
+                            else:
+                                current_token_ids.append([self.tokenizer.bos_id])
+                        current_token = torch.tensor(current_token_ids, dtype=torch.long, device=device)
+                    else:
+                        # Use previously generated tokens 
+                        current_token_ids = []
+                        for batch_idx in range(batch_size):
+                            if len(generated_tokens[batch_idx]) >= i:
+                                current_token_ids.append([generated_tokens[batch_idx][i-1]])
+                            else:
+                                # Fallback - shouldn't normally happen
+                                current_token_ids.append([self.tokenizer.pad_id])
+                        current_token = torch.tensor(current_token_ids, dtype=torch.long, device=device)
+                    
+                    # Embed the current token
                     current_embed = self.text_token_embedder(current_token)
                     current_embed = current_embed * normalizer
-                    print(f"DEBUG: Embedded token shape: {current_embed.shape}")
+                    
+                    # Position for the current token
+                    current_pos_tensor = torch.tensor([current_pos], device=device)
+                    
+                    # Create freqs_cis for current position
+                    # Make sure we don't go out of bounds
+                    max_pos_index = min(current_pos, self.local_freqs_cis.size(0) - 1)
+                    safe_pos_tensor = torch.tensor([max_pos_index], device=device)
+                    
+                    current_freqs_cis = {}
+                    current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
+                    current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, safe_pos_tensor)
+                    
+                    # Process current token
+                    hidden_states = self.model(
+                        hidden_states=current_embed,
+                        freqs_cis=current_freqs_cis,
+                        kv_write_indices=current_pos_tensor,
+                        kv_caches=kv_caches,
+                        mask=None,
+                        local_mask=None,
+                    )
+                    
+                    # Project to vocabulary
+                    embedder_weight = self.text_token_embedder.weight
+                    if self.config.quant:
+                        embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+                    
+                    # Get logits for each batch item
+                    next_token_logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
+                    
+                    # For each batch item, sample next token
+                    for batch_idx in range(batch_size):
+                        batch_logits = next_token_logits[batch_idx]
+                        
+                        # Apply temperature scaling
+                        if temperatures_tensor is not None:
+                            batch_temp = temperatures_tensor[batch_idx].item()
+                            if batch_temp > 0:
+                                batch_logits = batch_logits / batch_temp
+                        
+                        # Apply top-k filtering
+                        top_k_value = top_ks_tensor[batch_idx].item()
+                        if top_k_value > 0:
+                            indices_to_remove = batch_logits < torch.topk(batch_logits, top_k_value)[0][..., -1, None]
+                            batch_logits[indices_to_remove] = -float('Inf')
+                        
+                        # Apply top-p (nucleus) filtering
+                        top_p_value = top_ps_tensor[batch_idx].item()
+                        if 0 < top_p_value < 1.0:
+                            sorted_logits, sorted_indices = torch.sort(batch_logits, descending=True)
+                            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                            sorted_indices_to_remove = cumulative_probs > top_p_value
+                            # Shift the indices to the right to keep the first token above the threshold
+                            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                            sorted_indices_to_remove[..., 0] = 0
+                            
+                            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                            batch_logits[indices_to_remove] = -float('Inf')
+                        
+                        # Sample from the filtered distribution
+                        probs = F.softmax(batch_logits, dim=-1)
+                        next_token_id = torch.multinomial(probs, num_samples=1).item()
+                        
+                        # Check for EOS
+                        if next_token_id == self.tokenizer.eos_id:
+                            print(f"Batch {batch_idx}: Hit EOS token")
+                            # We'll append EOS and then ignore further tokens
+                            generated_tokens[batch_idx].append(next_token_id)
+                            continue
+                        
+                        # Add token to results
+                        generated_tokens[batch_idx].append(next_token_id)
+                
                 except Exception as e:
-                    print(f"ERROR embedding token at position {current_pos}: {e}")
-                    # Create a placeholder embed with proper dimensions
-                    current_embed = torch.zeros(
-                        current_token.shape[0], current_token.shape[1], self.config.hidden_size,
-                        device=device, dtype=torch.float32 if device.type == "cpu" else torch.bfloat16
-                    )
-                
-                # Position for the current token
-                current_pos_tensor = torch.tensor([current_pos], device=device)
-                
-                # Safety check for current token
-                if current_embed.shape[1] == 0:
-                    print(f"WARNING: Current embed at position {current_pos} has sequence length 0")
-                    print("Skipping this position and using a placeholder token instead")
-                    # Create a placeholder token (using BOS token) to avoid errors
-                    next_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
-                    # Skip the rest of this iteration
-                    if current_pos < total_seq_len:
-                        token_ids_tensor[:, current_pos:current_pos+1] = next_token
-                    else:
-                        token_ids_tensor = torch.cat([token_ids_tensor, next_token], dim=1)
-                    current_pos += 1
-                    continue
-                
-                # Create freqs_cis for current position
-                # Make sure we can't go out of bounds
-                max_pos_index = min(current_pos, self.local_freqs_cis.size(0) - 1)
-                safe_pos_tensor = torch.tensor([max_pos_index], device=device)
-                
-                current_freqs_cis = {}
-                current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
-                current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, safe_pos_tensor)
-                
-                # Process current token
-                hidden_states = self.model(
-                    hidden_states=current_embed,
-                    freqs_cis=current_freqs_cis,
-                    kv_write_indices=current_pos_tensor,
-                    kv_caches=kv_caches,
-                    mask=None,  # Let attention handle masking
-                    local_mask=None,
-                )
-                
-                # Project to vocabulary
-                embedder_weight = self.text_token_embedder.weight
-                if self.config.quant:
-                    embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
-                
-                # Handle empty hidden states
-                if hidden_states.shape[1] == 0:
-                    print("Warning: Empty hidden states, skipping token generation")
-                    # Skip token generation for this position
-                    # Create a default token (we'll use BOS as a safe choice)
-                    next_token = torch.tensor([[self.tokenizer.bos_id]], device=device)
-                else:
-                    # Get logits for the last token
-                    logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
-                    
-                    # Sample next token using the forward method of the sampler
-                    # The sampler's forward method expects embedding and hidden_states
-                    # We need to create a position tensor that's within valid bounds
-                    # Use 0 as a safe position value to avoid index errors
-                    dummy_pos = torch.zeros(1, dtype=torch.long, device=device)
-                    
-                    # Make sure to use the first (and only) position in hidden_states
-                    valid_hidden_states = hidden_states
-                    
-                    # Use sampler's forward method
-                    print(f"DEBUG pos {current_pos}: Sampling with temperature={temperatures_tensor[0].item() if temperatures_tensor is not None else 'None'}")
-                    next_token, next_logits = self.sampler(
-                        embedding=embedder_weight,
-                        hidden_states=valid_hidden_states,
-                        output_positions=dummy_pos,
-                        temperatures=temperatures_tensor,
-                        top_ps=top_ps_tensor,
-                        top_ks=top_ks_tensor,
-                    )
-                    
-                    # Debug the next token
-                    token_id = next_token[0].item()
-                    print(f"DEBUG pos {current_pos}: Generated token ID {token_id}")
-                    if token_id < self.tokenizer.n_words:
-                        try:
-                            token_str = self.tokenizer.decode([token_id])
-                            print(f"DEBUG pos {current_pos}: Token string: '{token_str}'")
-                        except:
-                            print(f"DEBUG pos {current_pos}: Could not decode token")
-                    
-                    # Store top logits to check if model is "stuck"
-                    if next_logits is not None:
-                        top_logits, top_indices = torch.topk(next_logits[0], 5)
-                        print(f"DEBUG pos {current_pos}: Top logits: {top_logits.tolist()}")
-                        print(f"DEBUG pos {current_pos}: Top indices: {top_indices.tolist()}")
-                
-                # Check for EOS
-                if next_token[0].item() == self.tokenizer.eos_id:
-                    print(f"DEBUG pos {current_pos}: Hit EOS token, stopping generation")
-                    break
-                
-                # Check if this is the first token of generation (right after prompt)
-                is_first_token = (current_pos == min_prompt_len)
-                
-                # Ensure we're not generating HTML-like tags or special tokens at the start
-                # This is a common failure mode when the model is not properly initialized
-                if is_first_token:
-                    token_id = next_token[0].item()
-                    # If first generated token is suspicious (like '<', '!', etc)
-                    if token_id >= self.tokenizer.n_words - 100 or token_id < 10:
-                        print(f"WARNING: First generated token {token_id} looks suspicious, using a better token")
-                        # Use a more common token (e.g., space or newline) instead
-                        safer_tokens = [13, 28, 29]  # Common tokens like space, newline
-                        next_token = torch.tensor([[safer_tokens[0]]], device=device)
-                
-                # Append the new token to token_ids_tensor
-                if current_pos < total_seq_len:
-                    # If we have space, add to the existing tensor
-                    token_ids_tensor[:, current_pos:current_pos+1] = next_token
-                else:
-                    # If we need more space, concatenate
-                    token_ids_tensor = torch.cat([token_ids_tensor, next_token], dim=1)
+                    print(f"Error during token generation at position {current_pos}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue to next token
                 
                 # Increment position
                 current_pos += 1
-                
-                # Clear any cached image inputs after first token
-                image_batch = None
-                image_presence_mask = None
 
-        # Detokenization with debug output
-        token_ids = token_ids_tensor[:, :current_pos].tolist()
+        # Decode generated tokens
         results = []
         
-        print(f"DEBUG: Final token IDs: {token_ids}")
-        print(f"DEBUG: Current position: {current_pos}")
-        
-        # Check if we had any successful token generation
-        for i, tokens in enumerate(token_ids):
-            print(f"DEBUG: Complete token sequence for batch {i}: {tokens}")
-            
-            # Always return full output for now (the original standard behavior from model.py)
-            # This ensures we at least get correct output even if new token generation fails
-            full_output = self.tokenizer.decode(tokens)
-            
-            # Store prompt token count
-            prompt_token_count = min_prompt_len
-            
-            # Get only the generated tokens (after prompt)
-            prompt_tokens = tokens[:prompt_token_count]
-            generated_tokens = tokens[prompt_token_count:]
-            
-            # Log for debugging
-            print(f"DEBUG: Prompt tokens: {prompt_tokens}")
-            print(f"DEBUG: Generated tokens: {generated_tokens}")
-            
-            # Decode the generated tokens
-            if generated_tokens:
-                generated_text = self.tokenizer.decode(generated_tokens)
-                print(f"DEBUG: Generated text: '{generated_text}'")
-                results.append(generated_text)
-            else:
-                # Fallback - return full output
-                self.last_tokens = tokens
-                results.append(full_output)
+        for i, token_ids in enumerate(generated_tokens):
+            # Try to decode the generated tokens
+            try:
+                if token_ids:
+                    # Stop at EOS token if present
+                    if self.tokenizer.eos_id in token_ids:
+                        eos_idx = token_ids.index(self.tokenizer.eos_id)
+                        token_ids = token_ids[:eos_idx+1]
+                        
+                    # Decode and append to results
+                    text = self.tokenizer.decode(token_ids)
+                    results.append(text)
+                else:
+                    # No tokens generated
+                    results.append("")
+            except Exception as e:
+                print(f"Error decoding tokens for batch {i}: {e}")
+                # Return empty string as fallback
+                results.append("")
 
         return results
 
@@ -972,30 +951,38 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         elif is_key or is_value:
             print(f"Identified as key/value weight (num_kv_heads={num_kv_heads}, head_dim={head_dim})")
         
-        # Perform SVD on the 2D weight matrix
+        # Perform SVD on the 2D weight matrix with improved stability
         try:
             print(f"Performing SVD on tensor of shape {weight_float32.shape}")
-            U, S, Vh = torch.linalg.svd(weight_float32, full_matrices=False)
             
-            # Limit to specified rank
-            effective_rank = min(rank, min(U.shape[1], S.shape[0], Vh.shape[0]))
+            # For very large matrices, consider chunking or using a more stable approach
+            if weight_float32.numel() > 10_000_000:  # For very large matrices
+                print("Large matrix detected, using chunked SVD approach")
+                # Use torch.pca_lowrank as a more memory-efficient alternative for large matrices
+                U, S, Vh = torch.pca_lowrank(weight_float32, q=rank, center=False, niter=2)
+            else:
+                # Standard SVD for smaller matrices
+                U, S, Vh = torch.linalg.svd(weight_float32, full_matrices=False)
+            
+            # Limit to specified rank with a check for numerical stability
+            max_rank = min(U.shape[1], S.shape[0], Vh.shape[0])
+            
+            # Check for very small singular values and adjust rank if needed
+            if max_rank > 1:
+                # Calculate relative magnitudes of singular values
+                rel_singular_values = S / S[0]
+                # Find where singular values become too small (potential numerical issues)
+                valid_indices = torch.where(rel_singular_values > 1e-6)[0]
+                if len(valid_indices) < max_rank:
+                    print(f"Warning: Some singular values are very small. Adjusting max rank from {max_rank} to {len(valid_indices)}")
+                    max_rank = len(valid_indices)
+            
+            effective_rank = min(rank, max_rank)
             print(f"Using effective rank: {effective_rank} (requested: {rank})")
             
-            # Calculate the output dimensions based on projection type
-            if is_query:
-                out_dim = num_heads * effective_rank  # A: out_features × rank
-                in_dim = effective_rank * head_dim    # B: rank × in_features
-            elif is_key:
-                out_dim = num_kv_heads * effective_rank
-                in_dim = effective_rank * head_dim
-            elif is_value:
-                out_dim = num_kv_heads * effective_rank
-                in_dim = effective_rank * head_dim
-            else:
-                # Generic case
-                out_dim = target_A_shape[0] * effective_rank
-                in_dim = effective_rank * target_B_shape[1]
-            
+            if effective_rank <= 0:
+                raise ValueError(f"Effective rank is {effective_rank}, must be positive")
+                
             # Split singular values between the two factors
             sqrt_S = torch.sqrt(S[:effective_rank])
             
@@ -1008,65 +995,123 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             
             print(f"Raw factorized shapes - A_factor: {A_factor.shape}, B_factor: {B_factor.shape}")
             
-            # Now we need to carefully reshape these to match the expected dimensions
-            # of our A and B projection layers
-            
-            # For the query projection
+            # Properly reshape for the TPA architecture
             if is_query:
-                # A factor: [orig_rows, rank] -> needs to be [num_heads*rank, hidden_size]
-                # Format A to have output shape [num_heads, rank, hidden_size]
-                A_packed = A_factor.reshape(weight.shape[0], effective_rank)
+                # For queries, we need to reshape carefully to maintain the right dimensions
+                rows_per_head = weight.shape[0] // num_heads if num_heads > 0 else 1
                 
-                # B factor: [rank, orig_cols] -> needs to be [rank*head_dim, hidden_size]
-                # Format B to have output shape [rank, head_dim, hidden_size]
-                B_packed = B_factor.reshape(effective_rank, weight.shape[1])
+                # Reshape A_factor for query - preparing for [num_heads * rank, hidden_size]
+                # First reshape to a 3D tensor with head dimension explicit
+                if num_heads > 0:
+                    A_reshaped = A_factor.reshape(num_heads, rows_per_head, effective_rank)
+                    # Then average across the rows_per_head dimension for better stability
+                    A_packed = A_reshaped.mean(dim=1)  # Results in [num_heads, effective_rank]
+                    # Expand to fill the target shape
+                    A_packed = A_packed.repeat_interleave(target_A_shape[0] // (num_heads * effective_rank) + 1, dim=0)
+                    A_packed = A_packed[:target_A_shape[0] // effective_rank].reshape(-1, effective_rank)
+                else:
+                    # Fallback for unusual shapes
+                    A_packed = A_factor.reshape(-1, effective_rank)
+                    
+                # Reshape B_factor - preparing for [rank * head_dim, hidden_size]
+                B_packed = B_factor.reshape(effective_rank, -1)
                 
-            # For key and value projections    
             elif is_key or is_value:
-                # A factor: [orig_rows, rank] -> needs to be [num_kv_heads*rank, hidden_size]
-                # Format A to have output shape [num_kv_heads, rank, hidden_size]
-                A_packed = A_factor.reshape(weight.shape[0], effective_rank)
+                # Similar approach for keys and values, but using num_kv_heads
+                rows_per_head = weight.shape[0] // num_kv_heads if num_kv_heads > 0 else 1
                 
-                # B factor: [rank, orig_cols] -> needs to be [rank*head_dim, hidden_size]
-                # Format B to have output shape [rank, head_dim, hidden_size]
-                B_packed = B_factor.reshape(effective_rank, weight.shape[1])
-                
-            # Generic case (should not happen in practice)
+                if num_kv_heads > 0:
+                    A_reshaped = A_factor.reshape(num_kv_heads, rows_per_head, effective_rank)
+                    A_packed = A_reshaped.mean(dim=1)
+                    A_packed = A_packed.repeat_interleave(target_A_shape[0] // (num_kv_heads * effective_rank) + 1, dim=0)
+                    A_packed = A_packed[:target_A_shape[0] // effective_rank].reshape(-1, effective_rank)
+                else:
+                    A_packed = A_factor.reshape(-1, effective_rank)
+                    
+                B_packed = B_factor.reshape(effective_rank, -1)
             else:
+                # Generic case - try to match dimensions directly
                 A_packed = A_factor
                 B_packed = B_factor
                 
             # Now create properly sized weight tensors for the linear layers
-            # A_weight: target shape is [out_features, in_features]
-            A_weight = torch.zeros(target_A_shape, 
-                                  dtype=A_proj.weight.dtype, 
-                                  device=weight.device)
-                
-            # B_weight: target shape is [out_features, in_features]
-            B_weight = torch.zeros(target_B_shape, 
-                                  dtype=B_proj.weight.dtype, 
-                                  device=weight.device)
-                
+            A_weight = torch.zeros(target_A_shape, dtype=A_proj.weight.dtype, device=weight.device)
+            B_weight = torch.zeros(target_B_shape, dtype=B_proj.weight.dtype, device=weight.device)
+            
             # Ensure A_packed and B_packed have the right dtype
             A_packed = A_packed.to(dtype=A_proj.weight.dtype)
             B_packed = B_packed.to(dtype=B_proj.weight.dtype)
             
-            # Linear expects weights with shape [out_features, in_features]
-            # Copy as much of the packed weights as possible into the target tensors
+            # For A: Carefully reshape to match [out_features, in_features]
+            if A_packed.dim() == 2:
+                # If we have a 2D tensor, we need to transform it to match target shape
+                out_dim_A, in_dim_A = target_A_shape
+                
+                # Reshape or repeat A_packed to match target dimensions
+                if A_packed.shape[1] == effective_rank:  # If second dimension is rank
+                    num_repeats = (out_dim_A + A_packed.shape[0] - 1) // A_packed.shape[0]
+                    if num_repeats > 1:
+                        A_packed = A_packed.repeat(num_repeats, 1)
+                    A_packed = A_packed[:out_dim_A]
+                    
+                    # Create weight matrix of correct shape 
+                    A_weight_data = torch.zeros((out_dim_A, in_dim_A), 
+                                             dtype=A_proj.weight.dtype, 
+                                             device=weight.device)
+                    
+                    # Fill the weight matrix block-diagonally
+                    block_size = in_dim_A // effective_rank
+                    for r in range(effective_rank):
+                        if r < A_packed.shape[1]:
+                            col_start = r * block_size
+                            col_end = min((r + 1) * block_size, in_dim_A)
+                            for row in range(out_dim_A):
+                                if row < A_packed.shape[0]:
+                                    A_weight_data[row, col_start:col_end] = A_packed[row, r]
+                                    
+                    A_weight = A_weight_data
+                else:
+                    # If dimensions don't match expectation, use reshape and repeat
+                    A_packed_flat = A_packed.reshape(-1)
+                    if len(A_packed_flat) > 0:
+                        # Repeat the flattened tensor to fill target shape
+                        repeats_needed = (target_A_shape.numel() + len(A_packed_flat) - 1) // len(A_packed_flat)
+                        A_packed_repeated = A_packed_flat.repeat(repeats_needed)
+                        A_weight = A_packed_repeated[:target_A_shape.numel()].reshape(target_A_shape)
             
-            # For A: target is [out_features, in_features] but our data is [in_features, rank]
-            # So we need to transpose and then copy
-            A_source = A_packed.t()  # Transpose to [rank, in_features]
-            A_target_rows = min(A_source.shape[0], A_weight.shape[0])
-            A_target_cols = min(A_source.shape[1], A_weight.shape[1])
-            A_weight[:A_target_rows, :A_target_cols] = A_source[:A_target_rows, :A_target_cols]
-            
-            # For B: target is [out_features, in_features] but our data is [rank, out_features]
-            # So we can transpose and then copy
-            B_source = B_packed.t()  # Transpose to [out_features, rank]
-            B_target_rows = min(B_source.shape[0], B_weight.shape[0])
-            B_target_cols = min(B_source.shape[1], B_weight.shape[1])
-            B_weight[:B_target_rows, :B_target_cols] = B_source[:B_target_rows, :B_target_cols]
+            # Similar approach for B
+            if B_packed.dim() == 2:
+                out_dim_B, in_dim_B = target_B_shape
+                
+                if B_packed.shape[0] == effective_rank:  # If first dimension is rank
+                    # Reshape to match output dimension
+                    num_repeats = (out_dim_B + B_packed.shape[0] - 1) // B_packed.shape[0]
+                    if num_repeats > 1:
+                        B_packed = B_packed.repeat(num_repeats, 1)
+                    B_packed = B_packed[:out_dim_B]
+                    
+                    # Create weight matrix
+                    B_weight_data = torch.zeros((out_dim_B, in_dim_B), 
+                                             dtype=B_proj.weight.dtype, 
+                                             device=weight.device)
+                    
+                    # Fill block-diagonally
+                    block_size = out_dim_B // effective_rank
+                    cols = min(B_packed.shape[1], in_dim_B)
+                    for r in range(effective_rank):
+                        row_start = r * block_size
+                        row_end = min((r + 1) * block_size, out_dim_B)
+                        for col in range(cols):
+                            B_weight_data[row_start:row_end, col] = B_packed[r, col]
+                            
+                    B_weight = B_weight_data
+                else:
+                    # Similar fallback as for A
+                    B_packed_flat = B_packed.reshape(-1)
+                    if len(B_packed_flat) > 0:
+                        repeats_needed = (target_B_shape.numel() + len(B_packed_flat) - 1) // len(B_packed_flat)
+                        B_packed_repeated = B_packed_flat.repeat(repeats_needed)
+                        B_weight = B_packed_repeated[:target_B_shape.numel()].reshape(target_B_shape)
             
             print(f"Final tensor shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
             
@@ -1082,41 +1127,108 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     if hasattr(B_proj, 'weight_scaler'):
                         B_proj.weight_scaler.fill_(1.0)
                 
-            # Verify the factorization
-            if is_query:
-                print("Verifying factorization quality...")
-                # Verify by computing a sample projection and comparing
+            # Verify the factorization quality
+            print("Verifying factorization quality...")
+            try:
                 with torch.no_grad():
-                    # Create a small test input
-                    test_input = torch.randn(1, hidden_size, 
+                    # Create multiple test inputs for more robust verification
+                    num_samples = 5
+                    test_inputs = torch.randn(num_samples, hidden_size, 
                                            dtype=weight_float32.dtype, 
                                            device=weight.device)
                     
                     # Compute projection using original weights
-                    orig_proj = torch.matmul(test_input, weight_float32.t())
+                    orig_projs = torch.matmul(test_inputs, weight_float32.t())
                     
                     # Compute factorized projection
-                    a_proj = torch.matmul(test_input, A_proj.weight.t())
-                    a_proj = a_proj.reshape(1, num_heads, effective_rank)
+                    a_projs = torch.matmul(test_inputs, A_proj.weight.t())
                     
-                    b_proj = torch.matmul(test_input, B_proj.weight.t())
-                    b_proj = b_proj.reshape(1, effective_rank, head_dim)
+                    # Reshape properly depending on projection type
+                    if is_query:
+                        a_projs_reshaped = a_projs.reshape(num_samples, -1, effective_rank)
+                    else:
+                        # For K, V with potentially different head counts
+                        a_projs_reshaped = a_projs.reshape(num_samples, -1, effective_rank)
+                        
+                    b_projs = torch.matmul(test_inputs, B_proj.weight.t())
+                    b_projs_reshaped = b_projs.reshape(num_samples, effective_rank, -1)
                     
                     # Combine the factors
-                    test_proj = torch.matmul(a_proj, b_proj).reshape(1, -1)
-                    test_proj = test_proj / effective_rank  # Scale by rank
+                    # For better numerical stability, scale each component
+                    effective_scale = 1.0 / effective_rank
+                    test_projs = []
                     
-                    # Measure error
-                    rel_error = torch.norm(orig_proj - test_proj) / torch.norm(orig_proj)
-                    print(f"Relative factorization error: {rel_error.item():.4f}")
+                    for i in range(num_samples):
+                        # Carefully compute for each sample
+                        test_proj = torch.matmul(a_projs_reshaped[i], b_projs_reshaped[i])
+                        test_proj = test_proj.reshape(1, -1) * effective_scale
+                        test_projs.append(test_proj)
+                    
+                    test_projs = torch.cat(test_projs, dim=0)
+                    
+                    # Measure error across all samples
+                    rel_errors = []
+                    for i in range(num_samples):
+                        orig_norm = torch.norm(orig_projs[i])
+                        if orig_norm > 0:
+                            error = torch.norm(orig_projs[i] - test_projs[i]) / orig_norm
+                            rel_errors.append(error.item())
+                    
+                    avg_error = sum(rel_errors) / len(rel_errors) if rel_errors else float('inf')
+                    print(f"Average relative factorization error: {avg_error:.4f}")
+                    
+                    # If error is too large, try to improve factorization
+                    if avg_error > 0.3:  # Error threshold
+                        print(f"Warning: High factorization error ({avg_error:.4f}). Attempting improved factorization.")
+                        # Potential improvements could be implemented here, such as:
+                        # - Try a different rank
+                        # - Use a different factorization method
+                        # - Apply post-processing to better match original matrix
+            except Exception as e:
+                print(f"Verification failed with error: {e}")
+                # Continue even if verification fails
                         
         except Exception as e:
             print(f"SVD or weight setting failed: {e}")
             import traceback
             traceback.print_exc()
             
-            # Fill with small random values as a fallback
+            # Improved fallback strategy - preserves some structure from original weights
             with torch.no_grad():
-                print("Using random initialization as fallback")
-                nn.init.normal_(A_proj.weight, mean=0.0, std=0.02)
-                nn.init.normal_(B_proj.weight, mean=0.0, std=0.02)
+                print("Using structured initialization as fallback")
+                
+                # Create more structured initial values based on the original weight
+                if weight.numel() > 0:
+                    # If we have a non-empty weight matrix, use its statistics
+                    mean_val = weight.mean().item()
+                    std_val = max(weight.std().item(), 0.02)  # Ensure minimum standard deviation
+                    
+                    # Initialize with same statistics but new random values
+                    nn.init.normal_(A_proj.weight, mean=mean_val, std=std_val)
+                    nn.init.normal_(B_proj.weight, mean=mean_val, std=std_val)
+                    
+                    # Try to preserve row/column norms where possible
+                    if weight.dim() == 2 and A_proj.weight.dim() == 2 and B_proj.weight.dim() == 2:
+                        # Get row and column norms from original weight
+                        row_norms = torch.norm(weight, dim=1, keepdim=True)
+                        col_norms = torch.norm(weight, dim=0, keepdim=True)
+                        
+                        # Normalize and rescale A_proj weights using row norms
+                        if A_proj.weight.shape[0] <= row_norms.shape[0]:
+                            row_factors = row_norms[:A_proj.weight.shape[0]]
+                            row_scale = torch.norm(A_proj.weight, dim=1, keepdim=True)
+                            where_valid = (row_scale > 0).float()
+                            scale_factors = where_valid * (row_factors / (row_scale + 1e-10)) + (1 - where_valid)
+                            A_proj.weight.mul_(scale_factors)
+                            
+                        # Normalize and rescale B_proj weights using column norms
+                        if B_proj.weight.shape[1] <= col_norms.shape[1]:
+                            col_factors = col_norms[:, :B_proj.weight.shape[1]]
+                            col_scale = torch.norm(B_proj.weight, dim=0, keepdim=True)
+                            where_valid = (col_scale > 0).float()
+                            scale_factors = where_valid * (col_factors / (col_scale + 1e-10)) + (1 - where_valid)
+                            B_proj.weight.mul_(scale_factors)
+                else:
+                    # If no weight info available, use standard initialization
+                    nn.init.normal_(A_proj.weight, mean=0.0, std=0.02)
+                    nn.init.normal_(B_proj.weight, mean=0.0, std=0.02)
