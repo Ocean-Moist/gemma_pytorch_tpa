@@ -135,18 +135,32 @@ class GemmaTensorProductAttention(nn.Module):
         
         # Write new values to KV cache
         if kv_write_indices is not None:
-            k_cache_A.index_copy_(1, kv_write_indices, A_k)
-            k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated)
-            v_cache_A.index_copy_(1, kv_write_indices, A_v)
-            v_cache_B.index_copy_(1, kv_write_indices, B_v)
+            # Ensure dtype match with the cache tensors
+            A_k_dtype = A_k.to(dtype=k_cache_A.dtype)
+            B_k_rotated_dtype = B_k_rotated.to(dtype=k_cache_B.dtype)
+            A_v_dtype = A_v.to(dtype=v_cache_A.dtype)
+            B_v_dtype = B_v.to(dtype=v_cache_B.dtype)
+            
+            k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
+            k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
+            v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
+            v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
         
         # Use factorized form for query calculation
         # Dynamically construct full Q matrix for current sequence
         # Shape: [batch_size, seq_len, num_heads, head_dim]
+        
+        # Ensure matching dtypes for matmul
+        A_q_float = A_q.to(dtype=torch.float32)
+        B_q_rotated_float = B_q_rotated.to(dtype=torch.float32)
+        
         Q = torch.matmul(
-            A_q.view(batch_size * seq_len, self.num_heads, self.q_rank),
-            B_q_rotated.view(batch_size * seq_len, self.q_rank, self.head_dim)
+            A_q_float.view(batch_size * seq_len, self.num_heads, self.q_rank),
+            B_q_rotated_float.view(batch_size * seq_len, self.q_rank, self.head_dim)
         ).view(batch_size, seq_len, self.num_heads, self.head_dim).div(self.q_rank)
+        
+        # Convert back to original dtype
+        Q = Q.to(dtype=hidden_states.dtype)
         
         # For the attention calculation, we'll work with K and V in factorized form
         # This approach avoids materializing the full K and V matrices
@@ -163,16 +177,23 @@ class GemmaTensorProductAttention(nn.Module):
         
         # First approach: materialize K for simplicity (can be optimized further)
         # Here we're using cached K factors for all tokens in current context
-        K_A = k_cache_A[:, :seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len]
-        K_B = k_cache_B[:, :seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len]
+        ctx_len = seq_len + kv_write_indices[0] if kv_write_indices is not None else seq_len
+        K_A = k_cache_A[:, :ctx_len]
+        K_B = k_cache_B[:, :ctx_len]
+        
+        # Ensure matching dtypes for matmul
+        K_A = K_A.to(dtype=torch.float32)
+        K_B = K_B.to(dtype=torch.float32)
         
         # Build full K matrix by multiplying factors
         # [batch_size, ctx_len, num_kv_heads, head_dim]
-        ctx_len = K_A.size(1)
         K = torch.matmul(
             K_A.view(batch_size * ctx_len, self.num_kv_heads, self.k_rank),
             K_B.view(batch_size * ctx_len, self.k_rank, self.head_dim)
         ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.k_rank)
+        
+        # Convert back to original dtype
+        K = K.to(dtype=hidden_states.dtype)
         
         # Expand K if we're using grouped query attention (num_kv_heads < num_heads)
         if self.num_kv_heads != self.num_heads:
@@ -210,12 +231,19 @@ class GemmaTensorProductAttention(nn.Module):
         V_A = v_cache_A[:, :ctx_len]
         V_B = v_cache_B[:, :ctx_len]
         
+        # Ensure matching dtypes for matmul
+        V_A = V_A.to(dtype=torch.float32)
+        V_B = V_B.to(dtype=torch.float32)
+        
         # Build full V matrix by multiplying factors
         # [batch_size, ctx_len, num_kv_heads, head_dim]
         V = torch.matmul(
             V_A.view(batch_size * ctx_len, self.num_kv_heads, self.v_rank),
             V_B.view(batch_size * ctx_len, self.v_rank, self.head_dim)
         ).view(batch_size, ctx_len, self.num_kv_heads, self.head_dim).div(self.v_rank)
+        
+        # Convert back to original dtype
+        V = V.to(dtype=hidden_states.dtype)
         
         # Expand V if we're using grouped query attention
         if self.num_kv_heads != self.num_heads:

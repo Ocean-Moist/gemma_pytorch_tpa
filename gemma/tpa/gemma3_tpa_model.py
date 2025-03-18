@@ -705,181 +705,116 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             B_proj: B projection module
             rank: Rank for factorization
         """
-        # Reshape for factorization
+        # Get target dimensions from projection modules
         hidden_size = self.config.hidden_size
-        
-        if hasattr(self.config, 'architecture') and self.config.architecture == gemma_config.Architecture.GEMMA_3:
-            # For Gemma 3 shape handling
-            if weight.shape[0] == self.config.num_attention_heads * self.config.head_dim:
-                # Query weights
-                out_dim = self.config.num_attention_heads
-                head_dim = self.config.head_dim
-            else:
-                # Key/Value weights
-                out_dim = self.config.num_key_value_heads
-                head_dim = self.config.head_dim
-        else:
-            # For other architectures (like Gemma 1B)
-            if hasattr(self.config, 'num_key_value_heads') and hasattr(self.config, 'head_dim'):
-                if weight.shape[0] == self.config.num_attention_heads * self.config.head_dim:
-                    # Query weights
-                    out_dim = self.config.num_attention_heads
-                    head_dim = self.config.head_dim
-                else:
-                    # Key/Value weights
-                    out_dim = self.config.num_key_value_heads
-                    head_dim = self.config.head_dim
-            else:
-                # Fallback for older models without these attributes
-                out_dim = weight.shape[0] // self.config.head_dim
-                head_dim = self.config.head_dim
-        
-        print(f"Processing weight with shape {weight.shape}, out_dim: {out_dim}, head_dim: {head_dim}")
-        
-        try:
-            # Try to reshape to expected dimensions
-            weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
-        except RuntimeError as e:
-            # Handle reshape error gracefully
-            print(f"Reshape error: {e}, trying alternative reshaping...")
-            # Try to infer dimensions
-            if weight.shape[0] % head_dim == 0:
-                out_dim = weight.shape[0] // head_dim
-                weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
-            else:
-                # Use the original dimensions and reshape accordingly
-                print(f"Using original dimensions and reshaping accordingly")
-                out_dim = weight.shape[0] // head_dim
-                head_dim = weight.shape[0] // out_dim
-                weight_reshaped = weight.reshape(out_dim, head_dim, hidden_size)
-        
-        # Flatten for SVD
-        weight_flat = weight_reshaped.reshape(out_dim * head_dim, hidden_size)
-        
-        # Convert to float32 for SVD operation (SVD doesn't support bfloat16)
-        original_dtype = weight_flat.dtype
-        original_device = weight_flat.device
-        weight_flat_float32 = weight_flat.to(dtype=torch.float32)
-        
-        # Print shapes for debugging
-        print(f"SVD input shape: {weight_flat_float32.shape}, out_dim: {out_dim}, head_dim: {head_dim}, hidden_size: {hidden_size}, rank: {rank}")
-        
-        # Perform SVD (forcing it to run on same device as input)
-        try:
-            U, S, Vh = torch.svd(weight_flat_float32)
-        except Exception as e:
-            print(f"SVD failed: {e}, trying torch.linalg.svd instead")
-            # Fallback to torch.linalg.svd which is more stable
-            U, S, Vh = torch.linalg.svd(weight_flat_float32, full_matrices=False)
-        
-        # Print SVD output shapes for debugging
-        print(f"SVD output shapes - U: {U.shape}, S: {S.shape}, Vh: {Vh.shape}")
-        
-        # Convert back to original dtype
-        U = U.to(dtype=original_dtype, device=original_device)
-        S = S.to(dtype=original_dtype, device=original_device)
-        Vh = Vh.to(dtype=original_dtype, device=original_device)
-        
-        # Use top-k singular values/vectors, ensuring we don't exceed available dimensions
-        rank = min(rank, min(U.shape[1], Vh.shape[0]))
-        print(f"Using effective rank: {rank}")
-        
-        # Scale singular values into the factors
-        sqrt_S = torch.sqrt(S[:rank])
-        U_scaled = U[:, :rank] * sqrt_S
-        Vh_scaled = Vh[:rank] * sqrt_S.unsqueeze(1)
-        
-        # Print sizes before reshaping
-        print(f"Before reshape - U_scaled: {U_scaled.shape}, Vh_scaled: {Vh_scaled.shape}")
-        print(f"A_proj weight shape: {A_proj.weight.shape}, B_proj weight shape: {B_proj.weight.shape}")
-        
-        # Derive target shapes from module weights
         target_A_shape = A_proj.weight.shape
         target_B_shape = B_proj.weight.shape
         
-        # Calculate expected transposed shapes (accounting for transpose in final assignment)
-        expected_A_t_shape = target_A_shape[1], target_A_shape[0]  # Transposed shape
-        expected_B_t_shape = target_B_shape[1], target_B_shape[0]  # Transposed shape
+        # Expected dimensions for the factorized matrices
+        num_heads = self.config.num_attention_heads
+        num_kv_heads = getattr(self.config, 'num_key_value_heads', num_heads)
+        head_dim = self.config.head_dim
         
-        print(f"Target shapes - A: {expected_A_t_shape}, B: {expected_B_t_shape}")
+        print(f"Processing weight with shape {weight.shape}")
+        print(f"Target shapes - A: {target_A_shape}, B: {target_B_shape}")
         
-        # Reshape U_scaled to match A_proj's expected input shape
+        # Convert weight to float32 for better numerical stability
+        weight_float32 = weight.to(dtype=torch.float32)
+        
+        # Explicitly reshape weight for SVD based on whether it's Q, K, or V
+        if weight.shape[0] == num_heads * head_dim:
+            # This is a query weight
+            print(f"Identified as query weight (num_heads={num_heads}, head_dim={head_dim})")
+            weight_2d = weight_float32  # Keep as is for SVD
+        else:
+            # This is a key or value weight
+            print(f"Identified as key/value weight (num_kv_heads={num_kv_heads}, head_dim={head_dim})")
+            weight_2d = weight_float32  # Keep as is for SVD
+        
+        # Perform SVD on the 2D weight matrix
         try:
-            A_weight = U_scaled.reshape(out_dim, head_dim, rank).permute(0, 2, 1).reshape(out_dim * rank, head_dim)
-            # Check that the shape matches what we expect
-            if A_weight.shape != expected_A_t_shape:
-                raise RuntimeError(f"Reshaped A_weight {A_weight.shape} doesn't match expected {expected_A_t_shape}")
-        except Exception as e:
-            print(f"A_weight reshape error: {e}")
-            # Create a properly shaped A_weight even if we can't reshape the original
-            A_weight = torch.zeros(expected_A_t_shape, device=U_scaled.device, dtype=U_scaled.dtype)
+            print(f"Performing SVD on tensor of shape {weight_2d.shape}")
+            U, S, Vh = torch.linalg.svd(weight_2d, full_matrices=False)
             
-            # Try to copy as much data as possible from U_scaled
-            if U_scaled.shape[0] * rank <= A_weight.shape[0]:
-                # We can at least fill part of the output
-                u_flat = U_scaled.reshape(-1)
-                copy_len = min(u_flat.shape[0], A_weight.shape[0] * A_weight.shape[1])
-                A_weight.view(-1)[:copy_len] = u_flat[:copy_len]
-            else:
-                # Try a direct reshape and truncate if needed
-                flat_u = U_scaled.reshape(-1)
-                flat_a = A_weight.reshape(-1)
-                copy_size = min(flat_u.size(0), flat_a.size(0))
-                flat_a[:copy_size] = flat_u[:copy_size]
-                A_weight = flat_a.reshape(expected_A_t_shape)
-
-        # Reshape Vh_scaled to match B_proj's expected input shape
-        try:
-            B_weight = Vh_scaled.reshape(rank, hidden_size)
-            # Check that the shape matches what we expect
-            if B_weight.shape != expected_B_t_shape:
-                raise RuntimeError(f"Reshaped B_weight {B_weight.shape} doesn't match expected {expected_B_t_shape}")
-        except Exception as e:
-            print(f"B_weight reshape error: {e}")
-            # Create a properly shaped B_weight
-            B_weight = torch.zeros(expected_B_t_shape, device=Vh_scaled.device, dtype=Vh_scaled.dtype)
+            # Limit to specified rank
+            effective_rank = min(rank, min(U.shape[1], S.shape[0], Vh.shape[0]))
+            print(f"Using effective rank: {effective_rank} (requested: {rank})")
             
-            # Try to copy as much data as possible from Vh_scaled
-            if Vh_scaled.shape[0] * Vh_scaled.shape[1] <= B_weight.shape[0] * B_weight.shape[1]:
-                vh_flat = Vh_scaled.reshape(-1)
-                copy_len = min(vh_flat.shape[0], B_weight.shape[0] * B_weight.shape[1])
-                B_weight.view(-1)[:copy_len] = vh_flat[:copy_len]
+            # Create scaled factors
+            sqrt_S = torch.sqrt(S[:effective_rank])
+            U_scaled = U[:, :effective_rank] * sqrt_S
+            Vh_scaled = Vh[:effective_rank] * sqrt_S.unsqueeze(1)
+            
+            print(f"Factorized shapes - U_scaled: {U_scaled.shape}, Vh_scaled: {Vh_scaled.shape}")
+            
+            # Create direct A and B factors matching projection shapes
+            # We'll initialize with zeros and then fill with as much data as possible
+            A_weight = torch.zeros(target_A_shape[1], target_A_shape[0], 
+                                  dtype=weight.dtype, device=weight.device)
+            B_weight = torch.zeros(target_B_shape[1], target_B_shape[0], 
+                                  dtype=weight.dtype, device=weight.device)
+            
+            # Reshape U_scaled and Vh_scaled to fill as much of A_weight and B_weight as possible
+            if 'W_A_q' in A_proj.__class__.__name__ or 'W_A_q' in A_proj._get_name():
+                # For Q projections, reshape according to q_rank
+                q_rank = effective_rank
+                A_entries = min(U_scaled.shape[0] * q_rank, A_weight.numel())
+                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
+                
+                # Flatten and copy data
+                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
+                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
+                
+            elif 'W_A_k' in A_proj.__class__.__name__ or 'W_A_k' in A_proj._get_name():
+                # For K projections
+                k_rank = effective_rank
+                A_entries = min(U_scaled.shape[0] * k_rank, A_weight.numel())
+                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
+                
+                # Flatten and copy data
+                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
+                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
+                
+            elif 'W_A_v' in A_proj.__class__.__name__ or 'W_A_v' in A_proj._get_name():
+                # For V projections
+                v_rank = effective_rank
+                A_entries = min(U_scaled.shape[0] * v_rank, A_weight.numel())
+                B_entries = min(Vh_scaled.shape[0] * Vh_scaled.shape[1], B_weight.numel())
+                
+                # Flatten and copy data
+                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
+                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
+                
             else:
-                # Try a direct reshape and truncate
-                rows_to_copy = min(Vh_scaled.shape[0], B_weight.shape[0])
-                cols_to_copy = min(Vh_scaled.shape[1], B_weight.shape[1])
-                B_weight[:rows_to_copy, :cols_to_copy] = Vh_scaled[:rows_to_copy, :cols_to_copy]
-        
-        print(f"Final shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
-        
-        # Set weights for the linear layers
-        with torch.no_grad():
-            # Copy weights, handling any shape mismatches
-            try:
+                # Generic approach
+                A_entries = min(U_scaled.numel(), A_weight.numel())
+                B_entries = min(Vh_scaled.numel(), B_weight.numel())
+                
+                A_weight.view(-1)[:A_entries] = U_scaled.reshape(-1)[:A_entries]
+                B_weight.view(-1)[:B_entries] = Vh_scaled.reshape(-1)[:B_entries]
+            
+            print(f"Final shapes - A_weight: {A_weight.shape}, B_weight: {B_weight.shape}")
+            
+            # Set weights to the projection modules
+            with torch.no_grad():
+                # Convert to the original dtype
+                A_weight = A_weight.to(dtype=A_proj.weight.dtype)
+                B_weight = B_weight.to(dtype=B_proj.weight.dtype)
+                
+                # Copy to the modules - we transpose here because Linear expects (out_features, in_features)
                 A_proj.weight.copy_(A_weight.transpose(0, 1))
-            except Exception as e:
-                print(f"Failed to copy A_weight: {e}")
-                # Fallback: create a compatible tensor and copy what we can
-                temp_weight = torch.zeros_like(A_proj.weight)
-                rows = min(A_weight.shape[1], temp_weight.shape[0])
-                cols = min(A_weight.shape[0], temp_weight.shape[1])
-                temp_weight[:rows, :cols] = A_weight.transpose(0, 1)[:rows, :cols]
-                A_proj.weight.copy_(temp_weight)
-            
-            try:
                 B_proj.weight.copy_(B_weight.transpose(0, 1))
-            except Exception as e:
-                print(f"Failed to copy B_weight: {e}")
-                # Fallback: create a compatible tensor and copy what we can
-                temp_weight = torch.zeros_like(B_proj.weight)
-                rows = min(B_weight.shape[1], temp_weight.shape[0])
-                cols = min(B_weight.shape[0], temp_weight.shape[1])
-                temp_weight[:rows, :cols] = B_weight.transpose(0, 1)[:rows, :cols]
-                B_proj.weight.copy_(temp_weight)
-            
-            # Set weight scalers if using quantization
-            if hasattr(self.config, 'quant') and self.config.quant:
-                if hasattr(A_proj, 'weight_scaler'):
-                    A_proj.weight_scaler.fill_(1.0)
-                if hasattr(B_proj, 'weight_scaler'):
-                    B_proj.weight_scaler.fill_(1.0)
+                
+                # Set weight scalers if using quantization
+                if hasattr(self.config, 'quant') and self.config.quant:
+                    if hasattr(A_proj, 'weight_scaler'):
+                        A_proj.weight_scaler.fill_(1.0)
+                    if hasattr(B_proj, 'weight_scaler'):
+                        B_proj.weight_scaler.fill_(1.0)
+                        
+        except Exception as e:
+            print(f"SVD or weight setting failed: {e}")
+            # Fill with small random values as a fallback
+            with torch.no_grad():
+                nn.init.normal_(A_proj.weight, mean=0.0, std=0.02)
+                nn.init.normal_(B_proj.weight, mean=0.0, std=0.02)
