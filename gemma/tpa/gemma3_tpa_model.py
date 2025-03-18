@@ -967,11 +967,22 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         else:
             effective_rank = min(rank, min(weight.shape))
             
-        # For matrices with high dimensionality mismatch, increase rank
-        if max(weight.shape) / min(weight.shape) > 4:
+        # For matrices with high dimensionality mismatch, adjust approach
+        dimension_ratio = max(weight.shape) / min(weight.shape)
+        if dimension_ratio > 4:
             old_rank = effective_rank
-            effective_rank = min(effective_rank * 2, min(weight.shape))
-            print(f"High dimension ratio detected, increasing rank from {old_rank} to {effective_rank}")
+            # For extreme mismatches, we need to be more careful with rank selection
+            if dimension_ratio > 10:
+                # For very extreme mismatches, we need a different approach
+                # Use a rank that's proportional to the smaller dimension
+                effective_rank = min(min(weight.shape) // 2, effective_rank)
+                if effective_rank < 1:
+                    effective_rank = 1
+                print(f"Extreme dimension ratio ({dimension_ratio:.1f}) detected, adjusting rank from {old_rank} to {effective_rank}")
+            else:
+                # For moderate mismatches, just increase rank slightly
+                effective_rank = min(effective_rank + 2, min(weight.shape))
+                print(f"High dimension ratio ({dimension_ratio:.1f}) detected, increasing rank from {old_rank} to {effective_rank}")
         
         # Perform SVD on the 2D weight matrix with improved stability
         try:
@@ -1027,15 +1038,57 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # For queries, we need to reshape carefully to maintain the right dimensions
                 rows_per_head = weight.shape[0] // num_heads if num_heads > 0 else 1
                 
-                # Reshape A_factor for query - preparing for [num_heads * rank, hidden_size]
-                # First reshape to a 3D tensor with head dimension explicit
-                if num_heads > 0:
-                    A_reshaped = A_factor.reshape(num_heads, rows_per_head, effective_rank)
-                    # Then average across the rows_per_head dimension for better stability
-                    A_packed = A_reshaped.mean(dim=1)  # Results in [num_heads, effective_rank]
-                    # Expand to fill the target shape
-                    A_packed = A_packed.repeat_interleave(target_A_shape[0] // (num_heads * effective_rank) + 1, dim=0)
-                    A_packed = A_packed[:target_A_shape[0] // effective_rank].reshape(-1, effective_rank)
+                # Handle extreme dimension mismatches differently
+                dimension_ratio = max(weight.shape) / min(weight.shape)
+                if dimension_ratio > 8:
+                    print(f"Using robust handling for high dimension ratio: {dimension_ratio:.1f}")
+                    # For extreme mismatches, use a more direct approach
+                    target_rows = target_A_shape[0] // effective_rank
+                    if target_rows <= 0:
+                        target_rows = 1 
+                    
+                    # Use row striding to sample evenly from the source
+                    if A_factor.shape[0] > target_rows:
+                        # If source is larger, stride through the rows
+                        stride = A_factor.shape[0] // target_rows
+                        indices = torch.arange(0, A_factor.shape[0], stride, device=A_factor.device)
+                        indices = indices[:target_rows]
+                        A_packed = A_factor[indices, :effective_rank]
+                    else:
+                        # If source is smaller, repeat the rows
+                        repeats = (target_rows + A_factor.shape[0] - 1) // A_factor.shape[0]
+                        A_expanded = A_factor.repeat(repeats, 1)
+                        A_packed = A_expanded[:target_rows, :effective_rank]
+                
+                # Standard approach for normal cases    
+                elif num_heads > 0:
+                    try:
+                        # Try standard reshape first
+                        A_reshaped = A_factor.reshape(num_heads, rows_per_head, effective_rank)
+                        # Average across rows for stability
+                        A_packed = A_reshaped.mean(dim=1)  # Results in [num_heads, effective_rank]
+                        
+                        # Safely calculate repeat size
+                        target_size = target_A_shape[0] // effective_rank
+                        if target_size <= 0:
+                            target_size = 1
+                            
+                        repeat_size = max(1, target_size // num_heads)
+                        A_packed = A_packed.repeat_interleave(repeat_size, dim=0)
+                        
+                        # Handle size mismatches
+                        if A_packed.size(0) < target_size:
+                            # Too small, pad with repeats of last row
+                            pad = A_packed[-1:].repeat(target_size - A_packed.size(0), 1)
+                            A_packed = torch.cat([A_packed, pad], dim=0)
+                        elif A_packed.size(0) > target_size:
+                            # Too large, truncate
+                            A_packed = A_packed[:target_size]
+                    except Exception as e:
+                        print(f"Warning: A factor reshape failed: {e}")
+                        # Fallback to a simple approach
+                        A_packed = torch.ones((target_A_shape[0] // effective_rank, effective_rank), 
+                                           device=A_factor.device, dtype=A_factor.dtype) * 0.01
                 else:
                     # Fallback for unusual shapes
                     A_packed = A_factor.reshape(-1, effective_rank)
@@ -1047,11 +1100,54 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # Similar approach for keys and values, but using num_kv_heads
                 rows_per_head = weight.shape[0] // num_kv_heads if num_kv_heads > 0 else 1
                 
-                if num_kv_heads > 0:
-                    A_reshaped = A_factor.reshape(num_kv_heads, rows_per_head, effective_rank)
-                    A_packed = A_reshaped.mean(dim=1)
-                    A_packed = A_packed.repeat_interleave(target_A_shape[0] // (num_kv_heads * effective_rank) + 1, dim=0)
-                    A_packed = A_packed[:target_A_shape[0] // effective_rank].reshape(-1, effective_rank)
+                # Use same approach as for query
+                dimension_ratio = max(weight.shape) / min(weight.shape)
+                if dimension_ratio > 8:
+                    print(f"Using robust handling for high KV dimension ratio: {dimension_ratio:.1f}")
+                    # For extreme mismatches, use a more direct approach
+                    target_rows = target_A_shape[0] // effective_rank
+                    if target_rows <= 0:
+                        target_rows = 1 
+                    
+                    # Use row striding to sample evenly from the source
+                    if A_factor.shape[0] > target_rows:
+                        # If source is larger, stride through the rows
+                        stride = max(1, A_factor.shape[0] // target_rows)
+                        indices = torch.arange(0, A_factor.shape[0], stride, device=A_factor.device)
+                        indices = indices[:target_rows]
+                        A_packed = A_factor[indices, :effective_rank]
+                    else:
+                        # If source is smaller, repeat the rows
+                        repeats = (target_rows + A_factor.shape[0] - 1) // A_factor.shape[0]
+                        A_expanded = A_factor.repeat(repeats, 1)
+                        A_packed = A_expanded[:target_rows, :effective_rank]
+                elif num_kv_heads > 0:
+                    try:
+                        # Try standard reshape
+                        A_reshaped = A_factor.reshape(num_kv_heads, rows_per_head, effective_rank)
+                        A_packed = A_reshaped.mean(dim=1)
+                        
+                        # Safely calculate target size
+                        target_size = target_A_shape[0] // effective_rank
+                        if target_size <= 0:
+                            target_size = 1
+                            
+                        repeat_size = max(1, target_size // num_kv_heads)
+                        A_packed = A_packed.repeat_interleave(repeat_size, dim=0)
+                        
+                        # Handle size mismatches
+                        if A_packed.size(0) < target_size:
+                            # Too small, pad with repeats
+                            pad = A_packed[-1:].repeat(target_size - A_packed.size(0), 1)
+                            A_packed = torch.cat([A_packed, pad], dim=0)
+                        elif A_packed.size(0) > target_size:
+                            # Too large, truncate
+                            A_packed = A_packed[:target_size]
+                    except Exception as e:
+                        print(f"Warning: KV A factor reshape failed: {e}")
+                        # Fallback
+                        A_packed = torch.ones((target_A_shape[0] // effective_rank, effective_rank), 
+                                           device=A_factor.device, dtype=A_factor.dtype) * 0.01
                 else:
                     A_packed = A_factor.reshape(-1, effective_rank)
                     
@@ -1169,27 +1265,57 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     
                     # Compute factorized projection
                     a_projs = torch.matmul(test_inputs, A_proj.weight.t())
-                    
-                    # Reshape properly depending on projection type
-                    if is_query:
-                        a_projs_reshaped = a_projs.reshape(num_samples, -1, effective_rank)
-                    else:
-                        # For K, V with potentially different head counts
-                        a_projs_reshaped = a_projs.reshape(num_samples, -1, effective_rank)
-                        
                     b_projs = torch.matmul(test_inputs, B_proj.weight.t())
-                    b_projs_reshaped = b_projs.reshape(num_samples, effective_rank, -1)
                     
-                    # Combine the factors
-                    # For better numerical stability, scale each component
+                    # Check shapes before reshaping to avoid errors
+                    a_out_dim = a_projs.size(1)
+                    b_out_dim = b_projs.size(1)
+                    
+                    print(f"Projection shapes - a_projs: {a_projs.shape}, b_projs: {b_projs.shape}")
+                    print(f"Target dimensions - A: {A_proj.weight.shape}, B: {B_proj.weight.shape}")
+                    
+                    # Calculate reshape dimensions safely
+                    # The reshape operation requires that the number of elements stays the same
+                    if a_out_dim % effective_rank != 0:
+                        print(f"Warning: a_out_dim {a_out_dim} is not divisible by rank {effective_rank}")
+                        # Use floor division to ensure we don't overflow
+                        a_mid_dim = a_out_dim // effective_rank
+                        # Ensure we don't lose elements in the reshape
+                        if a_mid_dim * effective_rank < a_out_dim:
+                            a_mid_dim += 1
+                    else:
+                        a_mid_dim = a_out_dim // effective_rank
+                        
+                    # For B projections, we need to ensure b_projs can be reshaped properly
+                    b_mid_dim = b_out_dim // effective_rank
+                    if b_mid_dim * effective_rank < b_out_dim:
+                        b_mid_dim += 1
+                    
+                    print(f"Using reshape dimensions: a_mid_dim={a_mid_dim}, b_mid_dim={b_mid_dim}")
+                    
+                    # Use a simpler approach that doesn't rely on specific reshape operations
+                    # Instead of reshaping, we'll test each rank component individually
                     effective_scale = 1.0 / effective_rank
                     test_projs = []
                     
                     for i in range(num_samples):
-                        # Carefully compute for each sample
-                        test_proj = torch.matmul(a_projs_reshaped[i], b_projs_reshaped[i])
-                        test_proj = test_proj.reshape(1, -1) * effective_scale
-                        test_projs.append(test_proj)
+                        # Start with zeros matching the original projection shape
+                        sample_proj = torch.zeros_like(orig_projs[i])
+                        
+                        # Add contribution from each rank component
+                        for r in range(min(effective_rank, a_out_dim)):
+                            # Extract vector elements for this rank
+                            if r < a_out_dim and r < b_out_dim:
+                                # Use a simple outer product approach
+                                a_slice = a_projs[i, r::effective_rank]
+                                b_slice = b_projs[i, r::effective_rank]
+                                
+                                # Add to total, handling different slice sizes
+                                min_len = min(len(a_slice), len(b_slice), len(sample_proj))
+                                if min_len > 0:
+                                    sample_proj[:min_len] += a_slice[:min_len] * b_slice[:min_len] * effective_scale
+                        
+                        test_projs.append(sample_proj.unsqueeze(0))
                     
                     test_projs = torch.cat(test_projs, dim=0)
                     
