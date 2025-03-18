@@ -630,8 +630,18 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Flatten for SVD
         weight_flat = weight_reshaped.reshape(out_dim * head_dim, hidden_size)
         
-        # Perform SVD
-        U, S, Vh = torch.svd(weight_flat)
+        # Convert to float32 for SVD operation (SVD doesn't support bfloat16)
+        original_dtype = weight_flat.dtype
+        original_device = weight_flat.device
+        weight_flat_float32 = weight_flat.to(dtype=torch.float32)
+        
+        # Perform SVD (forcing it to run on same device as input)
+        U, S, Vh = torch.svd(weight_flat_float32)
+        
+        # Convert back to original dtype
+        U = U.to(dtype=original_dtype, device=original_device)
+        S = S.to(dtype=original_dtype, device=original_device)
+        Vh = Vh.to(dtype=original_dtype, device=original_device)
         
         # Use top-k singular values/vectors
         rank = min(rank, min(U.shape[1], Vh.shape[0]))
