@@ -637,8 +637,13 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                             # Apply top-k filtering
                             top_k_value = top_ks_tensor[batch_idx].item()
                             if top_k_value > 0:
-                                indices_to_remove = batch_logits < torch.topk(batch_logits, top_k_value)[0][..., -1, None]
-                                batch_logits[indices_to_remove] = -float('Inf')
+                                # Get top-k values safely
+                                topk_values, _ = torch.topk(batch_logits, min(top_k_value, batch_logits.size(-1)))
+                                if topk_values.shape[-1] > 0:
+                                    threshold = topk_values[..., -1]
+                                    batch_logits = torch.where(batch_logits < threshold, 
+                                                            torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
+                                                            batch_logits)
                             
                             # Apply top-p (nucleus) filtering
                             top_p_value = top_ps_tensor[batch_idx].item()
@@ -650,8 +655,19 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                                 sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                                 sorted_indices_to_remove[..., 0] = 0
                                 
+                                # Create a mask in the original logits space
+                                filtering_mask = torch.zeros_like(batch_logits, dtype=torch.bool)
+                                # Get the indices that should be removed
                                 indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                                batch_logits[indices_to_remove] = -float('Inf')
+                                # Set those indices to True in the mask (safely, with bounds checking)
+                                valid_indices = (indices_to_remove >= 0) & (indices_to_remove < batch_logits.size(-1))
+                                if valid_indices.any():
+                                    # Only scatter using valid indices
+                                    filtering_mask.scatter_(0, indices_to_remove[valid_indices], True)
+                                # Apply the mask
+                                batch_logits = torch.where(filtering_mask,
+                                                        torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
+                                                        batch_logits)
                             
                             # Sample from the filtered distribution
                             probs = F.softmax(batch_logits, dim=-1)
@@ -742,8 +758,13 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                         # Apply top-k filtering
                         top_k_value = top_ks_tensor[batch_idx].item()
                         if top_k_value > 0:
-                            indices_to_remove = batch_logits < torch.topk(batch_logits, top_k_value)[0][..., -1, None]
-                            batch_logits[indices_to_remove] = -float('Inf')
+                            # Get top-k values safely
+                            topk_values, _ = torch.topk(batch_logits, min(top_k_value, batch_logits.size(-1)))
+                            if topk_values.shape[-1] > 0:
+                                threshold = topk_values[..., -1]
+                                batch_logits = torch.where(batch_logits < threshold, 
+                                                        torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
+                                                        batch_logits)
                         
                         # Apply top-p (nucleus) filtering
                         top_p_value = top_ps_tensor[batch_idx].item()
@@ -755,8 +776,19 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
                             sorted_indices_to_remove[..., 0] = 0
                             
+                            # Create a mask in the original logits space
+                            filtering_mask = torch.zeros_like(batch_logits, dtype=torch.bool)
+                            # Get the indices that should be removed
                             indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                            batch_logits[indices_to_remove] = -float('Inf')
+                            # Set those indices to True in the mask (safely, with bounds checking)
+                            valid_indices = (indices_to_remove >= 0) & (indices_to_remove < batch_logits.size(-1))
+                            if valid_indices.any():
+                                # Only scatter using valid indices
+                                filtering_mask.scatter_(0, indices_to_remove[valid_indices], True)
+                            # Apply the mask
+                            batch_logits = torch.where(filtering_mask,
+                                                    torch.tensor(-float('Inf'), device=batch_logits.device, dtype=batch_logits.dtype),
+                                                    batch_logits)
                         
                         # Sample from the filtered distribution
                         probs = F.softmax(batch_logits, dim=-1)
