@@ -459,6 +459,16 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         top_k: int = 64,
     ) -> Sequence[str]:
         """Generates responses for given prompts using Gemma model with TPA."""
+        # Store original prompt texts for later reference
+        self.prompt_texts = []
+        for p in prompts:
+            if isinstance(p, tuple) and len(p) > 0 and isinstance(p[0], str):
+                self.prompt_texts.append(p[0])
+            elif isinstance(p, str):
+                self.prompt_texts.append(p)
+            else:
+                self.prompt_texts.append("")
+        print(f"DEBUG: Input prompts: {self.prompt_texts}")
         # Handle different model types
         if self.is_multimodal:
             # Process multimodal input with Gemma3 preprocessor
@@ -691,7 +701,8 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     valid_hidden_states = hidden_states
                     
                     # Use sampler's forward method
-                    next_token, _ = self.sampler(
+                    print(f"DEBUG pos {current_pos}: Sampling with temperature={temperatures_tensor[0].item() if temperatures_tensor is not None else 'None'}")
+                    next_token, next_logits = self.sampler(
                         embedding=embedder_weight,
                         hidden_states=valid_hidden_states,
                         output_positions=dummy_pos,
@@ -699,9 +710,26 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                         top_ps=top_ps_tensor,
                         top_ks=top_ks_tensor,
                     )
+                    
+                    # Debug the next token
+                    token_id = next_token[0].item()
+                    print(f"DEBUG pos {current_pos}: Generated token ID {token_id}")
+                    if token_id < self.tokenizer.vocab_size:
+                        try:
+                            token_str = self.tokenizer.decode([token_id])
+                            print(f"DEBUG pos {current_pos}: Token string: '{token_str}'")
+                        except:
+                            print(f"DEBUG pos {current_pos}: Could not decode token")
+                    
+                    # Store top logits to check if model is "stuck"
+                    if next_logits is not None:
+                        top_logits, top_indices = torch.topk(next_logits[0], 5)
+                        print(f"DEBUG pos {current_pos}: Top logits: {top_logits.tolist()}")
+                        print(f"DEBUG pos {current_pos}: Top indices: {top_indices.tolist()}")
                 
                 # Check for EOS
                 if next_token[0].item() == self.tokenizer.eos_id:
+                    print(f"DEBUG pos {current_pos}: Hit EOS token, stopping generation")
                     break
                 
                 # Append the new token to token_ids_tensor
@@ -719,33 +747,35 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 image_batch = None
                 image_presence_mask = None
 
-        # Detokenization.
+        # Detokenization with debug output
         token_ids = token_ids_tensor[:, :current_pos].tolist()
         results = []
+        
+        print(f"DEBUG: Final token IDs: {token_ids}")
+        print(f"DEBUG: Current position: {current_pos}")
+        
+        # Check if we had any successful token generation
         for i, tokens in enumerate(token_ids):
-            # For multimodal prompts (processed through preprocessor)
-            if isinstance(prompts[i], tuple) and len(prompts[i]) > 0 and isinstance(prompts[i][0], str):
-                # Get length of prompt tokens
-                prompt_text = prompts[i][0]
-                prompt_tokens = self.tokenizer.encode(prompt_text)
-                prompt_len = len(prompt_tokens)
+            print(f"DEBUG: Complete token sequence for batch {i}: {tokens}")
+            
+            # Always return full output for now (the original standard behavior from model.py)
+            # This ensures we at least get correct output even if new token generation fails
+            full_output = self.tokenizer.decode(tokens)
+            
+            # Try to return just new tokens by checking for the prompt
+            if hasattr(self, 'prompt_texts') and i < len(self.prompt_texts):
+                # If we stored the prompt during processing
+                prompt_text = self.prompt_texts[i]
+                if full_output.startswith(prompt_text):
+                    new_output = full_output[len(prompt_text):]
+                    print(f"DEBUG: Stripped prompt, new output: '{new_output}'")
+                    if new_output.strip():  # If there's any content
+                        results.append(new_output)
+                        continue
                 
-                # Extract only newly generated tokens
-                new_tokens = tokens[prompt_len:]
-                
-                # Check for EOS token
-                if self.tokenizer.eos_id in new_tokens:
-                    eos_index = new_tokens.index(self.tokenizer.eos_id)
-                    new_tokens = new_tokens[:eos_index]
-                    
-                results.append(self.tokenizer.decode(new_tokens))
-            else:
-                # Fallback to returning full output (shouldn't normally happen)
-                output = tokens
-                if self.tokenizer.eos_id in output:
-                    eos_index = output.index(self.tokenizer.eos_id)
-                    output = output[:eos_index]
-                results.append(self.tokenizer.decode(output))
+            # Store complete token sequence for debugging
+            self.last_tokens = tokens
+            results.append(full_output)
 
         return results
 
