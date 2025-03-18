@@ -723,11 +723,29 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         token_ids = token_ids_tensor[:, :current_pos].tolist()
         results = []
         for i, tokens in enumerate(token_ids):
-            output = tokens
-            if self.tokenizer.eos_id in output:
-                eos_index = output.index(self.tokenizer.eos_id)
-                output = output[:eos_index]
-            results.append(self.tokenizer.decode(output))
+            # For multimodal prompts (processed through preprocessor)
+            if isinstance(prompts[i], tuple) and len(prompts[i]) > 0 and isinstance(prompts[i][0], str):
+                # Get length of prompt tokens
+                prompt_text = prompts[i][0]
+                prompt_tokens = self.tokenizer.encode(prompt_text)
+                prompt_len = len(prompt_tokens)
+                
+                # Extract only newly generated tokens
+                new_tokens = tokens[prompt_len:]
+                
+                # Check for EOS token
+                if self.tokenizer.eos_id in new_tokens:
+                    eos_index = new_tokens.index(self.tokenizer.eos_id)
+                    new_tokens = new_tokens[:eos_index]
+                    
+                results.append(self.tokenizer.decode(new_tokens))
+            else:
+                # Fallback to returning full output (shouldn't normally happen)
+                output = tokens
+                if self.tokenizer.eos_id in output:
+                    eos_index = output.index(self.tokenizer.eos_id)
+                    output = output[:eos_index]
+                results.append(self.tokenizer.decode(output))
 
         return results
 
