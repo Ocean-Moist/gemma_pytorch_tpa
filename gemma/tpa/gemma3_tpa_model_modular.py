@@ -119,29 +119,57 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             print("Initializing text-only model without vision components")
 
         # Set up RoPE frequencies, with different handling for different model types
-        defaults = {
-                gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
-                gemma_config.AttentionType.GLOBAL: 10_000,
-            }
+        # Get scaling factor (if available)
+        rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
             
         # Handle RoPE configuration for different model types
-        if hasattr(config, 'rope_wave_length') and config.rope_wave_length is not None:
-            # Gemma3 style
-            print("Using Gemma3-style RoPE configuration")
-            rope_lengths = config.rope_wave_length
-            rope_scaling_factor = getattr(config, 'rope_scaling_factor', 1)
-            
-            self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
-                    gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]
-                ))
-            self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
-                    gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]
-                ), rope_scaling_factor=rope_scaling_factor)
-        else:
-            # Standard Gemma style
-            print("Using standard RoPE configuration")
-            theta = getattr(config, 'rope_theta', 10_000)
-            self._register_freqs_cis('freqs_cis', head_dim, max_seq_len, theta=theta)
+        try:
+            if hasattr(config, 'rope_wave_length') and config.rope_wave_length is not None:
+                # Gemma3 style
+                print("Using Gemma3-style RoPE configuration")
+                
+                # Make sure AttentionType constants are available
+                if hasattr(gemma_config, 'AttentionType'):
+                    defaults = {
+                        gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
+                        gemma_config.AttentionType.GLOBAL: 10_000,
+                    }
+                    
+                    rope_lengths = config.rope_wave_length
+                    
+                    # Generate local frequencies
+                    local_theta = rope_lengths.get(
+                        gemma_config.AttentionType.LOCAL_SLIDING, 
+                        defaults[gemma_config.AttentionType.LOCAL_SLIDING]
+                    )
+                    self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, 
+                                           theta=local_theta, rope_scaling_factor=1)
+                    
+                    # Generate global frequencies
+                    global_theta = rope_lengths.get(
+                        gemma_config.AttentionType.GLOBAL, 
+                        defaults[gemma_config.AttentionType.GLOBAL]
+                    )
+                    self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, 
+                                          theta=global_theta, rope_scaling_factor=rope_scaling_factor)
+                else:
+                    # Fallback if AttentionType not available
+                    print("Warning: gemma_config.AttentionType not available, using standard RoPE")
+                    theta = 10_000  # Default
+                    self._register_freqs_cis('freqs_cis', head_dim, max_seq_len, 
+                                          theta=theta, rope_scaling_factor=rope_scaling_factor)
+            else:
+                # Standard Gemma style
+                print("Using standard RoPE configuration")
+                theta = getattr(config, 'rope_theta', 10_000)
+                self._register_freqs_cis('freqs_cis', head_dim, max_seq_len, 
+                                      theta=theta, rope_scaling_factor=rope_scaling_factor)
+        except Exception as e:
+            # Catch any errors and use a simple fallback
+            print(f"Error setting up RoPE frequencies: {e}")
+            print("Using fallback RoPE configuration")
+            self._register_freqs_cis('freqs_cis', head_dim, max_seq_len, 
+                                  theta=10_000, rope_scaling_factor=1)
 
     def _register_freqs_cis(self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1):
         """Register rotary position embedding frequencies."""

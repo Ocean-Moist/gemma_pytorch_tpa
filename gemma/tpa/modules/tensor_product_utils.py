@@ -25,6 +25,10 @@ def register_freqs_cis(model, name: str, head_dim: int, max_seq_len: int, theta:
         theta: Base frequency parameter
         rope_scaling_factor: Scaling factor for RoPE frequencies
     """
+    # Handle None value for rope_scaling_factor
+    if rope_scaling_factor is None:
+        rope_scaling_factor = 1
+        
     # Create freqs
     freqs = 1.0 / (theta ** (torch.arange(0, head_dim, 2)[:(head_dim // 2)].float() / head_dim))
     
