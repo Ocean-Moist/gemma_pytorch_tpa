@@ -14,6 +14,7 @@ from .. import gemma3_preprocessor
 from .. import tokenizer
 from ..siglip_vision import siglip_vision_model
 from .tpa_model import GemmaTPAModel, create_tpa_kv_caches
+import torch.nn.functional as F
 
 class Gemma3ForMultimodalLMwithTPA(nn.Module):
     """Gemma3 model for multimodal causal LM with Tensor Product Attention."""
