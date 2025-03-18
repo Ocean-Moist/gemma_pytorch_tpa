@@ -190,9 +190,9 @@ def main(_):
       model_config = gemma_config.get_config_for_1b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
       # Add a dummy vision_config=None to explicitly indicate this is a text-only model
       model_config.vision_config = None
-      # Set architecture type for 1B model (it's not a Gemma 3 model)
+      # Set architecture type for 1B model (idk if it's a Gemma 3 model)
       if hasattr(gemma_config, 'Architecture'):
-          model_config.architecture = gemma_config.Architecture.GEMMA
+          model_config.architecture = gemma_config.Architecture.GEMMA_3
   elif _VARIANT.value == "4b":
       model_config = gemma_config.get_config_for_4b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
   elif _VARIANT.value == "12b":
