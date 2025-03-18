@@ -103,6 +103,10 @@ class GemmaTensorProductAttention(nn.Module):
         
         batch_size, seq_len, _ = hidden_states_shape
         
+        # Early return for empty sequences to avoid dimension errors
+        if seq_len == 0 or batch_size == 0:
+            return torch.zeros(batch_size, seq_len, self.hidden_size, device=hidden_states.device, dtype=hidden_states.dtype)
+        
         # Compute A factors
         A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
         A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
@@ -281,6 +285,11 @@ class GemmaTensorProductAttention(nn.Module):
         # Apply attention weights to values
         # [batch_size, num_heads, seq_len, head_dim]
         output = torch.matmul(attn_weights, V)
+        
+        # Handle empty sequence case
+        if seq_len == 0 or batch_size == 0:
+            # Return an empty tensor of the right shape
+            return torch.zeros(batch_size, seq_len, self.hidden_size, device=hidden_states.device, dtype=hidden_states.dtype)
         
         # Reshape output and apply output projection
         # [batch_size, seq_len, hidden_size]

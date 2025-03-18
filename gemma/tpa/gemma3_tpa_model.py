@@ -602,23 +602,41 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
                 current_freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, safe_pos_tensor)
                 
-                # Process current token
-                hidden_states = self.model(
-                    hidden_states=current_embed,
-                    freqs_cis=current_freqs_cis,
-                    kv_write_indices=current_pos_tensor,
-                    kv_caches=kv_caches,
-                    mask=None,  # Let attention handle masking
-                    local_mask=None,
-                )
+                # Make sure we have a valid input shape for processing
+                if current_embed.shape[1] == 0:
+                    print("Warning: Current embed has sequence length 0, skipping processing")
+                    # Use a default shape for hidden states to avoid reshape errors
+                    hidden_states = torch.zeros(
+                        current_embed.shape[0], 0, self.config.hidden_size, 
+                        device=device, dtype=current_embed.dtype
+                    )
+                else:
+                    # Process current token
+                    hidden_states = self.model(
+                        hidden_states=current_embed,
+                        freqs_cis=current_freqs_cis,
+                        kv_write_indices=current_pos_tensor,
+                        kv_caches=kv_caches,
+                        mask=None,  # Let attention handle masking
+                        local_mask=None,
+                    )
                 
                 # Project to vocabulary
                 embedder_weight = self.text_token_embedder.weight
                 if self.config.quant:
                     embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
                 
-                # Get logits for the last token
-                logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
+                # Handle empty hidden states
+                if hidden_states.shape[1] == 0:
+                    print("Warning: Empty hidden states, creating default logits")
+                    # Create zero logits with proper vocab dimension
+                    logits = torch.zeros(
+                        hidden_states.shape[0], 0, embedder_weight.shape[0],
+                        device=device, dtype=hidden_states.dtype
+                    )
+                else:
+                    # Get logits for the last token
+                    logits = torch.matmul(hidden_states, embedder_weight.transpose(0, 1))
                 
                 # Sample next token using the forward method of the sampler
                 # The sampler's forward method expects embedding and hidden_states
