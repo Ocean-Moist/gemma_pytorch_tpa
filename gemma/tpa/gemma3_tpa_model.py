@@ -762,20 +762,26 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             # This ensures we at least get correct output even if new token generation fails
             full_output = self.tokenizer.decode(tokens)
             
-            # Try to return just new tokens by checking for the prompt
-            if hasattr(self, 'prompt_texts') and i < len(self.prompt_texts):
-                # If we stored the prompt during processing
-                prompt_text = self.prompt_texts[i]
-                if full_output.startswith(prompt_text):
-                    new_output = full_output[len(prompt_text):]
-                    print(f"DEBUG: Stripped prompt, new output: '{new_output}'")
-                    if new_output.strip():  # If there's any content
-                        results.append(new_output)
-                        continue
-                
-            # Store complete token sequence for debugging
-            self.last_tokens = tokens
-            results.append(full_output)
+            # Store prompt token count
+            prompt_token_count = min_prompt_len
+            
+            # Get only the generated tokens (after prompt)
+            prompt_tokens = tokens[:prompt_token_count]
+            generated_tokens = tokens[prompt_token_count:]
+            
+            # Log for debugging
+            print(f"DEBUG: Prompt tokens: {prompt_tokens}")
+            print(f"DEBUG: Generated tokens: {generated_tokens}")
+            
+            # Decode the generated tokens
+            if generated_tokens:
+                generated_text = self.tokenizer.decode(generated_tokens)
+                print(f"DEBUG: Generated text: '{generated_text}'")
+                results.append(generated_text)
+            else:
+                # Fallback - return full output
+                self.last_tokens = tokens
+                results.append(full_output)
 
         return results
 
