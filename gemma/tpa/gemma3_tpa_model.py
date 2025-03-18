@@ -216,15 +216,29 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                             image_presence_mask: torch.Tensor, # B x N
                             ):
         batch_size, seq_len, model_dim = hidden_states.shape
+        
+        # Return early if tokenizer is not set or doesn't support images
+        if self.tokenizer is None or not hasattr(self.tokenizer, 'image_token_placeholder_id'):
+            return hidden_states
+            
         # Step 1 of 2: Fetch valid image embeddings
         # flatten indices of valid image embeddings
         valid_image_embeddings_indices = torch.nonzero(image_presence_mask.flatten(), as_tuple=False).squeeze()
+        
+        # Handle case where there are no valid image embeddings
+        if valid_image_embeddings_indices.numel() == 0:
+            return hidden_states
+            
         # num_valid_images x model_dim
         valid_image_embeddings = image_embeddings.index_select(0, valid_image_embeddings_indices)
 
         # Step 2 of 2: Replace image embeddings at right places.
         image_placeholder_mask = input_token_ids == self.tokenizer.image_token_placeholder_id
         image_placeholder_indices = image_placeholder_mask.flatten().nonzero(as_tuple=False).squeeze()
+        
+        # Return early if there are no image placeholders
+        if image_placeholder_indices.numel() == 0:
+            return hidden_states
 
         hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
         hidden_states[image_placeholder_indices] = valid_image_embeddings.reshape(-1, self.config.hidden_size)
@@ -233,6 +247,22 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     def create_attention_mask(self, input_ids: torch.Tensor, sequence_length: int):
         batch_size = input_ids.shape[0]
         causal_mask = torch.tril(torch.ones((batch_size, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device))
+        
+        # For non-multimodal models or when tokenizer doesn't have image token placeholder
+        if not self.is_multimodal or self.tokenizer is None or not hasattr(self.tokenizer, 'image_token_placeholder_id'):
+            # Create sliding window local mask if needed
+            if hasattr(self.config, 'sliding_window_size') and self.config.sliding_window_size is not None:
+                local_mask = torch.logical_and(
+                    causal_mask,
+                    torch.triu(torch.ones((1, 1, sequence_length, sequence_length), 
+                                         dtype=torch.bool, device=input_ids.device), 
+                               diagonal=-(self.config.sliding_window_size-1))
+                )
+            else:
+                local_mask = causal_mask
+            return causal_mask, local_mask
+        
+        # For multimodal models with image tokens
         image_token_mask = input_ids == self.tokenizer.image_token_placeholder_id
         # Pad the mask to the left with 0. This is to make sure the boundary
         # detection works correctly. Boundary (starting index of image patch) is
@@ -272,7 +302,9 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # local attention is within the sliding window.
         local_mask = torch.logical_and(
                 attention_mask,
-                torch.triu(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device), diagonal=-(self.config.sliding_window_size-1))
+                torch.triu(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device), 
+                          diagonal=-(self.config.sliding_window_size-1) if hasattr(self.config, 'sliding_window_size') and 
+                                   self.config.sliding_window_size is not None else -1)
             )
         return attention_mask, local_mask
 
