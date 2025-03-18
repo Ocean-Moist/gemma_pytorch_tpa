@@ -133,20 +133,29 @@ class GemmaTensorProductAttention(nn.Module):
         k_cache_A, k_cache_B, v_cache_A, v_cache_B = kv_cache
         
         # Get the total context length we'll be dealing with
-        ctx_len = kv_write_indices[-1].item() + 1 if kv_write_indices is not None else seq_len
+        if kv_write_indices is not None and kv_write_indices.numel() > 0:
+            ctx_len = kv_write_indices[-1].item() + 1
+        else:
+            ctx_len = seq_len
         
         # Write new values to KV cache
-        if kv_write_indices is not None:
+        if kv_write_indices is not None and kv_write_indices.numel() > 0 and seq_len > 0:
+            # Skip KV cache writing if there are no indices or the sequence is empty
+            
             # Ensure dtype match with the cache tensors
             A_k_dtype = A_k.to(dtype=k_cache_A.dtype)
             B_k_rotated_dtype = B_k_rotated.to(dtype=k_cache_B.dtype)
             A_v_dtype = A_v.to(dtype=v_cache_A.dtype)
             B_v_dtype = B_v.to(dtype=v_cache_B.dtype)
             
-            k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
-            k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
-            v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
-            v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
+            # Make sure the number of indices matches the source size
+            if kv_write_indices.numel() == A_k_dtype.size(1):
+                k_cache_A.index_copy_(1, kv_write_indices, A_k_dtype)
+                k_cache_B.index_copy_(1, kv_write_indices, B_k_rotated_dtype)
+                v_cache_A.index_copy_(1, kv_write_indices, A_v_dtype)
+                v_cache_B.index_copy_(1, kv_write_indices, B_v_dtype)
+            else:
+                print(f"Warning: Number of indices ({kv_write_indices.numel()}) doesn't match source size ({A_k_dtype.size(1)})")
         
         # Compute query from factorized form
         # Ensure matching dtypes for matmul

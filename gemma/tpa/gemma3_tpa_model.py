@@ -541,37 +541,34 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         # Prefill the KV cache with the prompt tokens first
         with torch.no_grad():
-            # Process the entire prompt in one forward pass
+            # Make sure we have a non-empty prompt
+            if min_prompt_len <= 0:
+                print("Warning: Empty prompt. Using a default token to start generation.")
+                # Use a default prompt token (e.g., BOS token) to start generation
+                min_prompt_len = 1
+                input_token_ids_tensor = torch.tensor([[self.tokenizer.bos_id]], device=device)
+            
+            # Process the prompt in one forward pass
             logits = self.text_token_embedder(input_token_ids_tensor)
             normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=logits.dtype, device=device)
             logits = logits * normalizer
             
             # Create positional indices for the prompt
-            # Handle edge case where prompt is empty
-            if min_prompt_len > 0:
-                positions = torch.arange(0, min_prompt_len, device=device)
-                
-                # Make sure positions don't exceed the available size in freqs_cis
-                max_pos = min(min_prompt_len, self.local_freqs_cis.size(0))
-                positions = positions[:max_pos]
-                
-                # Create freqs_cis dict
-                freqs_cis = {}
-                freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
-                freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
-            else:
-                # Handle empty prompt case
-                freqs_cis = {
-                    gemma_config.AttentionType.LOCAL_SLIDING: self.local_freqs_cis[:1],
-                    gemma_config.AttentionType.GLOBAL: self.global_freqs_cis[:1]
-                }
+            positions = torch.arange(0, min_prompt_len, device=device)
             
-            # KV write indices for the prompt
-            if min_prompt_len > 0:
-                kv_write_indices = positions
-            else:
-                # For empty prompt, use an empty tensor since there's nothing to write
-                kv_write_indices = torch.tensor([], dtype=torch.long, device=device)
+            # Make sure positions don't exceed the available size in freqs_cis
+            max_pos = min(min_prompt_len, self.local_freqs_cis.size(0))
+            positions = positions[:max_pos]
+            
+            # Create freqs_cis dict
+            freqs_cis = {}
+            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, positions)
+            freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, positions)
+            
+            # Use positions as KV write indices
+            kv_write_indices = positions
+            
+            print(f"Processing prompt with length {min_prompt_len}")
             
             # Process prompt through model (this populates the KV cache)
             _ = self.model(
@@ -599,6 +596,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # Make sure we can't go out of bounds
                 max_pos_index = min(current_pos, self.local_freqs_cis.size(0) - 1)
                 safe_pos_tensor = torch.tensor([max_pos_index], device=device)
+                print(f"Current position: {current_pos}, using safe position index: {max_pos_index}")
                 
                 current_freqs_cis = {}
                 current_freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, safe_pos_tensor)
