@@ -540,10 +540,13 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
 
         input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
         prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
-        curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
-        # Let the TPA attention create its own mask
+        # Don't use index_select on masks
+        # Let the attention modules create their own masks
+        curr_mask_tensor = None
         curr_local_mask_tensor = None
-        output_positions_tensor = torch.LongTensor([min_prompt_len - 1]).to(device)
+        
+        # Create output position tensor with zeros for safer indexing
+        output_positions_tensor = torch.zeros(1, dtype=torch.int64, device=device)
         temperatures_tensor = None if not temperature else torch.FloatTensor(
                 [temperature] * batch_size).to(device)
         top_ps_tensor = torch.FloatTensor([top_p] * batch_size).to(device)
@@ -575,12 +578,17 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             token_ids_tensor.index_copy_(1, output_index, output_token_ids)
 
             input_token_ids_tensor = output_token_ids
+            
+            # For safety, don't try to index from the mask tensors anymore
+            # We'll let the attention layer create its own causal mask
             input_positions_tensor = output_index.unsqueeze(dim=-1)
-            curr_mask_tensor = mask_tensor.index_select(2,
-                                                        input_positions_tensor)
-            # Let the TPA attention create its own mask
+            
+            # Use None for masks to let the attention handle it
+            curr_mask_tensor = None
             curr_local_mask_tensor = None
-            output_positions_tensor = torch.tensor(0, dtype=torch.int64, device=device)
+            
+            # Create output positions - use scalar value for safer indexing
+            output_positions_tensor = torch.zeros(1, dtype=torch.int64, device=device)
             output_index = output_index + 1
             image_batch = None
             image_presence_mask = None

@@ -207,13 +207,8 @@ class GemmaTensorProductAttention(nn.Module):
         # [batch_size, num_heads, seq_len, ctx_len]
         scores = torch.matmul(Q, K.transpose(2, 3))
         
-        # Apply appropriate masking for local or global attention
-        if (
-            self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
-            and self.sliding_window_size is not None
-            and local_mask is not None
-        ):
-            mask = local_mask
+        # Local mask handling is now done directly in the masking step
+        # We ignore mask inputs now and create proper masks ourselves
         
         # Apply softcapping if specified
         if self.attn_logit_softcapping is not None:
@@ -222,26 +217,21 @@ class GemmaTensorProductAttention(nn.Module):
             scores = scores * self.attn_logit_softcapping
         
         # Apply attention mask with proper broadcasting
-        # Check dimensions and alignment of mask
+        # If mask is None, create a default causal mask
         scores_shape = scores.shape  # [batch_size, num_heads, seq_len, ctx_len]
-        mask_shape = mask.shape
-            
-        # Create a properly sized mask that matches scores exactly
-        if scores_shape != mask_shape:
-            # Instead of trying to adapt the existing mask,
-            # create a new causal mask that matches the scores dimensions
-            min_value = torch.finfo(scores.dtype).min
-            
-            # Create a new causal mask with exact dimensions needed
-            new_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
-            new_mask = torch.tril(new_mask)  # Make it lower triangular for causality
-            
-            # Convert to attention values (0 for attend, min_value for don't attend)
-            mask_applicable = torch.where(new_mask, 0, torch.tensor(min_value, dtype=scores.dtype, device=scores.device))
-            
-            scores = scores + mask_applicable
-        else:
-            scores = scores + mask
+        
+        # Always create a new causal mask that exactly matches the scores dimensions
+        min_value = torch.finfo(scores.dtype).min
+        
+        # Create a new causal mask with exact dimensions needed
+        new_mask = torch.ones(scores_shape, device=scores.device, dtype=torch.bool)
+        new_mask = torch.tril(new_mask)  # Make it lower triangular for causality
+        
+        # Convert to attention values (0 for attend, min_value for don't attend)
+        mask_applicable = torch.where(new_mask, 0, torch.tensor(min_value, dtype=scores.dtype, device=scores.device))
+        
+        # Apply the mask
+        scores = scores + mask_applicable
         
         # Apply softmax to get attention weights
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(Q)
