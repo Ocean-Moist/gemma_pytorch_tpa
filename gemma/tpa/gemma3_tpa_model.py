@@ -325,31 +325,56 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         Args:
             standard_model: A standard Gemma3ForMultimodalLM model instance
         """
+        try:
+            # Import tqdm for progress tracking here to avoid dependency issues
+            import tqdm
+            import time
+            has_tqdm = True
+        except ImportError:
+            has_tqdm = False
+            print("Warning: tqdm not found, progress bars will not be displayed")
+        
         # Copy non-attention weights directly
+        print("Copying non-attention weights...")
         self.text_token_embedder.load_state_dict(standard_model.text_token_embedder.state_dict())
         self.sampler.load_state_dict(standard_model.sampler.state_dict())
         
-        if hasattr(standard_model, 'siglip_vision_model'):
+        if hasattr(standard_model, 'siglip_vision_model') and hasattr(self, 'siglip_vision_model'):
+            print("Copying vision model weights...")
             self.siglip_vision_model.load_state_dict(standard_model.siglip_vision_model.state_dict())
         
-        if hasattr(standard_model, 'mm_soft_embedding_norm'):
+        if hasattr(standard_model, 'mm_soft_embedding_norm') and hasattr(self, 'mm_soft_embedding_norm'):
             self.mm_soft_embedding_norm.load_state_dict(standard_model.mm_soft_embedding_norm.state_dict())
         
-        if hasattr(standard_model, 'mm_input_projection'):
+        if hasattr(standard_model, 'mm_input_projection') and hasattr(self, 'mm_input_projection'):
             self.mm_input_projection.load_state_dict(standard_model.mm_input_projection.state_dict())
         
         # Convert attention layers
+        total_layers = len(standard_model.model.layers)
+        print(f"Converting {total_layers} attention layers...")
+        
+        # Set up progress bar
+        if has_tqdm:
+            progress_bar = tqdm.tqdm(total=total_layers, desc="Converting layers")
+        
+        layer_total_time = 0
+        
         for i, (std_layer, tpa_layer) in enumerate(zip(standard_model.model.layers, self.model.layers)):
+            if has_tqdm:
+                layer_start = time.time()
+            
             # Copy non-attention weights (MLP, LayerNorms)
             tpa_layer.mlp.load_state_dict(std_layer.mlp.state_dict())
             tpa_layer.input_layernorm.load_state_dict(std_layer.input_layernorm.state_dict())
             tpa_layer.post_attention_layernorm.load_state_dict(std_layer.post_attention_layernorm.state_dict())
             
-            if tpa_layer.pre_feedforward_layernorm is not None:
-                tpa_layer.pre_feedforward_layernorm.load_state_dict(std_layer.pre_feedforward_layernorm.state_dict())
+            if hasattr(tpa_layer, 'pre_feedforward_layernorm') and tpa_layer.pre_feedforward_layernorm is not None:
+                if hasattr(std_layer, 'pre_feedforward_layernorm') and std_layer.pre_feedforward_layernorm is not None:
+                    tpa_layer.pre_feedforward_layernorm.load_state_dict(std_layer.pre_feedforward_layernorm.state_dict())
             
-            if tpa_layer.post_feedforward_layernorm is not None:
-                tpa_layer.post_feedforward_layernorm.load_state_dict(std_layer.post_feedforward_layernorm.state_dict())
+            if hasattr(tpa_layer, 'post_feedforward_layernorm') and tpa_layer.post_feedforward_layernorm is not None:
+                if hasattr(std_layer, 'post_feedforward_layernorm') and std_layer.post_feedforward_layernorm is not None:
+                    tpa_layer.post_feedforward_layernorm.load_state_dict(std_layer.post_feedforward_layernorm.state_dict())
             
             # Get standard attention QKV projections
             qkv_weight = std_layer.self_attn.qkv_proj.weight
@@ -362,15 +387,38 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             v_weight = qkv_weight[q_size+kv_size:]
             
             # Factorize using SVD for TPA
+            if not has_tqdm:
+                print(f"Layer {i+1}/{total_layers}: Factorizing attention weights...")
+                
             self._factorize_and_set_weights(q_weight, tpa_layer.self_attn.W_A_q, tpa_layer.self_attn.W_B_q, self.config.q_rank)
             self._factorize_and_set_weights(k_weight, tpa_layer.self_attn.W_A_k, tpa_layer.self_attn.W_B_k, self.config.k_rank)
             self._factorize_and_set_weights(v_weight, tpa_layer.self_attn.W_A_v, tpa_layer.self_attn.W_B_v, self.config.v_rank)
             
             # Copy output projection
             tpa_layer.self_attn.o_proj.load_state_dict(std_layer.self_attn.o_proj.state_dict())
+            
+            # Update progress bar
+            if has_tqdm:
+                layer_time = time.time() - layer_start
+                layer_total_time += layer_time
+                remaining_layers = total_layers - (i + 1)
+                est_remaining_time = (layer_total_time / (i + 1)) * remaining_layers
+                
+                progress_bar.set_postfix({
+                    "Layer": f"{i+1}/{total_layers}", 
+                    "Est. time remaining": f"{est_remaining_time:.1f}s"
+                })
+                progress_bar.update(1)
+        
+        if has_tqdm:
+            progress_bar.close()
         
         # Copy final layer norm
-        self.model.norm.load_state_dict(standard_model.model.norm.state_dict())
+        print("Copying final layer norm...")
+        if hasattr(standard_model.model, 'norm') and hasattr(self.model, 'norm'):
+            self.model.norm.load_state_dict(standard_model.model.norm.state_dict())
+        
+        print("Model conversion completed successfully!")
     
     def _factorize_and_set_weights(self, weight: torch.Tensor, A_proj: nn.Module, B_proj: nn.Module, rank: int):
         """

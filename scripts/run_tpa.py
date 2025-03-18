@@ -21,11 +21,13 @@ from time import time
 from absl import app
 from absl import flags
 import numpy as np
-from PIL import Image
 import torch
+import tqdm
 
 from gemma import config
-from gemma import gemma3_model
+from gemma import model as gemma_model
+from gemma import tokenizer as gemma_tokenizer
+from gemma.tpa.tpa_model import GemmaTPAModel, create_tpa_kv_caches
 from gemma.tpa.gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
 
 # Define flags
@@ -34,8 +36,8 @@ FLAGS = flags.FLAGS
 _CKPT = flags.DEFINE_string(
     'ckpt', None, 'Path to the checkpoint file.', required=True
 )
-_VARIANT = flags.DEFINE_string('variant', '4b', 'Model variant.')
-_DEVICE = flags.DEFINE_string('device', 'cuda', 'Device to run the model on.')
+_VARIANT = flags.DEFINE_string('variant', '1b', 'Model variant.')
+_DEVICE = flags.DEFINE_string('device', 'cuda' if torch.cuda.is_available() else 'cpu', 'Device to run the model on.')
 _OUTPUT_LEN = flags.DEFINE_integer(
     'output_len', 100, 'Length of the output sequence.'
 )
@@ -48,15 +50,16 @@ _SAVE_TPA = flags.DEFINE_string('save_tpa', None,
 _Q_RANK = flags.DEFINE_integer('q_rank', 6, 'Rank for query factorization in TPA.')
 _K_RANK = flags.DEFINE_integer('k_rank', 2, 'Rank for key factorization in TPA.')
 _V_RANK = flags.DEFINE_integer('v_rank', 2, 'Rank for value factorization in TPA.')
-_IMAGE = flags.DEFINE_string('image', None, 'Path to image file for multimodal prompting.')
 _PROMPT = flags.DEFINE_string('prompt', 'What are large language models?', 
                              'Input prompt for the model.')
 _TEMPERATURE = flags.DEFINE_float('temperature', 0.9, 'Temperature for sampling.')
 _TOP_P = flags.DEFINE_float('top_p', 0.95, 'Top-p sampling parameter.')
 _TOP_K = flags.DEFINE_integer('top_k', 64, 'Top-k sampling parameter.')
+_TOKENIZER_PATH = flags.DEFINE_string('tokenizer_path', 'tokenizer/tokenizer.model',
+                                      'Path to the tokenizer model.')
 
-# Define valid multimodal model variants
-_VALID_MODEL_VARIANTS = ['4b', '12b', '27b_v3', '1b']
+# Define valid model variants
+_VALID_MODEL_VARIANTS = ['1b', '4b', '12b', '27b']
 
 # Define valid devices
 _VALID_DEVICES = ['cpu', 'cuda']
@@ -98,30 +101,105 @@ def _set_default_tensor_type(dtype: torch.dtype):
   torch.set_default_dtype(torch.float)
 
 
+# We'll use the existing Gemma3ForMultimodalLMwithTPA conversion method
+
+
+def generate_text(model, tokenizer, prompt, max_tokens=100, temperature=0.9, top_p=0.95, top_k=64, device="cpu"):
+    """
+    Generate text using the model.
+    
+    Args:
+        model: Gemma model
+        tokenizer: Tokenizer
+        prompt: Input prompt
+        max_tokens: Maximum number of tokens to generate
+        temperature: Temperature for sampling
+        top_p: Top-p sampling parameter
+        top_k: Top-k sampling parameter
+        device: Device to run inference on
+        
+    Returns:
+        Generated text
+    """
+    model.eval()
+    
+    # Tokenize prompt
+    input_ids = tokenizer.encode(prompt)
+    input_ids_tensor = torch.tensor([input_ids], dtype=torch.long).to(device)
+    
+    # Generate text
+    generated_ids = input_ids_tensor
+    
+    # Simple greedy generation for demonstration
+    with torch.no_grad():
+        gen_progress = tqdm.tqdm(total=max_tokens, desc="Generating")
+        for _ in range(max_tokens):
+            outputs = model(generated_ids)
+            next_token_logits = outputs[:, -1, :]
+            
+            # Apply temperature
+            if temperature > 0:
+                next_token_logits = next_token_logits / temperature
+            
+            # Apply top-k filtering
+            if top_k > 0:
+                indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                next_token_logits[indices_to_remove] = float('-inf')
+            
+            # Apply top-p (nucleus) filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep also the first token above the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                next_token_logits[0, indices_to_remove] = float('-inf')
+            
+            # Sample from the filtered distribution
+            probs = torch.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append to generated IDs
+            generated_ids = torch.cat([generated_ids, next_token], dim=1)
+            
+            # Check for EOS token
+            if next_token.item() == tokenizer.eos_id:
+                break
+                
+            gen_progress.update(1)
+        
+        gen_progress.close()
+    
+    # Decode the generated text
+    generated_text = tokenizer.decode(generated_ids[0].tolist())
+    
+    return generated_text
+
+
 def main(_):
   print(f"Running Gemma-{_VARIANT.value} with TPA")
   print(f"TPA configuration: q_rank={_Q_RANK.value}, k_rank={_K_RANK.value}, v_rank={_V_RANK.value}")
   
-  # Load image if specified
-  image_data = None
-  if _IMAGE.value:
-    try:
-      print(f"Loading image from {_IMAGE.value}")
-      image_data = Image.open(_IMAGE.value)
-      print(f"Image loaded successfully: {image_data.size}")
-    except Exception as e:
-      print(f"Error loading image: {e}")
-      return
-  
   # Construct the model config
-  model_config = config.get_model_config(_VARIANT.value)
-  model_config.dtype = 'float16' if torch.cuda.is_available() and _DEVICE.value == 'cuda' else 'float32'
-  model_config.quant = _QUANT.value
+  if _VARIANT.value == "1b":
+      model_config = config.get_config_for_1b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
+  elif _VARIANT.value == "4b":
+      model_config = config.get_config_for_4b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
+  elif _VARIANT.value == "12b":
+      model_config = config.get_config_for_12b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
+  elif _VARIANT.value == "27b":
+      model_config = config.get_config_for_27b(dtype="float32" if _DEVICE.value == "cpu" else "bfloat16")
   
   # Add TPA specific configuration parameters
   model_config.q_rank = _Q_RANK.value
   model_config.k_rank = _K_RANK.value
   model_config.v_rank = _V_RANK.value
+  model_config.quant = _QUANT.value
   
   # Seed random
   random.seed(_SEED.value)
@@ -138,26 +216,40 @@ def main(_):
   with _set_default_tensor_type(model_config.get_dtype()):
     if _CONVERT.value:
       print(f"Loading standard Gemma model from {_CKPT.value}...")
-      standard_model = gemma3_model.Gemma3ForMultimodalLM(model_config)
-      standard_model.load_weights(_CKPT.value)
+      
+      # Load the model checkpoint
+      checkpoint = torch.load(_CKPT.value, map_location="cpu")
+      
+      # Create standard model
+      standard_model = gemma_model.GemmaForCausalLM(model_config)
+      standard_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
       standard_model.eval()
       
       load_time = time()
       print(f"Standard model loaded in {load_time - start_time:.2f} seconds")
       
       print("Converting to TPA model...")
-      model = Gemma3ForMultimodalLMwithTPA(model_config)
-      model.convert_from_standard_weights(standard_model)
       
-      convert_time = time()
-      print(f"Model converted to TPA in {convert_time - load_time:.2f} seconds")
+      # Use the existing TPA model and conversion method from our codebase
+      # This model class handles multimodal and non-multimodal models
+      tpa_model = Gemma3ForMultimodalLMwithTPA(model_config)
+      convert_start = time()
+      
+      # Convert using our existing implementation
+      tpa_model.convert_from_standard_weights(standard_model)
+      
+      convert_time = time() - convert_start
+      print(f"Model converted to TPA in {convert_time:.2f} seconds")
       
       if _SAVE_TPA.value:
         print(f"Saving TPA model to {_SAVE_TPA.value}...")
         save_dir = os.path.dirname(_SAVE_TPA.value)
         if save_dir:
           os.makedirs(save_dir, exist_ok=True)
-        torch.save({'model_state_dict': model.state_dict()}, _SAVE_TPA.value)
+        torch.save({
+            'model_state_dict': tpa_model.state_dict(),
+            'config': model_config
+        }, _SAVE_TPA.value)
         print(f"TPA model saved successfully")
       
       # Clear standard model from memory
@@ -165,10 +257,20 @@ def main(_):
       if torch.cuda.is_available():
         torch.cuda.empty_cache()
       
+      model = tpa_model
+      
     else:
       print(f"Loading TPA model from {_CKPT.value}...")
+      checkpoint = torch.load(_CKPT.value, map_location="cpu")
+      
+      if "config" in checkpoint:
+          model_config = checkpoint["config"]
+      
+      # Create TPA model
+      # The Gemma3ForMultimodalLMwithTPA class works for both multimodal and non-multimodal models
       model = Gemma3ForMultimodalLMwithTPA(model_config)
-      model.load_weights(_CKPT.value)
+      model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+      
       load_time = time()
       print(f"TPA model loaded in {load_time - start_time:.2f} seconds")
     
@@ -177,16 +279,15 @@ def main(_):
     to_device_time = time()
     print(f"Model moved to {device} in {to_device_time - load_time:.2f} seconds")
   
-  # Prepare prompt
-  if image_data:
-    prompt = [(_PROMPT.value, image_data)]
-  else:
-    prompt = [(_PROMPT.value,)]
+  # Initialize tokenizer
+  tokenizer = gemma_tokenizer.Tokenizer(_TOKENIZER_PATH.value)
   
   # Generate response
   print(f"Generating response with temperature={_TEMPERATURE.value}, top_p={_TOP_P.value}, top_k={_TOP_K.value}...")
   generate_start = time()
   
+  # Use the model's built-in generate method
+  prompt = [(_PROMPT.value,)]  # Format compatible with Gemma3 models
   outputs = model.generate(
     prompts=prompt,
     device=device,
@@ -196,19 +297,20 @@ def main(_):
     top_k=_TOP_K.value
   )
   
+  # Extract the generated text
+  generated_text = outputs[0]
+  
   generate_end = time()
   
   # Print the generated text
   print("\n" + "="*50)
   print(f"PROMPT: {_PROMPT.value}")
-  if image_data:
-    print(f"[Image: {_IMAGE.value}]")
-  print(f"RESULT: {outputs[0]}")
+  print(f"RESULT: {generated_text}")
   print("="*50)
   
   # Print performance metrics
   generation_time = generate_end - generate_start
-  tokens_generated = len(outputs[0].split())
+  tokens_generated = len(generated_text.split())  # Rough estimate
   tokens_per_second = tokens_generated / generation_time
   
   print(f"\nPerformance metrics:")
@@ -231,16 +333,17 @@ if __name__ == '__main__':
 # 
 # Convert standard weights to TPA and run inference:
 # python scripts/run_tpa.py \
-#   --ckpt=/path/to/gemma3_weights \
-#   --variant=4b \
+#   --ckpt=/path/to/gemma_model.ckpt \
+#   --variant=1b \
 #   --prompt="Write a poem about mathematics" \
 #   --convert \
-#   --save_tpa=/path/to/save/tpa_model.pt
+#   --save_tpa=/path/to/save/tpa_model.pt \
+#   --device=cpu
 #
 # Run inference with already converted TPA model:
 # python scripts/run_tpa.py \
 #   --ckpt=/path/to/tpa_model.pt \
-#   --variant=4b \
+#   --variant=1b \
 #   --prompt="Explain quantum mechanics" \
 #   --convert=False \
-#   --image=/path/to/image.jpg
+#   --device=cpu
