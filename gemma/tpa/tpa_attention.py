@@ -579,15 +579,25 @@ class GemmaTensorProductAttention(nn.Module):
         # [batch_size, num_heads, ctx_len, head_dim]
         K = K.transpose(1, 2)
         
+        # DEBUG: Check Q and K tensors for issues
+        print(f"DEBUG Q tensor stats: min={Q.min().item():.6f}, max={Q.max().item():.6f}, mean={Q.mean().item():.6f}, std={Q.std().item():.6f}, has_nan={torch.isnan(Q).any().item()}, has_inf={torch.isinf(Q).any().item()}")
+        print(f"DEBUG K tensor stats: min={K.min().item():.6f}, max={K.max().item():.6f}, mean={K.mean().item():.6f}, std={K.std().item():.6f}, has_nan={torch.isnan(K).any().item()}, has_inf={torch.isinf(K).any().item()}")
+        
         # Calculate attention scores
         # [batch_size, num_heads, seq_len, ctx_len]
         scores = torch.matmul(Q, K.transpose(2, 3))
+        
+        # DEBUG: Check attention scores
+        print(f"DEBUG Attention scores stats: min={scores.min().item():.6f}, max={scores.max().item():.6f}, mean={scores.mean().item():.6f}, std={scores.std().item():.6f}, has_nan={torch.isnan(scores).any().item()}, has_inf={torch.isinf(scores).any().item()}")
         
         # Apply softcapping if specified
         if self.attn_logit_softcapping is not None:
             scores = scores / self.attn_logit_softcapping
             scores = torch.tanh(scores)
             scores = scores * self.attn_logit_softcapping
+            
+            # DEBUG: Check after softcapping
+            print(f"DEBUG After softcapping: min={scores.min().item():.6f}, max={scores.max().item():.6f}, mean={scores.mean().item():.6f}, std={scores.std().item():.6f}, has_nan={torch.isnan(scores).any().item()}, has_inf={torch.isinf(scores).any().item()}")
         
         # Always create a new causal mask that exactly matches the scores dimensions
         min_value = torch.finfo(scores.dtype).min
