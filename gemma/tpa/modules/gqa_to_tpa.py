@@ -594,17 +594,37 @@ def gqa_to_tpa_conversion(
         # It's [hidden_dim, q_rank*head_dim] rather than [q_rank, head_dim]
         # For reconstruction purposes, we need to extract the equivalent factor
         
-        # Create a proxy B factor from W_B_q_optimal to use in reconstruction
-        # Extract the portion corresponding to this head's rank factor
-        proxy_B = torch.zeros((q_rank, head_dim), device=q_weight.device, dtype=torch.float32)
+        # Create a proxy B factor safely with bounds checking
+        # Ensure head_dim is valid for W_B_q_optimal
+        safe_head_dim = min(head_dim, W_B_q_optimal.shape[1] // q_rank)
         
-        # Extract a representative factor from the optimal projection
+        # Initialize proxy tensor with verified dimensions
+        proxy_B = torch.zeros((q_rank, safe_head_dim), device=q_weight.device, dtype=torch.float32)
+        
+        # Extract representative factors safely
         for r in range(q_rank):
-            # Get columns for this rank across all head dimensions
-            proxy_B[r, :] = W_B_q_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+            # Ensure we don't exceed bounds 
+            start_idx = r * safe_head_dim
+            end_idx = min((r+1) * safe_head_dim, W_B_q_optimal.shape[1])
+            
+            if start_idx < end_idx and end_idx <= W_B_q_optimal.shape[1]:
+                # Extract valid slice and compute mean
+                proxy_B[r, :(end_idx-start_idx)] = W_B_q_optimal[:, start_idx:end_idx].mean(dim=0)
         
         # Now use this proxy B factor for reconstruction
-        q_recon[:, h, :] = (q_head_A @ proxy_B)
+        # Ensure dimensions are compatible
+        reconstruction = q_head_A @ proxy_B  # [hidden_dim, safe_head_dim]
+        
+        # Carefully copy to output, handling potential dimension mismatches
+        if reconstruction.shape[1] == q_recon.shape[2]:
+            # Dimensions match exactly
+            q_recon[:, h, :] = reconstruction
+        elif reconstruction.shape[1] < q_recon.shape[2]:
+            # Output target is larger, pad with zeros
+            q_recon[:, h, :reconstruction.shape[1]] = reconstruction
+        else:
+            # Output target is smaller, truncate
+            q_recon[:, h, :] = reconstruction[:, :q_recon.shape[2]]
     
     # Reconstruct key and value weights with the group structure
     k_recon = torch.zeros_like(k_weights_reshaped)
@@ -615,20 +635,52 @@ def gqa_to_tpa_conversion(
         k_group_A = W_A_k_expanded[:, g*k_rank:(g+1)*k_rank]
         v_group_A = W_A_v_expanded[:, g*v_rank:(g+1)*v_rank]
         
-        # Create proxy B factors from W_B_k_optimal and W_B_v_optimal
-        proxy_k_B = torch.zeros((k_rank, head_dim), device=k_weight.device, dtype=torch.float32)
-        proxy_v_B = torch.zeros((v_rank, head_dim), device=v_weight.device, dtype=torch.float32)
+        # Create proxy B factors - checking head_dim to avoid size mismatch
+        # Ensure head_dim is valid and doesn't exceed matrix bounds
+        safe_head_dim = min(head_dim, W_B_k_optimal.shape[1] // k_rank)
         
-        # Extract representative factors
+        # Create proxy tensors with verified dimensions
+        proxy_k_B = torch.zeros((k_rank, safe_head_dim), device=k_weight.device, dtype=torch.float32)
+        proxy_v_B = torch.zeros((v_rank, safe_head_dim), device=v_weight.device, dtype=torch.float32)
+        
+        # Extract representative factors safely
         for r in range(k_rank):
-            proxy_k_B[r, :] = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+            # Ensure we don't exceed bounds
+            start_idx = r * safe_head_dim
+            end_idx = min((r+1) * safe_head_dim, W_B_k_optimal.shape[1])
             
-        for r in range(v_rank):
-            proxy_v_B[r, :] = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+            if start_idx < end_idx and end_idx <= W_B_k_optimal.shape[1]:
+                # Extract valid slice and compute mean
+                proxy_k_B[r, :(end_idx-start_idx)] = W_B_k_optimal[:, start_idx:end_idx].mean(dim=0)
         
-        # Use these proxy factors for reconstruction
-        k_recon[:, g, :] = (k_group_A @ proxy_k_B)
-        v_recon[:, g, :] = (v_group_A @ proxy_v_B)
+        # Similarly for V factors
+        for r in range(v_rank):
+            # Ensure we don't exceed bounds
+            start_idx = r * safe_head_dim
+            end_idx = min((r+1) * safe_head_dim, W_B_v_optimal.shape[1])
+            
+            if start_idx < end_idx and end_idx <= W_B_v_optimal.shape[1]:
+                # Extract valid slice and compute mean
+                proxy_v_B[r, :(end_idx-start_idx)] = W_B_v_optimal[:, start_idx:end_idx].mean(dim=0)
+        
+        # Use proxy factors for reconstruction with dimension handling
+        # Key reconstruction
+        k_reconstruction = k_group_A @ proxy_k_B  # [hidden_dim, safe_head_dim]
+        if k_reconstruction.shape[1] == k_recon.shape[2]:
+            k_recon[:, g, :] = k_reconstruction
+        elif k_reconstruction.shape[1] < k_recon.shape[2]:
+            k_recon[:, g, :k_reconstruction.shape[1]] = k_reconstruction
+        else:
+            k_recon[:, g, :] = k_reconstruction[:, :k_recon.shape[2]]
+        
+        # Value reconstruction
+        v_reconstruction = v_group_A @ proxy_v_B  # [hidden_dim, safe_head_dim]
+        if v_reconstruction.shape[1] == v_recon.shape[2]:
+            v_recon[:, g, :] = v_reconstruction
+        elif v_reconstruction.shape[1] < v_recon.shape[2]:
+            v_recon[:, g, :v_reconstruction.shape[1]] = v_reconstruction
+        else:
+            v_recon[:, g, :] = v_reconstruction[:, :v_recon.shape[2]]
         
     # Add factorization ranks to results - store as simple integers, not tensors
     # This is critical for proper KV cache creation
