@@ -301,8 +301,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             # Default to the last position
             output_positions = torch.tensor([seq_len - 1], device=device)
         
-        # Get outputs only at the specified positions
-        outputs = hidden_states.index_select(1, output_positions)
+        # Get outputs only at the specified positions - ensure positions are valid
+        max_seq_idx = hidden_states.shape[1] - 1
+        safe_positions = torch.clamp(output_positions, 0, max_seq_idx)
+        outputs = hidden_states.index_select(1, safe_positions)
         
         # Get embedder weight for sampler
         embedder_weight = self.embedder.weight
@@ -483,7 +485,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     input_positions=position[-1:],  # Just the new position
                     kv_caches=kv_caches,
                     mask=attn_mask,
-                    output_positions=torch.tensor([cur_len], device=device),
+                    output_positions=torch.tensor([cur_len - 1], device=device),  # Use last valid position
                     temperatures=temperatures,
                     top_ps=top_ps,
                     top_ks=top_ks,
