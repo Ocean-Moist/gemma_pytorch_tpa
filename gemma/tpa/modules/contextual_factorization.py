@@ -308,7 +308,7 @@ try:
     
     def memory_efficient_tucker(tensor, ranks):
         """
-        A memory-efficient version of Tucker decomposition using partial_tucker
+        A memory-efficient version of Tucker decomposition using manual n-mode products
         and operating on each mode separately to avoid large unfoldings.
         
         Args:
@@ -335,45 +335,82 @@ try:
             rank = min(ranks[mode], mode_size)
             
             # Reshape the tensor for this mode's unfolding
-            unfolded = tl.unfold(current, mode)
+            unfolded = tl.unfold(current, mode).to(device='cuda')
             
             # Use randomized SVD or truncated SVD
             try:
-                # Try PyTorch's SVD
+                # Try PyTorch's SVD on GPU
                 U, S, Vh = torch.linalg.svd(unfolded, full_matrices=False)
                 U_truncated = U[:, :rank]
                 
             except Exception as e:
                 print(f"Error using PyTorch SVD: {e}, trying randomized approach")
-                # Use power iteration method for large matrices
+                # Use power iteration method for large matrices on GPU
                 # This is a randomized approach to find dominant singular vectors
-                Q = torch.randn(unfolded.shape[1], rank, device=tensor.device)
-                Q, _ = torch.linalg.qr(Q)
-                
-                # Power iteration (simplified randomized SVD)
-                for _ in range(5):  # Number of power iterations
+                try:
+                    # Move to GPU for faster processing
+                    Q = torch.randn(unfolded.shape[1], rank, device='cuda')
+                    Q, _ = torch.linalg.qr(Q)
+                    
+                    # Power iteration (simplified randomized SVD)
+                    for _ in range(5):  # Number of power iterations
+                        Y = unfolded @ Q
+                        Q, _ = torch.linalg.qr(unfolded.t() @ Y)
+                    
                     Y = unfolded @ Q
-                    Q, _ = torch.linalg.qr(unfolded.t() @ Y)
-                
-                Y = unfolded @ Q
-                U_truncated, _ = torch.linalg.qr(Y)
-                U_truncated = U_truncated[:, :rank]
+                    U_truncated, _ = torch.linalg.qr(Y)
+                    U_truncated = U_truncated[:, :rank]
+                except Exception as gpu_err:
+                    print(f"GPU randomized SVD failed: {gpu_err}, trying chunked version")
+                    
+                    # Use a chunked approach for very large matrices
+                    chunk_size = 10000  # Process in chunks of this size
+                    n_chunks = (unfolded.shape[1] + chunk_size - 1) // chunk_size
+                    
+                    # Initialize random projection matrix on GPU
+                    Q = torch.randn(rank, unfolded.shape[1], device='cuda')
+                    Q = torch.nn.functional.normalize(Q, dim=1)
+                    
+                    # Apply matrix multiplication in chunks to avoid OOM
+                    Y = torch.zeros((unfolded.shape[0], rank), device='cuda')
+                    for i in range(n_chunks):
+                        start = i * chunk_size
+                        end = min((i + 1) * chunk_size, unfolded.shape[1])
+                        Y += unfolded[:, start:end] @ Q[:, start:end].t()
+                    
+                    # Get orthogonal basis for the range of Y
+                    U_truncated, _ = torch.linalg.qr(Y)
+                    U_truncated = U_truncated[:, :rank]
             
             # Store the factor matrix
             factors[mode] = U_truncated
             
-            # Update the tensor with this mode's compression
-            current = tl.mode_dot(current, U_truncated.t(), mode)
+            # Manual n-mode multiplication instead of tl.mode_dot
+            # First reshape the tensor to move the mode to first dimension
+            tensor_shape = current.shape
+            mode_dim = tensor_shape[mode]
+            other_dims = tensor_shape[:mode] + tensor_shape[mode+1:]
+            current_reshaped = current.permute(tuple([mode] + list(range(0, mode)) + list(range(mode+1, n_modes))))
+            current_reshaped = current_reshaped.reshape(mode_dim, -1)
+            
+            # Apply projection
+            projected = U_truncated.t() @ current_reshaped
+            
+            # Reshape back to tensor format
+            new_shape = (U_truncated.shape[1],) + other_dims
+            current = projected.reshape(new_shape)
+            
+            # Permute back to original dimension order
+            perm = list(range(1, mode+1)) + [0] + list(range(mode+1, n_modes))
+            current = current.permute(perm)
         
         # The resulting tensor is the core
-        core = current
-        
-        return core, factors
+        return current, factors
     
     def tile_based_tucker(tensor, ranks, tile_size=1000):
         """
         A tiling-based Tucker decomposition that processes the tensor in chunks
-        to minimize memory consumption.
+        on GPU to minimize memory consumption.
         
         Args:
             tensor: The input tensor to decompose
@@ -394,69 +431,113 @@ try:
                 continue
                 
             # Get the unfolding for this mode
-            unfolded = tl.unfold(tensor, mode)
+            unfolded = tl.unfold(tensor.to(device='cuda'), mode)
             mode_size = tensor.shape[mode]
             rank = min(ranks[mode], mode_size)
             
+            # Use float32 for numerical stability
+            if unfolded.dtype == torch.bfloat16 or unfolded.dtype == torch.float16:
+                unfolded = unfolded.to(dtype=torch.float32)
+            
             # Initialize an empty matrix for the top singular vectors
-            U = torch.zeros((unfolded.shape[0], rank), device=tensor.device)
+            U = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
             
             # Split the unfolded matrix into tiles for column blocks
             num_cols = unfolded.shape[1]
             num_tiles = (num_cols + tile_size - 1) // tile_size
             
-            # Use power iteration method for large matrices
-            # This is a randomized approach to find dominant singular vectors
-            Q = torch.randn(unfolded.shape[1], rank, device=tensor.device)
-            Q, _ = torch.linalg.qr(Q)
-            
-            # Power iteration (simplified randomized SVD)
-            for _ in range(5):  # Number of power iterations
-                # Y = A * Q
-                Y = torch.zeros((unfolded.shape[0], rank), device=tensor.device)
+            try:
+                # Use power iteration method for large matrices
+                # This is a randomized approach to find dominant singular vectors
+                Q = torch.randn(unfolded.shape[1], rank, device='cuda', dtype=torch.float32)
+                Q = torch.nn.functional.normalize(Q, dim=0)  # Normalize instead of QR decomp
+                
+                # Power iteration (simplified randomized SVD)
+                for _ in range(5):  # Number of power iterations
+                    # Y = A * Q
+                    Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
+                    for i in range(num_tiles):
+                        start_idx = i * tile_size
+                        end_idx = min((i + 1) * tile_size, num_cols)
+                        tile = unfolded[:, start_idx:end_idx]
+                        Y += tile @ Q[start_idx:end_idx, :]
+                    
+                    # Orthogonalize Y and normalize
+                    Y = torch.nn.functional.normalize(Y, dim=0)
+                    
+                    # Q = A^T * Y
+                    Q = torch.zeros((unfolded.shape[1], rank), device='cuda', dtype=torch.float32)
+                    for i in range(num_tiles):
+                        start_idx = i * tile_size
+                        end_idx = min((i + 1) * tile_size, num_cols)
+                        tile = unfolded[:, start_idx:end_idx]
+                        Q[start_idx:end_idx, :] = tile.t() @ Y
+                    
+                    # Normalize Q
+                    Q = torch.nn.functional.normalize(Q, dim=0)
+                
+                # Final projection to get Y = A * Q
+                Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
                 for i in range(num_tiles):
                     start_idx = i * tile_size
                     end_idx = min((i + 1) * tile_size, num_cols)
                     tile = unfolded[:, start_idx:end_idx]
                     Y += tile @ Q[start_idx:end_idx, :]
                 
-                # Q = A^T * Y
-                Q = torch.zeros((unfolded.shape[1], rank), device=tensor.device)
+                # Compute small SVD
+                try:
+                    UY, S, VhY = torch.linalg.svd(Y, full_matrices=False)
+                    U = UY[:, :rank]
+                except Exception as e:
+                    print(f"Error in SVD: {e}, using orthogonalization as fallback")
+                    U = torch.nn.functional.normalize(Y, dim=1)  # Simple orthogonalization
+                    U = U[:, :rank]
+            
+            except Exception as e:
+                print(f"Tiled SVD failed: {e}, using simple projection")
+                # Extremely simple fallback
+                # Just project onto random orthogonal basis
+                Q = torch.randn(rank, unfolded.shape[1], device='cuda', dtype=torch.float32)
+                Q = torch.nn.functional.normalize(Q, dim=1)
+                Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
+                
                 for i in range(num_tiles):
                     start_idx = i * tile_size
                     end_idx = min((i + 1) * tile_size, num_cols)
                     tile = unfolded[:, start_idx:end_idx]
-                    Q[start_idx:end_idx, :] = tile.t() @ Y
-                
-                # Orthogonalize Q
-                Q, _ = torch.linalg.qr(Q)
-            
-            # Final projection to get Y = A * Q
-            Y = torch.zeros((unfolded.shape[0], rank), device=tensor.device)
-            for i in range(num_tiles):
-                start_idx = i * tile_size
-                end_idx = min((i + 1) * tile_size, num_cols)
-                tile = unfolded[:, start_idx:end_idx]
-                Y += tile @ Q[start_idx:end_idx, :]
-            
-            # Compute small SVD
-            try:
-                UY, S, VhY = torch.linalg.svd(Y, full_matrices=False)
-                U = UY[:, :rank]
-            except Exception as e:
-                print(f"Error in SVD: {e}, using QR decomposition as fallback")
-                U, _ = torch.linalg.qr(Y)
-                U = U[:, :rank]
+                    Y += tile @ Q[:, start_idx:end_idx].t()
+                    
+                U = torch.nn.functional.normalize(Y, dim=1)
             
             factors.append(U)
         
-        # Compute the core tensor using n-mode products
-        core = tensor.clone()
+        # Compute the core tensor using manual n-mode products
+        core = tensor.clone().to(device='cuda')
+        
         for mode, factor in enumerate(factors):
             if factor is not None:
-                core = tl.mode_dot(core, factor.t(), mode)
+                # Manual n-mode multiplication
+                tensor_shape = core.shape
+                mode_dim = tensor_shape[mode]
+                other_dims = tensor_shape[:mode] + tensor_shape[mode+1:]
+                
+                # Reshape tensor to have mode as first dimension
+                perm = tuple([mode] + list(range(0, mode)) + list(range(mode+1, n_modes)))
+                core_reshaped = core.permute(perm)
+                core_reshaped = core_reshaped.reshape(mode_dim, -1)
+                
+                # Apply projection
+                projected = factor.t() @ core_reshaped
+                
+                # Reshape back
+                new_shape = (factor.shape[1],) + other_dims
+                core = projected.reshape(new_shape)
+                
+                # Permute back
+                inv_perm = list(range(1, mode+1)) + [0] + list(range(mode+1, n_modes))
+                core = core.permute(inv_perm)
         
-        return core, factors
+        return core.to(device=tensor.device), factors
     
     # Replace scipy's SVD with our patched version
     scipy.linalg.svd = patched_svd
@@ -601,6 +682,7 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     tpa_weights = {}
     
     # Convert weights to float32 for better numerical stability
+    # and move to CUDA
     if q_weight.dtype == torch.bfloat16:
         q_weight = q_weight.to(torch.float32)
     if k_weight.dtype == torch.bfloat16:
@@ -610,35 +692,72 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Process query weights
     # Reshape to 3D tensor [head_dim, num_heads, input_dim]
-    # Keep as PyTorch tensor rather than converting to numpy
-    wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).cpu()
+    # Move to GPU for faster processing
+    wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).to(device='cuda')
     
     # Apply Tucker decomposition to query weights
     rank = [q_rank, None, q_rank]  # Rank for dimensions
-    try:
-        # First try memory-efficient Tucker
-        print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
+    
+    # For extremely large tensors, try direct randomized projection
+    if wq_tensor.numel() > 5e8:  # Threshold for "large" tensors - around 2GB for float32
+        print(f"Very large tensor detected ({wq_tensor.shape}), using direct projection method")
         try:
-            core, factors = memory_efficient_tucker(wq_tensor, rank)
-        except Exception as e1:
-            print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+            # We'll bypass Tucker decomposition and do direct random projection
+            # This is less accurate but much more memory efficient
+            
+            # Create random projections - one for each head dimension and input dimension
+            proj_head = torch.randn(head_dim, q_rank, device='cuda')
+            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
+            
+            proj_input = torch.randn(input_dim, q_rank, device='cuda')
+            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
+            
+            # For each head, compute low-rank approximation
+            core_approx = torch.zeros((q_rank, num_heads, q_rank), device='cuda')
+            
+            # Process one head at a time to save memory
+            for h in range(num_heads):
+                # Extract the matrix for this head
+                head_matrix = wq_tensor[:, h, :]
+                
+                # Project down both dimensions
+                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
+            
+            # Set up our factor matrices
+            factors = [proj_head, None, proj_input]
+            core = core_approx
+            
+            print("Direct projection successful")
+        except Exception as projection_error:
+            print(f"Direct projection failed: {projection_error}, using fallback method")
+            # Fall back to contextual factorization
+            raise
+    else:
+        # Try standard decomposition methods for smaller tensors
+        try:
+            # First try memory-efficient Tucker
+            print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
             try:
-                core, factors = tile_based_tucker(wq_tensor, rank)
-            except Exception as e2:
-                print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                # Fall back to standard Tucker
-                core, factors = tucker(wq_tensor, rank=rank)
-    except Exception as e:
-        print(f"Warning: Error in all Tucker decomposition methods: {e}")
-        print("Falling back to standard contextual factorization...")
-        raise
+                core, factors = memory_efficient_tucker(wq_tensor, rank)
+            except Exception as e1:
+                print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+                try:
+                    core, factors = tile_based_tucker(wq_tensor, rank)
+                except Exception as e2:
+                    print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
+                    # Fall back to standard Tucker
+                    core, factors = tucker(wq_tensor, rank=rank)
+        except Exception as e:
+            print(f"Warning: Error in all Tucker decomposition methods: {e}")
+            print("Falling back to standard contextual factorization...")
+            raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×q_rank, U3 ~ input_dim×q_rank
     
-    # Create Wa_q and Wb_q as PyTorch tensors
-    Wa_q = torch.zeros((input_dim, q_rank, num_heads), dtype=torch.float32)
-    Wb_q = torch.zeros((input_dim, q_rank, head_dim), dtype=torch.float32)
+    # Create Wa_q and Wb_q on GPU
+    Wa_q = torch.zeros((input_dim, q_rank, num_heads), dtype=torch.float32, device='cuda')
+    Wb_q = torch.zeros((input_dim, q_rank, head_dim), dtype=torch.float32, device='cuda')
     
     # Map decomposition to TPA factors
     for r in range(q_rank):
@@ -665,34 +784,67 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Process key weights
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    # Keep as PyTorch tensor rather than converting to numpy
-    wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).cpu()
+    # Move to GPU for faster processing
+    wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
     
     # Apply Tucker decomposition to key weights
     rank = [k_rank, None, k_rank]  # Rank for dimensions
-    try:
-        # Use the same approach as for query weights
-        print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
+    
+    # For extremely large tensors, try direct randomized projection
+    if wk_tensor.numel() > 5e8:  # Threshold for "large" tensors
+        print(f"Very large tensor detected ({wk_tensor.shape}), using direct projection method")
         try:
-            core, factors = memory_efficient_tucker(wk_tensor, rank)
-        except Exception as e1:
-            print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+            # Create random projections - one for each head dimension and input dimension
+            proj_head = torch.randn(head_dim, k_rank, device='cuda')
+            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
+            
+            proj_input = torch.randn(input_dim, k_rank, device='cuda')
+            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
+            
+            # For each head, compute low-rank approximation
+            core_approx = torch.zeros((k_rank, num_kv_heads, k_rank), device='cuda')
+            
+            # Process one head at a time to save memory
+            for h in range(num_kv_heads):
+                # Extract the matrix for this head
+                head_matrix = wk_tensor[:, h, :]
+                
+                # Project down both dimensions
+                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
+            
+            # Set up our factor matrices
+            factors = [proj_head, None, proj_input]
+            core = core_approx
+            
+            print("Direct projection successful")
+        except Exception as projection_error:
+            print(f"Direct projection failed: {projection_error}, using fallback method")
+            # Fall back to contextual factorization
+            raise
+    else:
+        # Use the same approach as for query weights
+        try:
+            print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
             try:
-                core, factors = tile_based_tucker(wk_tensor, rank)
-            except Exception as e2:
-                print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                core, factors = tucker(wk_tensor, rank=rank)
-    except Exception as e:
-        print(f"Warning: Error in Tucker decomposition for key weights: {e}")
-        print("Falling back to standard contextual factorization...")
-        raise
+                core, factors = memory_efficient_tucker(wk_tensor, rank)
+            except Exception as e1:
+                print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+                try:
+                    core, factors = tile_based_tucker(wk_tensor, rank)
+                except Exception as e2:
+                    print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
+                    core, factors = tucker(wk_tensor, rank=rank)
+        except Exception as e:
+            print(f"Warning: Error in Tucker decomposition for key weights: {e}")
+            print("Falling back to standard contextual factorization...")
+            raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×k_rank, U3 ~ input_dim×k_rank
     
-    # Create Wa_k and Wb_k as PyTorch tensors
-    Wa_k = torch.zeros((input_dim, k_rank, num_heads), dtype=torch.float32)
-    Wb_k = torch.zeros((input_dim, k_rank, head_dim), dtype=torch.float32)
+    # Create Wa_k and Wb_k as PyTorch tensors on GPU
+    Wa_k = torch.zeros((input_dim, k_rank, num_heads), dtype=torch.float32, device='cuda')
+    Wb_k = torch.zeros((input_dim, k_rank, head_dim), dtype=torch.float32, device='cuda')
     
     # Map head groups - repeating heads for MQA/GQA
     heads_per_kv = num_heads // num_kv_heads
@@ -726,34 +878,67 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Process value weights
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    # Keep as PyTorch tensor rather than converting to numpy
-    wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).cpu()
+    # Move to GPU for faster processing
+    wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
     
     # Apply Tucker decomposition to value weights
     rank = [v_rank, None, v_rank]  # Rank for dimensions
-    try:
-        # Use the same approach as for query and key weights
-        print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
+    
+    # For extremely large tensors, try direct randomized projection
+    if wv_tensor.numel() > 5e8:  # Threshold for "large" tensors
+        print(f"Very large tensor detected ({wv_tensor.shape}), using direct projection method")
         try:
-            core, factors = memory_efficient_tucker(wv_tensor, rank)
-        except Exception as e1:
-            print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+            # Create random projections - one for each head dimension and input dimension
+            proj_head = torch.randn(head_dim, v_rank, device='cuda')
+            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
+            
+            proj_input = torch.randn(input_dim, v_rank, device='cuda')
+            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
+            
+            # For each head, compute low-rank approximation
+            core_approx = torch.zeros((v_rank, num_kv_heads, v_rank), device='cuda')
+            
+            # Process one head at a time to save memory
+            for h in range(num_kv_heads):
+                # Extract the matrix for this head
+                head_matrix = wv_tensor[:, h, :]
+                
+                # Project down both dimensions
+                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
+            
+            # Set up our factor matrices
+            factors = [proj_head, None, proj_input]
+            core = core_approx
+            
+            print("Direct projection successful")
+        except Exception as projection_error:
+            print(f"Direct projection failed: {projection_error}, using fallback method")
+            # Fall back to contextual factorization
+            raise
+    else:
+        # Use the same approach as for query and key weights
+        try:
+            print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
             try:
-                core, factors = tile_based_tucker(wv_tensor, rank)
-            except Exception as e2:
-                print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                core, factors = tucker(wv_tensor, rank=rank)
-    except Exception as e:
-        print(f"Warning: Error in Tucker decomposition for value weights: {e}")
-        print("Falling back to standard contextual factorization...")
-        raise
+                core, factors = memory_efficient_tucker(wv_tensor, rank)
+            except Exception as e1:
+                print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+                try:
+                    core, factors = tile_based_tucker(wv_tensor, rank)
+                except Exception as e2:
+                    print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
+                    core, factors = tucker(wv_tensor, rank=rank)
+        except Exception as e:
+            print(f"Warning: Error in Tucker decomposition for value weights: {e}")
+            print("Falling back to standard contextual factorization...")
+            raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×v_rank, U3 ~ input_dim×v_rank
     
-    # Create Wa_v and Wb_v as PyTorch tensors
-    Wa_v = torch.zeros((input_dim, v_rank, num_heads), dtype=torch.float32)
-    Wb_v = torch.zeros((input_dim, v_rank, head_dim), dtype=torch.float32)
+    # Create Wa_v and Wb_v as PyTorch tensors on GPU
+    Wa_v = torch.zeros((input_dim, v_rank, num_heads), dtype=torch.float32, device='cuda')
+    Wb_v = torch.zeros((input_dim, v_rank, head_dim), dtype=torch.float32, device='cuda')
     
     # Map decomposition to TPA factors
     for r in range(v_rank):
@@ -781,6 +966,9 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Convert to the right device and dtype
     tpa_weights['Wa_v'] = Wa_v.to(dtype=dtype, device=device)
     tpa_weights['Wb_v'] = Wb_v.to(dtype=dtype, device=device)
+    
+    # Clean up GPU memory
+    torch.cuda.empty_cache()
     
     return tpa_weights
 
