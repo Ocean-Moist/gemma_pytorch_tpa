@@ -21,7 +21,7 @@ try:
     # Save the original SVD function
     original_svd = scipy.linalg.svd
     
-    # Create a patched SVD that redirects to numpy's SVD for large matrices
+    # Create a patched SVD that uses TruncatedSVD for large matrices
     def patched_svd(a, full_matrices=True, compute_uv=True, overwrite_a=False,
                     check_finite=True, lapack_driver='gesdd'):
         try:
@@ -30,8 +30,43 @@ try:
                               lapack_driver=lapack_driver)
         except ValueError as e:
             if "LAPACK" in str(e) and "integer overflow" in str(e):
-                print("LAPACK error detected, using NumPy's SVD instead")
-                return np.linalg.svd(a, full_matrices=full_matrices, compute_uv=compute_uv)
+                print("LAPACK error detected, using TruncatedSVD instead")
+                
+                # Get matrix dimensions
+                m, n = a.shape
+                
+                # Estimate rank (can be adjusted based on requirements)
+                k = min(m, n, 256)  # Use a reasonable default rank
+                
+                if compute_uv:
+                    try:
+                        # Use sklearn's TruncatedSVD 
+                        from sklearn.decomposition import TruncatedSVD
+                        
+                        svd = TruncatedSVD(n_components=k, random_state=42)
+                        Vt = svd.fit_transform(a.T).T
+                        s = svd.singular_values_
+                        U = svd.components_.T
+                        
+                        if full_matrices:
+                            # Pad U and Vt to match full matrices if needed
+                            if m > k and U.shape[1] < m:
+                                pad_U = np.zeros((m, m-k))
+                                U = np.hstack((U, pad_U))
+                            if n > k and Vt.shape[0] < n:
+                                pad_Vt = np.zeros((n-k, n))
+                                Vt = np.vstack((Vt, pad_Vt))
+                        
+                        print(f"TruncatedSVD successful with rank {k}")
+                        return U, s, Vt
+                    except (ImportError, Exception) as svd_error:
+                        print(f"TruncatedSVD failed: {svd_error}, falling back to NumPy's SVD")
+                        return np.linalg.svd(a, full_matrices=full_matrices, compute_uv=compute_uv)
+                else:
+                    # If we only need singular values, use standard numpy SVD
+                    # and truncate the result
+                    s = np.linalg.svd(a, full_matrices=False, compute_uv=False)
+                    return s[:k]
             else:
                 raise
     
