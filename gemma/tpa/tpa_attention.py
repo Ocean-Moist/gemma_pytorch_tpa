@@ -778,8 +778,10 @@ class GemmaTensorProductAttention(nn.Module):
             A_q_reshaped = A_q_float.reshape(bsz_seq_flat, self.num_heads, self.q_rank)
             B_q_reshaped = B_q_rotated_float.reshape(bsz_seq_flat, self.q_rank, self.head_dim)
             
-            # Perform the matmul with careful handling
-            Q = torch.matmul(A_q_reshaped, B_q_reshaped)
+            # Perform the batch matrix multiplication with careful handling
+            # This is the key part of TPA - we multiply A_q and B_q to get the full query matrix
+            # We never try to apply B_q to the original hidden states
+            Q = torch.bmm(A_q_reshaped, B_q_reshaped)
             Q = Q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
             # Use safe division - the q_rank should match what was used in factorization
             Q = Q.div(self.q_rank if self.q_rank > 0 else 1.0)
