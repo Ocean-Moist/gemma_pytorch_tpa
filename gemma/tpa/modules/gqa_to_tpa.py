@@ -35,7 +35,8 @@ def gqa_to_tpa_conversion(
     device: str = "cuda",
     override_head_dim: int = None,  # Optional parameter to force a specific head dimension
     transposed_weights: bool = False,  # Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
-    use_dynamic_ranks: bool = True  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
+    use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
+    config = None  # Model config to ensure consistent dimensions
 ) -> Dict[str, torch.Tensor]:
     """
     Convert GQA attention weights to TPA format using Tucker decomposition.
@@ -55,6 +56,10 @@ def gqa_to_tpa_conversion(
         v_rank: Rank for value factorization
         dtype: Data type for the output tensors
         device: Device for computation
+        override_head_dim: Optional parameter to force a specific head dimension
+        transposed_weights: Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
+        use_dynamic_ranks: Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
+        config: Model config to ensure consistent dimensions - we'll use config.hidden_size if available
         
     Returns:
         Dictionary of factorized weights for TPA implementation
@@ -79,8 +84,19 @@ def gqa_to_tpa_conversion(
         print("Transposing output weights to match expected format")
         o_weight = o_weight.to(torch.float32).t()  # Transpose to expected format
     
-    # Get dimensions
-    hidden_dim = q_weight.shape[0]
+    # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
+    # This ensures consistency with the model's actual hidden state dimensions
+    config_hidden_size = getattr(config, 'hidden_size', None) if config is not None else None
+    
+    if config_hidden_size is not None:
+        hidden_dim = config_hidden_size
+        print(f"Using config.hidden_size={hidden_dim} instead of inferring from weights")
+        # CRITICAL: Fail explicitly if weight shape doesn't match config hidden_size
+        if q_weight.shape[0] != hidden_dim:
+            raise ValueError(f"CRITICAL ERROR: Weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}. Cannot proceed with mismatched dimensions.")
+    else:
+        hidden_dim = q_weight.shape[0]
+        print(f"No config.hidden_size provided, inferring hidden_dim={hidden_dim} from weight shape")
     
     # Check if we have a forced head dimension
     if override_head_dim is not None:
@@ -352,6 +368,7 @@ def gqa_to_tpa_conversion(
         print(f"Using requested ranks (capped by actual): q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
     
     # Expand dimensions for TPA format using actual ranks
+    # Make sure to use the correct hidden_dim for these matrices - it might be different from q_weight.shape[0]
     W_A_q_expanded = torch.zeros((hidden_dim, num_heads * actual_q_rank), device=q_weight.device, dtype=torch.float32)
     W_A_k_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_k_rank), device=k_weight.device, dtype=torch.float32)
     W_A_v_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_v_rank), device=v_weight.device, dtype=torch.float32)
@@ -765,6 +782,7 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
             transposed_weights = (o_weight.shape[0] == num_heads * head_dim and 
                                 o_weight.shape[1] == expected_hidden_dim)
                 
+            # Pass the model config to ensure consistent dimensions
             factorized_weights = gqa_to_tpa_conversion(
                 q_weight, k_weight, v_weight, o_weight,
                 num_heads, num_kv_heads,
@@ -772,7 +790,8 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 dtype, device,
                 override_head_dim=head_dim,  # Force the correct head dimension
                 transposed_weights=transposed_weights,  # Handle weight format properly
-                use_dynamic_ranks=use_dynamic_ranks  # Whether to use ranks from Tucker decomposition
+                use_dynamic_ranks=use_dynamic_ranks,  # Whether to use ranks from Tucker decomposition
+                config=model.config if hasattr(model, 'config') else None  # Pass model config for hidden_size
             )
             
             decomp_end = time.time()
@@ -984,13 +1003,14 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                         # This needs to be consistent with usage in tpa_attention.py: 
                         # A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
                         
-                        # IMPORTANT: For Gemma model with 1B parameters, the hidden_size is 1024,
+                        # IMPORTANT: For Gemma model with 1B parameters, the hidden_size is 1152,
                         # but the weight actual shape may depend on the factorized dimensions
                         
                         # Use weight shape to determine actual hidden_dim if needed
                         actual_hidden_dim = weight.shape[0]
                         if actual_hidden_dim != hidden_dim:
-                            print(f"  WARNING: Weight hidden dim {actual_hidden_dim} differs from model config {hidden_dim}")
+                            print(f"  ERROR: Weight hidden dim {actual_hidden_dim} differs from model config {hidden_dim}")
+                            raise ValueError(f"CRITICAL ERROR: Weight hidden dim {actual_hidden_dim} differs from model config hidden_dim {hidden_dim}. Cannot proceed with mismatched dimensions.")
                         
                         if std_key == 'W_A_q':
                             out_features = num_heads * q_rank

@@ -144,6 +144,16 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     default_k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
     default_v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
     
+    # CRITICAL CHECK: For Gemma-1B model, verify hidden_size is 1152 
+    if hasattr(config, 'architecture') and config.architecture == gemma_config.Architecture.GEMMA_3:
+        if config.num_attention_heads == 4 and config.num_hidden_layers in [24, 26]:
+            # This is likely the 1B model, check hidden_size
+            expected_hidden_size = 1152
+            if config.hidden_size != expected_hidden_size:
+                print(f"CRITICAL ERROR: For Gemma-1B model, hidden_size should be {expected_hidden_size}, but got {config.hidden_size}")
+                print(f"This will cause dimension mismatches during inference. Aborting.")
+                raise ValueError(f"Gemma-1B model requires hidden_size={expected_hidden_size}, got {config.hidden_size}")
+    
     # Ensure we have valid dimensions
     if batch_size <= 0:
         batch_size = 1

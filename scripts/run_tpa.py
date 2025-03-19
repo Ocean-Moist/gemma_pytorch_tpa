@@ -397,6 +397,15 @@ def main(_):
                   
                   # Create a new TPA model from the standard model using our standalone function
                   # This function handles all the complexities of creating a proper TPA model
+                  print(f"INFO: standard_model.config hidden_size = {standard_model.config.hidden_size}")
+                  print(f"INFO: tpa_model.config hidden_size = {tpa_model.config.hidden_size}")
+                  
+                  # Force preserving the config's hidden_size during conversion
+                  if standard_model.config.hidden_size != tpa_model.config.hidden_size:
+                      print(f"CRITICAL ERROR: hidden_size mismatch: {standard_model.config.hidden_size} vs {tpa_model.config.hidden_size}")
+                      print(f"Forcing standard_model.config.hidden_size to match tpa_model.config.hidden_size")
+                      standard_model.config.hidden_size = tpa_model.config.hidden_size
+                  
                   new_tpa_model = create_tpa_model_from_standard(
                       standard_model, 
                       q_rank=q_rank,

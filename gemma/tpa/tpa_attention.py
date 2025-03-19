@@ -315,6 +315,9 @@ class GemmaTensorProductAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # CRITICAL: Verify hidden state dimensions match the input_dim we configured
+        if hidden_states.size(-1) != self.input_dim:
+            raise ValueError(f"CRITICAL ERROR: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}. Cannot proceed with mismatched dimensions.")
         """
         Forward pass for TPA attention with comprehensive safety checks.
         
