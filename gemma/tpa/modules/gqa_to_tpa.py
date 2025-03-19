@@ -973,31 +973,29 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                     weight = getattr(module, std_key)
                     print(f"  Source {std_key} shape: {weight.shape}")
                     
-                    # Create Linear modules with dimensions matching the actual weights
-                    # For W_A weights, in_features = rows, out_features = cols
-                    # For W_B weights, in_features = cols, out_features = rows (needs transpose)
+                    # Linear modules need weight shape [out_features, in_features]
+                    # nn.Linear expects weights in transposed form from what we usually see
+                    print(f"  Source {std_key} shape: {weight.shape}")
+                    
                     if std_key.startswith('W_A_'):
-                        # A matrices: [hidden_dim, num_heads*rank] or similar
-                        in_features = weight.shape[0]  # First dimension
-                        out_features = weight.shape[1]  # Second dimension
-                        transpose_needed = False
+                        # W_A weights should have shape [hidden_dim, num_heads*rank] 
+                        # For Linear, we need [out_features=num_heads*rank, in_features=hidden_dim]
+                        out_features = weight.shape[1]
+                        in_features = weight.shape[0]
                     else:
-                        # B matrices: [rank, head_dim] or similar, which need transposing for nn.Linear
-                        # nn.Linear weight shape is [out_features, in_features]
-                        in_features = weight.shape[1]  # Second dimension becomes in_features
-                        out_features = weight.shape[0]  # First dimension becomes out_features
-                        transpose_needed = True
-                        
+                        # W_B weights should have shape [rank, head_dim]
+                        # For Linear, we need [out_features=head_dim, in_features=rank]
+                        out_features = weight.shape[1]
+                        in_features = weight.shape[0]
+                    
                     print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
                     
-                    # Create Linear with matched dimensions
+                    # Create new Linear module with correct dimensions
                     linear = nn.Linear(in_features, out_features, bias=False)
                     
-                    # Set the weights with appropriate transposition
-                    if transpose_needed:
-                        linear.weight.data.copy_(weight.t())
-                    else:
-                        linear.weight.data.copy_(weight)
+                    # Set weights properly to match Linear's expected shape [out_features, in_features]
+                    # We need to transpose because nn.Linear expects weights transposed
+                    linear.weight.data.copy_(weight.t())
                     
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
