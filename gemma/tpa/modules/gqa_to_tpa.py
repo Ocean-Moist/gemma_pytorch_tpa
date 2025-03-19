@@ -107,12 +107,18 @@ def gqa_to_tpa_conversion(
             print(f"Transposing weights for proper TPA conversion")
             
             # Transpose the weights for TPA conversion
+            print(f"\nDIMENSION MISMATCH DETECTED: Transposing weights for Gemma-3-1B model")
+            print(f"  Original shapes: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
+            print(f"  Expected hidden_dim from config: {hidden_dim}")
+            print(f"  Actual hidden_dim in weights: {q_weight.shape[1]}")
+            print(f"  This is a known issue with Gemma-3-1B PyTorch weights orientation")
+            
             q_weight = q_weight.transpose(0, 1)
             k_weight = k_weight.transpose(0, 1)
             v_weight = v_weight.transpose(0, 1)
             need_transpose = True
             
-            print(f"After transposition: q_weight shape={q_weight.shape}, k_weight shape={k_weight.shape}, v_weight shape={v_weight.shape}")
+            print(f"  After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
         
         # After possible transposition, verify again
         if q_weight.shape[0] != hidden_dim:
@@ -140,13 +146,41 @@ def gqa_to_tpa_conversion(
         q_head_dim = override_head_dim
         kv_head_dim = override_head_dim
     else:
-        # The query weight has shape [hidden_dim, num_heads * head_dim]
-        # So head_dim = q_weight.shape[1] / num_heads
-        q_head_dim = q_weight.shape[1] // num_heads
-        
-        # The key/value weights have shape [hidden_dim, num_kv_heads * head_dim]
-        # So kv_head_dim = k_weight.shape[1] / num_kv_heads
-        kv_head_dim = k_weight.shape[1] // num_kv_heads
+        # Carefully calculate head dimensions based on weight shapes and number of heads
+        # For Gemma-3-1B, after transposition q_weight shape is [1152, 1024]
+        # where 1024 = num_heads(4) * head_dim(256)
+        if need_transpose:
+            # If we transposed, the weights are now in [hidden_dim, projections] format
+            # The projection dimension should be divisible by the number of heads
+            q_projection_dim = q_weight.shape[1]
+            k_projection_dim = k_weight.shape[1]
+            
+            if q_projection_dim % num_heads == 0:
+                q_head_dim = q_projection_dim // num_heads
+                print(f"After transposition, calculated q_head_dim = {q_head_dim} (projection dim {q_projection_dim} / {num_heads} heads)")
+            else:
+                # Try to infer a reasonable value that divides exactly
+                q_head_dim = 256  # Default for Gemma models
+                print(f"WARNING: q_projection_dim {q_projection_dim} is not divisible by num_heads {num_heads}")
+                print(f"Using default q_head_dim = {q_head_dim}")
+            
+            if k_projection_dim % num_kv_heads == 0:
+                kv_head_dim = k_projection_dim // num_kv_heads
+                print(f"After transposition, calculated kv_head_dim = {kv_head_dim} (projection dim {k_projection_dim} / {num_kv_heads} kv_heads)")
+            else:
+                # Try to infer a reasonable value
+                kv_head_dim = 256  # Default for Gemma models
+                print(f"WARNING: k_projection_dim {k_projection_dim} is not divisible by num_kv_heads {num_kv_heads}")
+                print(f"Using default kv_head_dim = {kv_head_dim}")
+        else:
+            # Standard calculation when weights are already in expected orientation
+            # The query weight has shape [hidden_dim, num_heads * head_dim]
+            # So head_dim = q_weight.shape[1] / num_heads
+            q_head_dim = q_weight.shape[1] // num_heads
+            
+            # The key/value weights have shape [hidden_dim, num_kv_heads * head_dim]
+            # So kv_head_dim = k_weight.shape[1] / num_kv_heads
+            kv_head_dim = k_weight.shape[1] // num_kv_heads
         
         # For backward compatibility
         head_dim = q_head_dim
@@ -170,31 +204,73 @@ def gqa_to_tpa_conversion(
     # No assertions - try to handle inconsistent dimensions gracefully
     
     # STEP 1: Multi-head Tensorisation
-    # Reshape the weights to better represent the heads
-    # Use the separately calculated dimensions for query and key/value
+    # For Gemma-3-1B, we need to recalculate head dimensions based on actual weights
+    
+    # For Gemma-3-1B, q_weight has shape [1152, 1024] after transposition
+    # Where 1024 = 4 heads * 256 head_dim
+    q_proj_dim = q_weight.shape[1]
+    k_proj_dim = k_weight.shape[1]
+    v_proj_dim = v_weight.shape[1]
+    
+    # Calculate head dimensions directly from the weights
+    if q_proj_dim % num_heads != 0:
+        raise ValueError(f"Q projection dimension {q_proj_dim} not divisible by num_heads {num_heads}")
+    
+    if k_proj_dim % num_kv_heads != 0:
+        raise ValueError(f"K projection dimension {k_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
+    
+    if v_proj_dim % num_kv_heads != 0:
+        raise ValueError(f"V projection dimension {v_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
+    
+    # Calculate actual head dimensions from the weights
+    q_head_dim = q_proj_dim // num_heads
+    kv_head_dim = k_proj_dim // num_kv_heads
+    
+    print(f"\nDIMENSION CALCULATION: Using actual weight dimensions to determine head_dim")
+    print(f"  Q weights: {q_weight.shape} → {q_head_dim} = {q_proj_dim} / {num_heads} heads")
+    print(f"  K weights: {k_weight.shape} → {kv_head_dim} = {k_proj_dim} / {num_kv_heads} kv_heads")
+    print(f"  V weights: {v_weight.shape} → {kv_head_dim} = {v_proj_dim} / {num_kv_heads} kv_heads")
+    
+    # Use consistent head dimension for all
+    head_dim = q_head_dim
+    
+    # Now reshape the weights with the corrected dimensions
     q_weights_reshaped = q_weight.reshape(hidden_dim, num_heads, q_head_dim)
     k_weights_reshaped = k_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
     v_weights_reshaped = v_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
     
-    # For output projection, use query dimensions
+    # For output projection, first get it in the right orientation
     if o_weight.shape[1] == hidden_dim:
-        # Transpose if needed - some models use [head_dim*num_heads, hidden_dim]
+        # If output weight is [out_features, hidden_dim], transpose to [hidden_dim, out_features]
         o_weight = o_weight.t()
         print(f"Transposed output weight to shape {o_weight.shape}")
     
-    if o_weight.shape[0] == hidden_dim:
-        o_weights_reshaped = o_weight.reshape(hidden_dim, num_heads, q_head_dim)
-    else:
-        # Handle other possible arrangements
-        print(f"Warning: Unexpected output weight shape: {o_weight.shape}")
-        # Try a best-effort reshape
-        if o_weight.shape[0] == num_heads * q_head_dim:
-            o_weights_reshaped = o_weight.reshape(num_heads, q_head_dim, hidden_dim).permute(2, 0, 1)
-            print(f"Reshaped output weights using permute to {o_weights_reshaped.shape}")
+    # For Gemma-3-1B, the output projection should have shape [hidden_dim, num_heads*head_dim]
+    o_proj_dim = o_weight.shape[1]
+    
+    # Ensure output weight can be reshaped properly
+    if o_weight.shape[0] != hidden_dim:
+        raise ValueError(f"Output weight first dimension {o_weight.shape[0]} != hidden_dim {hidden_dim}")
+    
+    if o_proj_dim != num_heads * q_head_dim:
+        # Try transposing again if dimensions are swapped
+        if o_weight.shape[1] == hidden_dim and o_weight.shape[0] == num_heads * q_head_dim:
+            o_weight = o_weight.t()
+            o_proj_dim = o_weight.shape[1]
+            print(f"Transposed output weight again to shape {o_weight.shape}")
         else:
-            # Last resort - create a compatible dummy
-            print(f"Warning: Creating compatible dummy output weights")
-            o_weights_reshaped = torch.zeros(hidden_dim, num_heads, q_head_dim, device=q_weight.device)
+            # For Gemma-3-1B model, the output projection may have dimensions that differ from q_weight
+            # Recalculate the head dimension based on actual weight shape
+            if o_proj_dim % num_heads == 0:
+                o_head_dim = o_proj_dim // num_heads
+                print(f"Output projection has different head dimension: {o_head_dim} (vs q_head_dim={q_head_dim})")
+                # We'll use the output projection's head dimension for reshaping it
+                q_head_dim = o_head_dim
+            else:
+                raise ValueError(f"Output projection dimension {o_proj_dim} isn't divisible by num_heads {num_heads}")
+    
+    # Now reshape with the correct dimensions
+    o_weights_reshaped = o_weight.reshape(hidden_dim, num_heads, q_head_dim)
             
     print(f"Reshaped weight dimensions: Q={q_weights_reshaped.shape}, K={k_weights_reshaped.shape}, "
           f"V={v_weights_reshaped.shape}, O={o_weights_reshaped.shape}")

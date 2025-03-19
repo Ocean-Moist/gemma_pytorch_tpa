@@ -317,15 +317,16 @@ class GemmaTensorProductAttention(nn.Module):
     ) -> torch.Tensor:
         # CRITICAL: Verify hidden state dimensions match the input_dim we configured
         if hidden_states.size(-1) != self.input_dim:
-            print(f"WARNING: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}.")
+            print(f"\nDIMENSION MISMATCH: Hidden states dimension {hidden_states.size(-1)} doesn't match configured input_dim {self.input_dim}")
             
-            # For Gemma-3-1B model, check if this is the known issue with hidden_size=1152
-            if hidden_states.size(-1) == 1152 and self.input_dim == 1024:
-                print(f"Detected Gemma-3-1B model with hidden_size=1152 but input_dim was set to 1024")
-                print(f"Updating input_dim to match hidden_states dimension: 1152")
+            # For Gemma-3-1B model, check if this is the known hidden_size=1152 issue
+            if hidden_states.size(-1) == 1152:
+                print(f"  Detected Gemma-3-1B model with hidden_size=1152")
+                print(f"  This is the correct dimension for Gemma-3-1B")
+                print(f"  Updating TPA module input_dim from {self.input_dim} to 1152")
                 self.input_dim = 1152
             else:
-                raise ValueError(f"CRITICAL ERROR: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}. Cannot proceed with mismatched dimensions.")
+                raise ValueError(f"CRITICAL ERROR: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim} and isn't the known Gemma-3-1B size (1152). Cannot proceed with mismatched dimensions.")
         """
         Forward pass for TPA attention with comprehensive safety checks.
         
