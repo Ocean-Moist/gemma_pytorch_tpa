@@ -330,6 +330,20 @@ def main(_):
                   # No target_ranks needed for contextual factorization
                   # Will fall back to this automatically if TensorLy isn't available
                   pass
+              elif factorization_method == "gqa_to_tpa":
+                  print("Using GQA to TPA conversion via Tucker decomposition")
+                  # Import the GQA to TPA conversion
+                  from gemma.tpa.modules.gqa_to_tpa import convert_gqa_model_to_tpa
+                  
+                  # Flag to use this special conversion
+                  tpa_model.use_gqa_to_tpa = True
+                  
+                  # Specific conversion will be applied after normal model loading
+                  tpa_model.gqa_config = {
+                      "q_rank": q_rank,
+                      "k_rank": k_rank,
+                      "v_rank": v_rank
+                  }
               else:
                   print(f"Unknown factorization method: {factorization_method}, using shared factors")
                   tpa_model.target_ranks = {
@@ -344,34 +358,81 @@ def main(_):
           tpa_model.config.k_rank = k_rank
           tpa_model.config.v_rank = v_rank
           
-          # Convert using the built-in method that now uses Tucker factorization when available
-          try:
-              tpa_model = tpa_model.convert_from_standard_weights(standard_model)
-          except Exception as convert_error:
-              print(f"Error using Tucker factorization: {convert_error}")
-              print("Falling back to standard contextual factorization")
-              
-              # Force the use of standard factorization by temporarily disabling tensorly
-              import sys
-              orig_modules = sys.modules.copy()
-              if 'gemma.tpa.modules.contextual_factorization' in sys.modules:
-                  mod = sys.modules['gemma.tpa.modules.contextual_factorization']
-                  orig_has_tensorly = getattr(mod, 'HAS_TENSORLY', False)
-                  setattr(mod, 'HAS_TENSORLY', False)
-              
-              # Retry conversion
+          # Check if we should use the special GQA to TPA conversion
+          if hasattr(tpa_model, 'use_gqa_to_tpa') and tpa_model.use_gqa_to_tpa:
+              # First, do a standard conversion to copy non-attention weights
               try:
-                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
-              except Exception as fallback_error:
-                  print(f"Error in fallback conversion: {fallback_error}")
+                  # Temporarily assign a basic target_ranks to avoid errors
+                  tpa_model.target_ranks = {
+                      "use_shared_factors": True,
+                      "q_rank": _Q_RANK.value,
+                      "k_rank": _K_RANK.value,
+                      "v_rank": _V_RANK.value 
+                  }
+                  
+                  # Copy non-attention weights
+                  for tpa_name, tpa_param in tpa_model.named_parameters():
+                      if "attention" not in tpa_name:
+                          # Find corresponding parameter in standard model
+                          std_name = tpa_name
+                          if std_name in standard_model.state_dict():
+                              tpa_param.data.copy_(standard_model.state_dict()[std_name])
+                  
+                  # Now apply the GQA to TPA conversion
+                  from gemma.tpa.modules.gqa_to_tpa import convert_gqa_model_to_tpa
+                  
+                  # Extract conversion parameters
+                  q_rank = tpa_model.gqa_config["q_rank"]
+                  k_rank = tpa_model.gqa_config["k_rank"]
+                  v_rank = tpa_model.gqa_config["v_rank"]
+                  
+                  # Apply the actual conversion
+                  print("Applying GQA to TPA conversion...")
+                  tpa_model = convert_gqa_model_to_tpa(
+                      standard_model, 
+                      q_rank=q_rank,
+                      k_rank=k_rank,
+                      v_rank=v_rank,
+                      dtype=tpa_model.dtype,
+                      device=device
+                  )
+                  
+              except Exception as gqa_error:
+                  print(f"Error in GQA to TPA conversion: {gqa_error}")
                   import traceback
                   traceback.print_exc()
-                  raise
-              finally:
-                  # Restore original HAS_TENSORLY value
+                  
+                  print("Falling back to standard conversion...")
+                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+          else:
+              # Convert using the built-in method that now uses Tucker factorization when available
+              try:
+                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+              except Exception as convert_error:
+                  print(f"Error using Tucker factorization: {convert_error}")
+                  print("Falling back to standard contextual factorization")
+                  
+                  # Force the use of standard factorization by temporarily disabling tensorly
+                  import sys
+                  orig_modules = sys.modules.copy()
                   if 'gemma.tpa.modules.contextual_factorization' in sys.modules:
                       mod = sys.modules['gemma.tpa.modules.contextual_factorization']
-                      setattr(mod, 'HAS_TENSORLY', orig_has_tensorly)
+                      orig_has_tensorly = getattr(mod, 'HAS_TENSORLY', False)
+                      setattr(mod, 'HAS_TENSORLY', False)
+                  
+                  # Retry conversion
+                  try:
+                      tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+                  except Exception as fallback_error:
+                      print(f"Error in fallback conversion: {fallback_error}")
+                      import traceback
+                      traceback.print_exc()
+                      raise
+                  finally:
+                      # Restore original HAS_TENSORLY value
+                      if 'gemma.tpa.modules.contextual_factorization' in sys.modules:
+                          mod = sys.modules['gemma.tpa.modules.contextual_factorization']
+                          setattr(mod, 'HAS_TENSORLY', orig_has_tensorly)
           
           convert_time = time() - convert_start
           print(f"Model converted to TPA in {convert_time:.2f} seconds")
@@ -539,4 +600,34 @@ if __name__ == '__main__':
 #   --variant=1b \
 #   --prompt="Explain quantum mechanics" \
 #   --convert=False \
+#   --device=cuda
+#
+# Use direct TensorLy Tucker decomposition:
+# python scripts/run_tpa.py \
+#   --ckpt=/path/to/gemma_model.ckpt \
+#   --variant=1b \
+#   --prompt="What is artificial intelligence?" \
+#   --convert \
+#   --save_tpa=/path/to/save/tpa_model.pt \
+#   --extra_config='{"factorization_method": "direct_tensorly"}' \
+#   --device=cuda
+#
+# Use GQA to TPA conversion via Tucker decomposition:
+# python scripts/run_tpa.py \
+#   --ckpt=/path/to/gemma_model.ckpt \
+#   --variant=1b \
+#   --prompt="Describe the solar system" \
+#   --convert \
+#   --save_tpa=/path/to/save/tpa_model.pt \
+#   --extra_config='{"factorization_method": "gqa_to_tpa"}' \
+#   --device=cuda
+#
+# Use original T6-style contextual factorization:
+# python scripts/run_tpa.py \
+#   --ckpt=/path/to/gemma_model.ckpt \
+#   --variant=1b \
+#   --prompt="How do computers work?" \
+#   --convert \
+#   --save_tpa=/path/to/save/tpa_model.pt \
+#   --extra_config='{"factorization_method": "contextual"}' \
 #   --device=cuda

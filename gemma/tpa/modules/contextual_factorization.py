@@ -19,6 +19,8 @@ from .tensor_factorization import (
     _init_contextual_factorization
 )
 from .model_conversion import apply_contextual_tensor_decomposition, convert_from_standard_weights
+# Import new GQA to TPA conversion
+from .gqa_to_tpa import gqa_to_tpa_conversion, convert_gqa_model_to_tpa
 
 # Export all important functions
 __all__ = [
@@ -43,5 +45,9 @@ __all__ = [
     
     # Model conversion
     "apply_contextual_tensor_decomposition",
-    "convert_from_standard_weights"
+    "convert_from_standard_weights",
+    
+    # GQA to TPA conversion
+    "gqa_to_tpa_conversion",
+    "convert_gqa_model_to_tpa"
 ]
