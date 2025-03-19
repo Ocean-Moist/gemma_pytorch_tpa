@@ -290,7 +290,33 @@ def main(_):
           tpa_model.config.v_rank = v_rank
           
           # Convert using the built-in method that now uses Tucker factorization when available
-          tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+          try:
+              tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+          except Exception as convert_error:
+              print(f"Error using Tucker factorization: {convert_error}")
+              print("Falling back to standard contextual factorization")
+              
+              # Force the use of standard factorization by temporarily disabling tensorly
+              import sys
+              orig_modules = sys.modules.copy()
+              if 'gemma.tpa.modules.contextual_factorization' in sys.modules:
+                  mod = sys.modules['gemma.tpa.modules.contextual_factorization']
+                  orig_has_tensorly = getattr(mod, 'HAS_TENSORLY', False)
+                  setattr(mod, 'HAS_TENSORLY', False)
+              
+              # Retry conversion
+              try:
+                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+              except Exception as fallback_error:
+                  print(f"Error in fallback conversion: {fallback_error}")
+                  import traceback
+                  traceback.print_exc()
+                  raise
+              finally:
+                  # Restore original HAS_TENSORLY value
+                  if 'gemma.tpa.modules.contextual_factorization' in sys.modules:
+                      mod = sys.modules['gemma.tpa.modules.contextual_factorization']
+                      setattr(mod, 'HAS_TENSORLY', orig_has_tensorly)
           
           convert_time = time() - convert_start
           print(f"Model converted to TPA in {convert_time:.2f} seconds")

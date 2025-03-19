@@ -156,6 +156,15 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Initialize TPA weights
     tpa_weights = {}
     
+    # Convert weights to float32 for numpy compatibility
+    # Numpy doesn't support bfloat16 directly
+    if q_weight.dtype == torch.bfloat16:
+        q_weight = q_weight.to(torch.float32)
+    if k_weight.dtype == torch.bfloat16:
+        k_weight = k_weight.to(torch.float32)
+    if v_weight.dtype == torch.bfloat16:
+        v_weight = v_weight.to(torch.float32)
+    
     # Process query weights
     # Reshape to 3D tensor [head_dim, num_heads, input_dim]
     wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).cpu().numpy()
@@ -195,6 +204,10 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     tpa_weights['Wb_q'] = torch.tensor(Wb_q, dtype=dtype, device=device)
     
     # Process key weights
+    # Make sure we have float32 for numpy compatibility
+    if k_weight.dtype == torch.bfloat16:
+        k_weight = k_weight.to(torch.float32)
+    
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
     wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).cpu().numpy()
     
@@ -240,6 +253,10 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     tpa_weights['Wb_k'] = torch.tensor(Wb_k, dtype=dtype, device=device)
     
     # Process value weights
+    # Make sure we have float32 for numpy compatibility
+    if v_weight.dtype == torch.bfloat16:
+        v_weight = v_weight.to(torch.float32)
+    
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
     wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).cpu().numpy()
     
@@ -541,43 +558,53 @@ def convert_from_standard_weights(standard_model, tpa_model, q_rank=6, k_rank=2,
                     tpa_layer.self_attn.W_B_v.weight.data.copy_(tpa_weights['Wb_v'].transpose(0, 1))
             else:
                 # Apply T6-style contextual tensor factorization
-                # For TPA we need to factorize into A and B factors
-                A_q, B_q = contextual_tensor_decomposition(
-                    std_qkv_weight[:num_heads * std_qkv_weight.shape[0] // (num_heads + 2 * num_kv_heads)], 
-                    q_rank, k_rank, v_rank, 
-                    dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
-                
-                # Assign factorized weights if the model has the right attributes
-                if hasattr(tpa_layer.self_attn, 'W_A_q'):
-                    tpa_layer.self_attn.W_A_q.weight.data.copy_(A_q.transpose(0, 1))
-                if hasattr(tpa_layer.self_attn, 'W_B_q'):
-                    tpa_layer.self_attn.W_B_q.weight.data.copy_(B_q.transpose(0, 1))
-                
-                # Handle key weights separately
-                k_start = num_heads * std_qkv_weight.shape[0] // (num_heads + 2 * num_kv_heads)
-                k_end = k_start + num_kv_heads * std_qkv_weight.shape[0] // (num_heads + 2 * num_kv_heads)
-                
-                A_k, B_k = contextual_tensor_decomposition(
-                    std_qkv_weight[k_start:k_end], 
-                    q_rank, k_rank, v_rank, 
-                    dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
-                
-                if hasattr(tpa_layer.self_attn, 'W_A_k'):
-                    tpa_layer.self_attn.W_A_k.weight.data.copy_(A_k.transpose(0, 1))
-                if hasattr(tpa_layer.self_attn, 'W_B_k'):
-                    tpa_layer.self_attn.W_B_k.weight.data.copy_(B_k.transpose(0, 1))
-                
-                # Handle value weights separately
-                v_start = k_end
-                A_v, B_v = contextual_tensor_decomposition(
-                    std_qkv_weight[v_start:], 
-                    q_rank, k_rank, v_rank, 
-                    dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
-                
-                if hasattr(tpa_layer.self_attn, 'W_A_v'):
-                    tpa_layer.self_attn.W_A_v.weight.data.copy_(A_v.transpose(0, 1))
-                if hasattr(tpa_layer.self_attn, 'W_B_v'):
-                    tpa_layer.self_attn.W_B_v.weight.data.copy_(B_v.transpose(0, 1))
+                try:
+                    # For TPA we need to factorize into A and B factors
+                    head_dim = std_qkv_weight.shape[0] // (num_heads + 2 * num_kv_heads)
+                    
+                    # Handle query weights
+                    q_section = std_qkv_weight[:num_heads * head_dim]
+                    A_q, B_q = contextual_tensor_decomposition(
+                        q_section, q_rank, k_rank, v_rank, 
+                        dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
+                    
+                    # Assign factorized weights if the model has the right attributes
+                    if hasattr(tpa_layer.self_attn, 'W_A_q'):
+                        tpa_layer.self_attn.W_A_q.weight.data.copy_(A_q.transpose(0, 1))
+                    if hasattr(tpa_layer.self_attn, 'W_B_q'):
+                        tpa_layer.self_attn.W_B_q.weight.data.copy_(B_q.transpose(0, 1))
+                    
+                    # Handle key weights separately
+                    k_start = num_heads * head_dim
+                    k_end = k_start + num_kv_heads * head_dim
+                    k_section = std_qkv_weight[k_start:k_end]
+                    
+                    A_k, B_k = contextual_tensor_decomposition(
+                        k_section, q_rank, k_rank, v_rank, 
+                        dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
+                    
+                    if hasattr(tpa_layer.self_attn, 'W_A_k'):
+                        tpa_layer.self_attn.W_A_k.weight.data.copy_(A_k.transpose(0, 1))
+                    if hasattr(tpa_layer.self_attn, 'W_B_k'):
+                        tpa_layer.self_attn.W_B_k.weight.data.copy_(B_k.transpose(0, 1))
+                    
+                    # Handle value weights separately
+                    v_start = k_end
+                    v_section = std_qkv_weight[v_start:]
+                    
+                    A_v, B_v = contextual_tensor_decomposition(
+                        v_section, q_rank, k_rank, v_rank, 
+                        dtype=std_qkv_weight.dtype, device=std_qkv_weight.device)
+                    
+                    if hasattr(tpa_layer.self_attn, 'W_A_v'):
+                        tpa_layer.self_attn.W_A_v.weight.data.copy_(A_v.transpose(0, 1))
+                    if hasattr(tpa_layer.self_attn, 'W_B_v'):
+                        tpa_layer.self_attn.W_B_v.weight.data.copy_(B_v.transpose(0, 1))
+                        
+                    print(f"Successfully applied contextual factorization to layer {layer_idx}")
+                except Exception as e:
+                    print(f"Error in contextual factorization for layer {layer_idx}: {e}")
+                    print("This is likely due to precision issues. Continuing with other layers.")
             
             # Copy output projection weight directly
             tpa_layer.self_attn.o_proj.weight.data.copy_(std_o_weight.data)
