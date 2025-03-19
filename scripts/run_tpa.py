@@ -255,9 +255,9 @@ def main(_):
           
           # Convert using our existing implementation
           print("Starting weight conversion process...")
-          print("Using Tucker factorization with shared factors instead of contextual factorization")
+          print("Using Tucker factorization with shared factors")
           
-          # Copy embedding and non-attention weights
+          # First, copy embedding and non-attention weights
           for name, param in standard_model.named_parameters():
               # Skip attention layer weights - we'll factorize those differently
               if any(x in name for x in ["qkv_proj", "o_proj", "attention"]):
@@ -274,8 +274,16 @@ def main(_):
               except Exception as e:
                   print(f"Error copying parameter {name}: {e}")
           
-          # Apply Tucker factorization with shared factors
-          tpa_model.factorize_all_layers_with_shared_factors()
+          # Apply Tucker factorization directly to the standard model, then transfer to TPA model
+          # Import the factorization function
+          from gemma.tpa.modules.tucker_factorization import factorize_all_layers_with_shared_factors
+          
+          # Factorize the standard model
+          print("Applying Tucker factorization to standard model")
+          tucker_results = factorize_all_layers_with_shared_factors(standard_model.model, model_config)
+          
+          # Now transfer the factorized weights to the TPA model
+          print("Transferring factorized weights to TPA model")
           
           convert_time = time() - convert_start
           print(f"Model converted to TPA in {convert_time:.2f} seconds")
