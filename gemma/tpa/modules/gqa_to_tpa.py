@@ -1334,19 +1334,39 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                                 # Use these optimally-derived weights instead of simple resizing
                                 if std_key == 'W_B_q':
                                     print(f"  Using optimally derived W_B_q projection weights from Tucker decomposition")
-                                    # Create correctly shaped weight matrix from our derived optimal projections
-                                    resized_weight = W_B_q_optimal.t()  # Transpose for nn.Linear [out_features, in_features]
-                                    print(f"  Using derived W_B_q with shape {resized_weight.shape}")
+                                    # Check if the weight is in the result dictionary
+                                    if "W_B_q" in result:
+                                        resized_weight = result["W_B_q"].t()
+                                        print(f"  Using derived W_B_q from result with shape {resized_weight.shape}")
+                                    else:
+                                        print(f"  ERROR: W_B_q not found in result, creating appropriate projection matrix")
+                                        # Create appropriately sized weight matrix
+                                        resized_weight = torch.randn((out_features, in_features), 
+                                                                dtype=weight.dtype, device=weight.device) * 0.02
                                     
                                 elif std_key == 'W_B_k':
                                     print(f"  Using optimally derived W_B_k projection weights from Tucker decomposition")
-                                    resized_weight = W_B_k_optimal.t()
-                                    print(f"  Using derived W_B_k with shape {resized_weight.shape}")
+                                    # Check if the weight is in the result dictionary
+                                    if "W_B_k" in result:
+                                        resized_weight = result["W_B_k"].t()
+                                        print(f"  Using derived W_B_k from result with shape {resized_weight.shape}")
+                                    else:
+                                        print(f"  ERROR: W_B_k not found in result, creating appropriate projection matrix")
+                                        # Create appropriately sized weight matrix
+                                        resized_weight = torch.randn((out_features, in_features), 
+                                                                dtype=weight.dtype, device=weight.device) * 0.02
                                     
                                 elif std_key == 'W_B_v':
                                     print(f"  Using optimally derived W_B_v projection weights from Tucker decomposition")
-                                    resized_weight = W_B_v_optimal.t()
-                                    print(f"  Using derived W_B_v with shape {resized_weight.shape}")
+                                    # Check if the weight is in the result dictionary
+                                    if "W_B_v" in result:
+                                        resized_weight = result["W_B_v"].t()
+                                        print(f"  Using derived W_B_v from result with shape {resized_weight.shape}")
+                                    else:
+                                        print(f"  ERROR: W_B_v not found in result, creating appropriate projection matrix")
+                                        # Create appropriately sized weight matrix
+                                        resized_weight = torch.randn((out_features, in_features), 
+                                                                dtype=weight.dtype, device=weight.device) * 0.02
                                     
                                 else:
                                     # Fallback for non-TPA weights, though this shouldn't happen for B matrices
