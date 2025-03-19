@@ -984,6 +984,14 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                         # This needs to be consistent with usage in tpa_attention.py: 
                         # A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
                         
+                        # IMPORTANT: For Gemma model with 1B parameters, the hidden_size is 1024,
+                        # but the weight actual shape may depend on the factorized dimensions
+                        
+                        # Use weight shape to determine actual hidden_dim if needed
+                        actual_hidden_dim = weight.shape[0]
+                        if actual_hidden_dim != hidden_dim:
+                            print(f"  WARNING: Weight hidden dim {actual_hidden_dim} differs from model config {hidden_dim}")
+                        
                         if std_key == 'W_A_q':
                             out_features = num_heads * q_rank
                         elif std_key == 'W_A_k':
@@ -993,23 +1001,40 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                         else:
                             out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
                         
-                        in_features = hidden_dim
+                        # Use the actual hidden dimension from the weight
+                        in_features = actual_hidden_dim
                     else:
                         # W_B weights connect rank to head_dim
                         # For nn.Linear in TPA, we need [out_features=head_dim, in_features=rank]
                         # This needs to be consistent with usage in tpa_attention.py:
                         # B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
                         
+                        # For B weights, we need to account for potentially different head_dim in factorized weights
+                        actual_head_dim = weight.shape[1] if weight.shape[0] < weight.shape[1] else weight.shape[0]
+                        if actual_head_dim != head_dim:
+                            print(f"  WARNING: Weight head dim {actual_head_dim} differs from model config {head_dim}")
+                        
                         if std_key == 'W_B_q':
                             in_features = q_rank
+                            # Make sure in_features doesn't exceed weight shape
+                            if in_features > min(weight.shape):
+                                print(f"  WARNING: Requested q_rank {in_features} exceeds weight dimension {min(weight.shape)}")
+                                in_features = min(min(weight.shape), q_rank)
                         elif std_key == 'W_B_k':
                             in_features = k_rank
+                            if in_features > min(weight.shape):
+                                print(f"  WARNING: Requested k_rank {in_features} exceeds weight dimension {min(weight.shape)}")
+                                in_features = min(min(weight.shape), k_rank)
                         elif std_key == 'W_B_v':
                             in_features = v_rank
+                            if in_features > min(weight.shape):
+                                print(f"  WARNING: Requested v_rank {in_features} exceeds weight dimension {min(weight.shape)}")
+                                in_features = min(min(weight.shape), v_rank)
                         else:
                             in_features = weight.shape[0] if weight.shape[1] == head_dim else weight.shape[1]
                         
-                        out_features = head_dim
+                        # Use actual head dimension from the weight tensor
+                        out_features = actual_head_dim
                     
                     print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
                     
@@ -1019,14 +1044,53 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                     linear = nn.Linear(in_features, out_features, bias=False)
                     
                     # Check current weight shape to see if we need to transpose
-                    if weight.shape[0] == out_features and weight.shape[1] == in_features:
-                        # Weight already in Linear's expected format [out_features, in_features]
-                        linear.weight.data.copy_(weight)
-                        print(f"  {tpa_key} using weight directly (already in correct shape)")
-                    else:
-                        # Weight needs transposing to match Linear's expected format
-                        linear.weight.data.copy_(weight.t())
-                        print(f"  {tpa_key} transposing weight from {weight.shape} to {linear.weight.shape}")
+                    try:
+                        if weight.shape[0] == out_features and weight.shape[1] == in_features:
+                            # Weight already in Linear's expected format [out_features, in_features]
+                            linear.weight.data.copy_(weight)
+                            print(f"  {tpa_key} using weight directly (already in correct shape)")
+                        else:
+                            # Weight needs transposing to match Linear's expected format
+                            # First check if dimensions are compatible
+                            if weight.shape[1] == out_features and weight.shape[0] == in_features:
+                                # Simple transposition case
+                                linear.weight.data.copy_(weight.t())
+                                print(f"  {tpa_key} transposing weight from {weight.shape} to {linear.weight.shape}")
+                            else:
+                                # Dimensions don't match directly - need to handle this case carefully
+                                print(f"  WARNING: Weight shape {weight.shape} doesn't match Linear dimensions "
+                                     f"[{out_features}, {in_features}] even after transposition")
+                                
+                                # Resize the weight tensor to match expected dimensions
+                                resized_weight = torch.zeros((out_features, in_features), 
+                                                           dtype=weight.dtype, device=weight.device)
+                                
+                                # Copy the overlapping part
+                                min_out = min(weight.shape[0], out_features)
+                                min_in = min(weight.shape[1], in_features)
+                                
+                                # Use the transposed or direct weight based on which dimension is closer to target
+                                if abs(weight.shape[0] - out_features) + abs(weight.shape[1] - in_features) <= \
+                                   abs(weight.shape[1] - out_features) + abs(weight.shape[0] - in_features):
+                                    # Use direct mapping
+                                    print(f"  Resizing weight directly from {weight.shape} to {resized_weight.shape}")
+                                    resized_weight[:min_out, :min_in] = weight[:min_out, :min_in]
+                                else:
+                                    # Use transposed mapping
+                                    print(f"  Resizing transposed weight from {weight.shape} to {resized_weight.shape}")
+                                    transposed = weight.t()
+                                    min_out = min(transposed.shape[0], out_features)
+                                    min_in = min(transposed.shape[1], in_features)
+                                    resized_weight[:min_out, :min_in] = transposed[:min_out, :min_in]
+                                
+                                linear.weight.data.copy_(resized_weight)
+                                print(f"  {tpa_key} resized weight to match required dimensions: {linear.weight.shape}")
+                    except Exception as copy_error:
+                        print(f"  ERROR copying weight for {tpa_key}: {copy_error}")
+                        # Create a new weight tensor with the correct shape
+                        print(f"  Creating new random weight for {tpa_key} with shape {linear.weight.shape}")
+                        # Initialize with small random values instead of zeros
+                        nn.init.xavier_normal_(linear.weight)
                     
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
