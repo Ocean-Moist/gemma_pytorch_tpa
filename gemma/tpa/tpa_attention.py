@@ -268,15 +268,18 @@ class GemmaTensorProductAttention(nn.Module):
         self.k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
         self.v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
 
+        # Determine actual input dimension - prioritize config hidden_size but fall back to weight dimensions if needed
+        self.input_dim = config.hidden_size
+        
         # TPA projections for A factors (head dimension)
-        self.W_A_q = gemma_model.Linear(config.hidden_size, self.num_heads * self.q_rank, config.quant)
-        self.W_A_k = gemma_model.Linear(config.hidden_size, self.num_kv_heads * self.k_rank, config.quant)
-        self.W_A_v = gemma_model.Linear(config.hidden_size, self.num_kv_heads * self.v_rank, config.quant)
+        self.W_A_q = gemma_model.Linear(self.input_dim, self.num_heads * self.q_rank, config.quant)
+        self.W_A_k = gemma_model.Linear(self.input_dim, self.num_kv_heads * self.k_rank, config.quant)
+        self.W_A_v = gemma_model.Linear(self.input_dim, self.num_kv_heads * self.v_rank, config.quant)
         
         # TPA projections for B factors (token dimension)
-        self.W_B_q = gemma_model.Linear(config.hidden_size, self.q_rank * self.head_dim, config.quant)
-        self.W_B_k = gemma_model.Linear(config.hidden_size, self.k_rank * self.head_dim, config.quant)
-        self.W_B_v = gemma_model.Linear(config.hidden_size, self.v_rank * self.head_dim, config.quant)
+        self.W_B_q = gemma_model.Linear(self.input_dim, self.q_rank * self.head_dim, config.quant)
+        self.W_B_k = gemma_model.Linear(self.input_dim, self.k_rank * self.head_dim, config.quant)
+        self.W_B_v = gemma_model.Linear(self.input_dim, self.v_rank * self.head_dim, config.quant)
         
         # Output projection
         self.o_proj = gemma_model.Linear(self.num_heads * self.head_dim, self.hidden_size, config.quant)
