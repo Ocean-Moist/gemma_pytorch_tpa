@@ -6,6 +6,7 @@ to Tensor Product Attention (TPA) format using TensorLLM-style Tucker decomposit
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import math
 import time
