@@ -255,7 +255,27 @@ def main(_):
           
           # Convert using our existing implementation
           print("Starting weight conversion process...")
-          tpa_model.convert_from_standard_weights(standard_model)
+          print("Using Tucker factorization with shared factors instead of contextual factorization")
+          
+          # Copy embedding and non-attention weights
+          for name, param in standard_model.named_parameters():
+              # Skip attention layer weights - we'll factorize those differently
+              if any(x in name for x in ["qkv_proj", "o_proj", "attention"]):
+                  continue
+                  
+              # Try to find the corresponding parameter in the TPA model
+              try:
+                  if hasattr(tpa_model, name.split('.')[0]):
+                      # Copy the parameter
+                      tpa_param = tpa_model
+                      for part in name.split('.'):
+                          tpa_param = getattr(tpa_param, part)
+                      tpa_param.data.copy_(param.data)
+              except Exception as e:
+                  print(f"Error copying parameter {name}: {e}")
+          
+          # Apply Tucker factorization with shared factors
+          tpa_model.factorize_all_layers_with_shared_factors()
           
           convert_time = time() - convert_start
           print(f"Model converted to TPA in {convert_time:.2f} seconds")
