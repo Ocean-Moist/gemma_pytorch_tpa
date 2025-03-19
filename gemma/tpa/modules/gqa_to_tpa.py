@@ -585,25 +585,50 @@ def gqa_to_tpa_conversion(
     # Verify reconstruction error
     # This is important to ensure the factorization is accurate
     
-    # Reconstruct query weights
+    # Reconstruct query weights - carefully handle dimensions
     q_recon = torch.zeros_like(q_weights_reshaped)
     for h in range(num_heads):
-        q_head_A = W_A_q_expanded[:, h*q_rank:(h+1)*q_rank]
-        q_head_B = W_B_q_reshaped[h*q_rank:(h+1)*q_rank, :]
-        q_recon[:, h, :] = (q_head_A @ q_head_B).reshape(hidden_dim, head_dim)
+        q_head_A = W_A_q_expanded[:, h*q_rank:(h+1)*q_rank]  # [hidden_dim, q_rank]
+        
+        # For contextual factorization, W_B_q has different dimensions
+        # It's [hidden_dim, q_rank*head_dim] rather than [q_rank, head_dim]
+        # For reconstruction purposes, we need to extract the equivalent factor
+        
+        # Create a proxy B factor from W_B_q_optimal to use in reconstruction
+        # Extract the portion corresponding to this head's rank factor
+        proxy_B = torch.zeros((q_rank, head_dim), device=q_weight.device, dtype=torch.float32)
+        
+        # Extract a representative factor from the optimal projection
+        for r in range(q_rank):
+            # Get columns for this rank across all head dimensions
+            proxy_B[r, :] = W_B_q_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+        
+        # Now use this proxy B factor for reconstruction
+        q_recon[:, h, :] = (q_head_A @ proxy_B)
     
     # Reconstruct key and value weights with the group structure
     k_recon = torch.zeros_like(k_weights_reshaped)
     v_recon = torch.zeros_like(v_weights_reshaped)
     
     for g in range(num_kv_heads):
+        # Get A factors for this group
         k_group_A = W_A_k_expanded[:, g*k_rank:(g+1)*k_rank]
-        k_group_B = W_B_k_reshaped[g*k_rank:(g+1)*k_rank, :]
-        k_recon[:, g, :] = (k_group_A @ k_group_B).reshape(hidden_dim, head_dim)
-        
         v_group_A = W_A_v_expanded[:, g*v_rank:(g+1)*v_rank]
-        v_group_B = W_B_v_reshaped[g*v_rank:(g+1)*v_rank, :]
-        v_recon[:, g, :] = (v_group_A @ v_group_B).reshape(hidden_dim, head_dim)
+        
+        # Create proxy B factors from W_B_k_optimal and W_B_v_optimal
+        proxy_k_B = torch.zeros((k_rank, head_dim), device=k_weight.device, dtype=torch.float32)
+        proxy_v_B = torch.zeros((v_rank, head_dim), device=v_weight.device, dtype=torch.float32)
+        
+        # Extract representative factors
+        for r in range(k_rank):
+            proxy_k_B[r, :] = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+            
+        for r in range(v_rank):
+            proxy_v_B[r, :] = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim].mean(dim=0)
+        
+        # Use these proxy factors for reconstruction
+        k_recon[:, g, :] = (k_group_A @ proxy_k_B)
+        v_recon[:, g, :] = (v_group_A @ proxy_v_B)
         
     # Add factorization ranks to results - store as simple integers, not tensors
     # This is critical for proper KV cache creation
