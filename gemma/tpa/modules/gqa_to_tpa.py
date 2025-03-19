@@ -131,7 +131,18 @@ def gqa_to_tpa_conversion(
     try:
         # Apply Tucker decomposition to the full tensor
         # This enforces shared factor matrices across all heads
-        core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4)
+        print(f"Tensor shape before Tucker decomposition: {W_all.shape}")
+        print(f"Target ranks: {[R1, R2, R3, num_heads]}")
+        
+        # Set up timing
+        decomp_start = time.time()
+        print("Starting Tucker decomposition...")
+        
+        # Add verbose parameter to tucker
+        core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
+        
+        decomp_end = time.time()
+        print(f"Tucker decomposition took {decomp_end - decomp_start:.2f} seconds")
         
         # Extract the factor matrices
         U1 = factors[0]  # For hidden dimension
@@ -141,10 +152,20 @@ def gqa_to_tpa_conversion(
         
         print(f"Tucker decomposition complete. Core shape: {core.shape}")
         print(f"Factor shapes: {[f.shape for f in factors]}")
+        
+        # Check for NaN or infinite values
+        if torch.isnan(core).any() or torch.isinf(core).any():
+            print("WARNING: Core tensor contains NaN or Inf values!")
+        
+        for i, factor in enumerate(factors):
+            if torch.isnan(factor).any() or torch.isinf(factor).any():
+                print(f"WARNING: Factor {i} contains NaN or Inf values!")
     
     except Exception as e:
         print(f"Tucker decomposition failed: {e}")
         print("Falling back to separate decompositions for Q, K, V")
+        import traceback
+        traceback.print_exc()
         
         # Fallback: Decompose Q, K, V separately
         q_tensors = W_all[:, :, 0, :]  # Shape: [hidden_dim, head_dim, num_heads]
@@ -344,10 +365,47 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
     
     print("Converting GQA model to TPA format...")
     
+    # Add timing and layer counting
+    import time
+    start_time = time.time()
+    layers_converted = 0
+    attention_modules_found = 0
+    
+    # Debug model structure
+    print(f"Model type: {type(model).__name__}")
+    print("Searching for attention modules...")
+    
+    # Count modules with attention structure
+    for name, module in model.named_modules():
+        if hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
+            attention_modules_found += 1
+            print(f"Found attention module: {name}, type: {type(module).__name__}")
+            
+            # Check if it has GQA structure
+            if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
+                num_heads = module.num_heads
+                num_kv_heads = module.num_key_value_heads
+                print(f"  GQA structure verified: {num_heads} heads, {num_kv_heads} KV heads")
+                
+                # Check if apply_factorized_weights exists
+                if hasattr(module, "apply_factorized_weights"):
+                    print(f"  Module supports factorized weights")
+                else:
+                    print(f"  WARNING: Module does not support applying factorized weights")
+    
+    if attention_modules_found == 0:
+        print("ERROR: No attention modules found in the model!")
+        print("Model structure may not be compatible with this conversion method")
+        return model
+        
+    print(f"Found {attention_modules_found} attention modules to convert")
+    
+    # Process each module
     for name, module in model.named_modules():
         # Identify modules that have the query, key, value projections
         if hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
             print(f"Converting attention layer: {name}")
+            layer_start = time.time()
             
             # Get the number of heads and kv heads (groups)
             if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
@@ -356,25 +414,53 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 
                 print(f"  Heads: {num_heads}, KV heads: {num_kv_heads}")
                 
-                # Extract weight matrices
+                # Print weight dimensions for debugging
                 q_weight = module.q_proj.weight
                 k_weight = module.k_proj.weight
                 v_weight = module.v_proj.weight
                 o_weight = module.o_proj.weight
                 
-                # Apply GQA to TPA conversion
-                factorized_weights = gqa_to_tpa_conversion(
-                    q_weight, k_weight, v_weight, o_weight,
-                    num_heads, num_kv_heads,
-                    q_rank, k_rank, v_rank,
-                    dtype, device
-                )
+                print(f"  Weight dimensions - Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}, O: {o_weight.shape}")
                 
-                # Apply factorized weights to the model
-                if hasattr(module, "apply_factorized_weights"):
-                    module.apply_factorized_weights(factorized_weights)
-                else:
-                    print(f"Warning: Module {name} does not support applying factorized weights")
+                try:
+                    # Apply GQA to TPA conversion
+                    print(f"  Starting tensor decomposition for layer {name}...")
+                    decomp_start = time.time()
+                    
+                    factorized_weights = gqa_to_tpa_conversion(
+                        q_weight, k_weight, v_weight, o_weight,
+                        num_heads, num_kv_heads,
+                        q_rank, k_rank, v_rank,
+                        dtype, device
+                    )
+                    
+                    decomp_end = time.time()
+                    print(f"  Decomposition completed in {decomp_end - decomp_start:.2f} seconds")
+                    
+                    # Check if factorized weights were created
+                    if not factorized_weights:
+                        print(f"  ERROR: Factorization returned empty result")
+                        continue
+                        
+                    print(f"  Factorized weights keys: {list(factorized_weights.keys())}")
+                    
+                    # Apply factorized weights to the model
+                    if hasattr(module, "apply_factorized_weights"):
+                        print(f"  Applying factorized weights to module...")
+                        module.apply_factorized_weights(factorized_weights)
+                        layers_converted += 1
+                    else:
+                        print(f"  WARNING: Module {name} does not support applying factorized weights")
+                
+                except Exception as e:
+                    print(f"  ERROR in layer {name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            layer_end = time.time()
+            print(f"  Layer conversion took {layer_end - layer_start:.2f} seconds")
     
-    print("GQA to TPA conversion complete")
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"GQA to TPA conversion complete: {layers_converted}/{attention_modules_found} layers converted in {total_time:.2f} seconds")
     return model
