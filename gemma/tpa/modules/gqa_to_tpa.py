@@ -670,8 +670,13 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
             
             # For Gemma, the weights are in a specific format
             # Weight format depends on the model architecture
+            # Calculate the expected hidden dim by looking at the output weight matrix
+            # For GemmaForCausalLM, hidden_dim is typically 1152 for 1B model
+            expected_hidden_dim = q_weight.shape[0]  # Input dimension for weights
+            
+            # Check if weights are already transposed
             transposed_weights = (o_weight.shape[0] == num_heads * head_dim and 
-                                o_weight.shape[1] == hidden_dim)
+                                o_weight.shape[1] == expected_hidden_dim)
                 
             factorized_weights = gqa_to_tpa_conversion(
                 q_weight, k_weight, v_weight, o_weight,
