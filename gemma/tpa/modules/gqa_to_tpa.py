@@ -913,14 +913,64 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                     print(f"  Warning: Could not find {part} in TPA model")
                     break
             
-            # Copy the factorized weights to the TPA module
-            tpa_weights = {}
-            for key in ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_rank', 'k_rank', 'v_rank']:
+            # The TPA attention modules expect W_A_q etc. to be nn.Linear modules, not Parameters
+            # So we need to create proper nn.Linear modules with the weights
+
+            # First, extract the dimensions and ranks
+            for key in ['q_rank', 'k_rank', 'v_rank']:
                 if hasattr(module, key):
                     value = getattr(module, key)
-                    tpa_weights[key] = value
-                    # Set directly on the TPA module
+                    # Set these directly
                     setattr(tpa_module, key, value)
+            
+            # Extract head dimensions and counts from the TPA module
+            num_heads = getattr(tpa_module, 'num_heads', 4)
+            num_kv_heads = getattr(tpa_module, 'num_kv_heads', 1)
+            head_dim = getattr(tpa_module, 'head_dim', 256)
+            hidden_dim = getattr(tpa_module, 'hidden_size', 1024)
+            q_rank = getattr(tpa_module, 'q_rank', 6)
+            k_rank = getattr(tpa_module, 'k_rank', 2) 
+            v_rank = getattr(tpa_module, 'v_rank', 2)
+            
+            # For each weight matrix in the converted standard model
+            weight_pairs = [
+                ('W_A_q', 'W_A_q', hidden_dim, num_heads * q_rank),
+                ('W_A_k', 'W_A_k', hidden_dim, num_kv_heads * k_rank),
+                ('W_A_v', 'W_A_v', hidden_dim, num_kv_heads * v_rank), 
+                ('W_B_q', 'W_B_q', hidden_dim, q_rank * head_dim),
+                ('W_B_k', 'W_B_k', hidden_dim, k_rank * head_dim),
+                ('W_B_v', 'W_B_v', hidden_dim, v_rank * head_dim)
+            ]
+            
+            # Create Linear modules with the weights
+            for std_key, tpa_key, in_dim, out_dim in weight_pairs:
+                if hasattr(module, std_key):
+                    # Get weight from standard model
+                    weight = getattr(module, std_key)
+                    
+                    # Create a nn.Linear module with the weight
+                    linear = nn.Linear(in_dim, out_dim, bias=False)
+                    
+                    # Set the weight
+                    if weight.shape == linear.weight.shape:
+                        linear.weight.data.copy_(weight)
+                    elif weight.shape == linear.weight.t().shape:
+                        # Need to transpose
+                        linear.weight.data.copy_(weight.t())
+                    else:
+                        print(f"  Warning: Weight shape mismatch for {std_key}: {weight.shape} vs {linear.weight.shape}")
+                        # Try to adapt using reshape if possible
+                        if weight.numel() == linear.weight.numel():
+                            try:
+                                linear.weight.data.copy_(weight.reshape(linear.weight.shape))
+                                print(f"  Successfully reshaped weight to {linear.weight.shape}")
+                            except Exception as reshape_error:
+                                print(f"  Error reshaping weight: {reshape_error}")
+                        else:
+                            print(f"  Cannot adapt weights: {weight.numel()} != {linear.weight.numel()}")
+                    
+                    # Set the Linear module on the TPA module
+                    setattr(tpa_module, tpa_key, linear)
             
             # Mark the TPA module as using factorized weights
             tpa_module.use_factorized_weights = True
