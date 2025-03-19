@@ -194,27 +194,12 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Apply Tucker decomposition to query weights
     rank = [q_rank, None, q_rank]  # Rank for dimensions
     try:
+        print(f"Applying Tucker decomposition with ranks: {rank}")
         core, factors = tucker(wq_tensor, rank=rank)
-    except ValueError as e:
-        if "LAPACK" in str(e) and "integer overflow" in str(e):
-            print(f"Tucker decomposition size too large, using PyTorch SVD for approximation")
-            # Implement manual approximate Tucker using PyTorch's SVD
-            # Unfold tensor for mode-1
-            mode1_unfolding = wq_tensor.reshape(head_dim, -1)
-            # Get SVD (truncated)
-            U1, _, _ = torch.svd(mode1_unfolding, some=True)
-            U1 = U1[:, :q_rank]
-            
-            # Unfold tensor for mode-3
-            mode3_unfolding = wq_tensor.permute(2, 0, 1).reshape(input_dim, -1)
-            U3, _, _ = torch.svd(mode3_unfolding, some=True)
-            U3 = U3[:, :q_rank]
-            
-            # Create core tensor (approximation)
-            core = torch.randn(q_rank, num_heads, q_rank, device=wq_tensor.device)
-            factors = [U1, None, U3]
-        else:
-            raise
+    except Exception as e:
+        print(f"Warning: Error in Tucker decomposition: {e}")
+        print("Falling back to standard contextual factorization...")
+        raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×q_rank, U3 ~ input_dim×q_rank
@@ -257,7 +242,13 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Apply Tucker decomposition to key weights
     rank = [k_rank, None, k_rank]  # Rank for dimensions
-    core, factors = tucker(wk_tensor, rank=rank)
+    try:
+        print(f"Applying Tucker decomposition with ranks: {rank}")
+        core, factors = tucker(wk_tensor, rank=rank)
+    except Exception as e:
+        print(f"Warning: Error in Tucker decomposition for key weights: {e}")
+        print("Falling back to standard contextual factorization...")
+        raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×k_rank, U3 ~ input_dim×k_rank
@@ -307,7 +298,13 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Apply Tucker decomposition to value weights
     rank = [v_rank, None, v_rank]  # Rank for dimensions
-    core, factors = tucker(wv_tensor, rank=rank)
+    try:
+        print(f"Applying Tucker decomposition with ranks: {rank}")
+        core, factors = tucker(wv_tensor, rank=rank)
+    except Exception as e:
+        print(f"Warning: Error in Tucker decomposition for value weights: {e}")
+        print("Falling back to standard contextual factorization...")
+        raise
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×v_rank, U3 ~ input_dim×v_rank
