@@ -523,57 +523,93 @@ def gqa_to_tpa_conversion(
     # For queries: Use the core tensor and factors directly to construct optimal projections
     # The optimal approach uses the full Tucker decomposition rather than simplistic outer products
     
-    # For each rank and head dimension, compute optimal projection vector
+    # Vectorized implementation to use GPU parallelism
+    print(f"Computing B projections for queries with vectorized implementation on {device}")
+    
+    # Prepare storage for all projections at once (reshape later)
+    q_projections = torch.zeros((q_rank * head_dim, hidden_dim), device=device, dtype=torch.float32)
+    
+    # Pre-compute projections for all heads in one batch operation
+    all_head_projections = []
+    for h in range(num_heads):
+        head_core = q_core[:, :, h]  # [R1, R2]
+        # Compute U1 @ head_core for all heads at once
+        all_head_projections.append(U1 @ head_core)  # [hidden_dim, R2]
+    
+    # Now compute projections for each rank and dimension
     for r in range(q_rank):
-        # Use modulo to handle cases where q_rank > R2 (actual rank from Tucker)
         r_actual = r % actual_R2
         
-        # For each head dimension
+        # U2 has shape [head_dim, R2]
+        # For each dimension d, we need to compute (U1 @ head_core) @ U2[d,:]
         for d in range(head_dim):
-            # Initialize accumulator for this column
-            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
+            # Initialize accumulator for this column - directly on device
+            col_sum = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
             
-            # Compute contribution from each head (since Tucker gives shared factors)
+            # Add contributions from all heads
             for h in range(num_heads):
-                # Extract the core tensor for this head
-                head_core = q_core[:, :, h]  # [R1, R2]
+                # Use pre-computed U1 @ head_core
+                hidden_to_r2 = all_head_projections[h]  # [hidden_dim, R2]
                 
-                # Compute the optimal projection:
-                # 1. Map hidden_dim to R2 (second Tucker mode) through U1 and core
-                hidden_to_r2 = U1 @ head_core  # [hidden_dim, R2]
+                # Project to dimension d
+                u2_d = U2[d, :]  # [R2]
+                hidden_to_d = hidden_to_r2 @ u2_d  # [hidden_dim]
                 
-                # 2. Project to the specific dimension using U2
-                # Note: U2[d, :] maps from R2 to dimension d
-                hidden_to_d = hidden_to_r2 @ U2[d, :]  # [hidden_dim]
-                
-                # Add this head's contribution (weighted by number of heads)
-                col_vector += hidden_to_d / num_heads
+                # Accumulate
+                col_sum.add_(hidden_to_d / num_heads)
             
-            # Store the derived projection vector in the right position
-            W_B_q_optimal[:, r*head_dim + d] = col_vector
+            # Store the result
+            W_B_q_optimal[:, r*head_dim + d] = col_sum
     
-    # Apply the same approach for keys and values
+    # Apply the same vectorized approach for keys
+    print(f"Computing B projections for keys with vectorized implementation on {device}")
+    
+    # Pre-compute projections for all key heads
+    all_key_projections = []
+    for g in range(num_kv_heads):
+        head_core = k_core[:, :, g]  # [R1, R2]
+        all_key_projections.append(U1 @ head_core)  # [hidden_dim, R2]
+    
     for r in range(k_rank):
         r_actual = r % actual_R2
         for d in range(head_dim):
-            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
+            # Initialize on device
+            col_sum = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
+            
+            # Add contributions from all heads
             for g in range(num_kv_heads):
-                head_core = k_core[:, :, g]
-                hidden_to_r2 = U1 @ head_core
-                hidden_to_d = hidden_to_r2 @ U2[d, :]
-                col_vector += hidden_to_d / num_kv_heads
-            W_B_k_optimal[:, r*head_dim + d] = col_vector
+                # Use pre-computed projection
+                hidden_to_r2 = all_key_projections[g]
+                u2_d = U2[d, :]
+                hidden_to_d = hidden_to_r2 @ u2_d
+                col_sum.add_(hidden_to_d / num_kv_heads)
+            
+            W_B_k_optimal[:, r*head_dim + d] = col_sum
+    
+    # Apply the same vectorized approach for values
+    print(f"Computing B projections for values with vectorized implementation on {device}")
+    
+    # Pre-compute projections for all value heads
+    all_value_projections = []
+    for g in range(num_kv_heads):
+        head_core = v_core[:, :, g]  # [R1, R2]
+        all_value_projections.append(U1 @ head_core)  # [hidden_dim, R2]
     
     for r in range(v_rank):
         r_actual = r % actual_R2
         for d in range(head_dim):
-            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
+            # Initialize on device
+            col_sum = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
+            
+            # Add contributions from all heads
             for g in range(num_kv_heads):
-                head_core = v_core[:, :, g]
-                hidden_to_r2 = U1 @ head_core
-                hidden_to_d = hidden_to_r2 @ U2[d, :]
-                col_vector += hidden_to_d / num_kv_heads
-            W_B_v_optimal[:, r*head_dim + d] = col_vector
+                # Use pre-computed projection
+                hidden_to_r2 = all_value_projections[g]
+                u2_d = U2[d, :]
+                hidden_to_d = hidden_to_r2 @ u2_d
+                col_sum.add_(hidden_to_d / num_kv_heads)
+            
+            W_B_v_optimal[:, r*head_dim + d] = col_sum
     
     # Use the optimal projection weights for the TPA implementation
     W_B_q_reshaped = W_B_q_optimal  # [hidden_dim, q_rank*head_dim]
@@ -1097,6 +1133,29 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
     Create a Gemma3ForMultimodalLMwithTPA model from a standard GemmaForCausalLM model.
     This function:
     1. Creates a new TPA model with the same configuration
+    
+    Args:
+        standard_model: The standard model to convert
+        q_rank: Rank for query factorization
+        k_rank: Rank for key factorization
+        v_rank: Rank for value factorization
+        dtype: Data type for model parameters
+        device: Device to use for computation
+        use_dynamic_ranks: Whether to use dynamic ranks based on SVD
+    """
+    # Print device info
+    print(f"Creating TPA model from standard model using device: {device}")
+    if torch.device(device).type == 'cuda':
+        print(f"CUDA available: {torch.cuda.is_available()}, device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        device_name = torch.cuda.get_device_name(device)
+        print(f"Device name: {device_name}")
+        memory_allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+        memory_reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
+        print(f"Memory allocated: {memory_allocated:.2f} GB")
+        print(f"Memory reserved: {memory_reserved:.2f} GB")
+        
+    """
     2. Applies TPA factorization to the weights
     3. Copies over the factorized weights to the TPA model
     

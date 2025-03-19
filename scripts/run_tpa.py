@@ -239,13 +239,15 @@ def main(_):
       print(f"Loading standard Gemma model from {_CKPT.value}...")
       
       try:
-          # Load the model checkpoint
-          checkpoint = torch.load(_CKPT.value, map_location="cpu")
+          # Load the model checkpoint directly to the target device
+          checkpoint = torch.load(_CKPT.value, map_location=device)
           
           # Create standard model
           standard_model = gemma_model.GemmaForCausalLM(model_config)
           standard_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+          standard_model = standard_model.to(device)  # Move to device immediately
           standard_model.eval()
+          print(f"Standard model loaded and moved to {device}")
           
           load_time = time()
           print(f"Standard model loaded in {load_time - start_time:.2f} seconds")
@@ -334,6 +336,10 @@ def main(_):
                   print("Using GQA to TPA conversion via Tucker decomposition")
                   # Import the GQA to TPA conversion
                   from gemma.tpa.modules.gqa_to_tpa import convert_gqa_model_to_tpa
+                  # Set CUDA device explicitly for this process
+                  if torch.cuda.is_available():
+                      torch.cuda.set_device(device)
+                      print(f"Explicitly set CUDA device to {device}")
                   
                   # Flag to use this special conversion
                   tpa_model.use_gqa_to_tpa = True
@@ -395,6 +401,11 @@ def main(_):
                   # Import the new standalone function
                   from gemma.tpa.modules.gqa_to_tpa import create_tpa_model_from_standard
                   
+                  # Print device details before conversion
+                  if torch.cuda.is_available():
+                      print(f"CUDA memory before conversion: {torch.cuda.memory_allocated(device)/(1024**3):.2f} GB allocated")
+                      print(f"CUDA memory reserved: {torch.cuda.memory_reserved(device)/(1024**3):.2f} GB")
+                  
                   # Create a new TPA model from the standard model using our standalone function
                   # This function handles all the complexities of creating a proper TPA model
                   print(f"INFO: standard_model.config hidden_size = {standard_model.config.hidden_size}")
@@ -406,6 +417,14 @@ def main(_):
                       print(f"Forcing standard_model.config.hidden_size to match tpa_model.config.hidden_size")
                       standard_model.config.hidden_size = tpa_model.config.hidden_size
                   
+                  # Ensure device is correct before passing to create_tpa_model_from_standard
+                  if torch.cuda.is_available():
+                      print(f"Setting device to CUDA before conversion")
+                      device = torch.device('cuda')  # Ensure we're using CUDA
+                      # Force standard_model to CUDA
+                      standard_model = standard_model.to(device)
+                      
+                  # Convert model with explicit parameters
                   new_tpa_model = create_tpa_model_from_standard(
                       standard_model, 
                       q_rank=q_rank,
