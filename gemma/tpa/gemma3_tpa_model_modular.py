@@ -175,8 +175,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
 
     def _register_freqs_cis(self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1):
         """Register rotary position embedding frequencies."""
+        # Use a much larger max_seq_len to avoid issues during generation
+        extended_max_seq_len = max(max_seq_len * 4, 8192)  # Ensure we have plenty of positions precomputed
+        print(f"Precomputing RoPE frequencies for {extended_max_seq_len} positions (extending from {max_seq_len})")
         # Delegate to module function
-        register_freqs_cis(self, name, head_dim, max_seq_len, theta, rope_scaling_factor)
+        register_freqs_cis(self, name, head_dim, extended_max_seq_len, theta, rope_scaling_factor)
 
     @torch.no_grad()
     def forward(

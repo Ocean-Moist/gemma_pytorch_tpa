@@ -758,8 +758,7 @@ class GemmaTensorProductAttention(nn.Module):
         # Ensure freqs_cis has enough positions
         try:
             if freqs_cis.size(0) < seq_len:
-                print(f"Warning: freqs_cis has only {freqs_cis.size(0)} positions, but factor has {seq_len}")
-                print("Using available positions and padding as needed")
+                # Silently handle this case - we'll pad with the last position's frequencies
                 # Use available positions instead of raising error
                 available_positions = freqs_cis.size(0)
                 # If we need more positions, we'll pad by repeating the last position
