@@ -14,6 +14,8 @@ from .tucker_decomposition import memory_efficient_tucker, tile_based_tucker, un
 from .tensor_factorization import (
     contextual_tensor_decomposition,
     tucker_tensor_decomposition,
+    direct_tensorly_tucker_decomposition,
+    shared_factors_tucker_decomposition,
     _init_contextual_factorization
 )
 from .model_conversion import apply_contextual_tensor_decomposition, convert_from_standard_weights
@@ -35,6 +37,8 @@ __all__ = [
     # Core factorization algorithms
     "contextual_tensor_decomposition",
     "tucker_tensor_decomposition",
+    "direct_tensorly_tucker_decomposition",
+    "shared_factors_tucker_decomposition",
     "_init_contextual_factorization",
     
     # Model conversion

@@ -10,6 +10,8 @@ and model conversion utilities.
 from .contextual_factorization import (
     contextual_tensor_decomposition,
     tucker_tensor_decomposition,
+    direct_tensorly_tucker_decomposition,
+    shared_factors_tucker_decomposition,
     _init_contextual_factorization,
     apply_contextual_tensor_decomposition,
     convert_from_standard_weights,
@@ -38,6 +40,8 @@ __all__ = [
     # Core tensor factorization
     "contextual_tensor_decomposition",
     "tucker_tensor_decomposition",
+    "direct_tensorly_tucker_decomposition",
+    "shared_factors_tucker_decomposition",
     "_init_contextual_factorization",
     
     # Tucker decomposition utilities

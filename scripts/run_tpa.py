@@ -47,6 +47,8 @@ _CONVERT = flags.DEFINE_boolean('convert', True,
                                'Whether to convert standard weights to TPA format.')
 _SAVE_TPA = flags.DEFINE_string('save_tpa', None, 
                                'Path to save converted TPA weights.')
+_CUDA_LAUNCH_BLOCKING = flags.DEFINE_boolean('cuda_launch_blocking', False, 
+                               'Whether to set CUDA_LAUNCH_BLOCKING=1 (debugging synchronous CUDA operations).')
 _Q_RANK = flags.DEFINE_integer('q_rank', 6, 'Rank for query factorization in TPA.')
 _K_RANK = flags.DEFINE_integer('k_rank', 2, 'Rank for key factorization in TPA.')
 _V_RANK = flags.DEFINE_integer('v_rank', 2, 'Rank for value factorization in TPA.')
@@ -283,6 +285,20 @@ def main(_):
           v_rank = _V_RANK.value
           print(f"Converting model using {'Tucker' if HAS_TENSORLY else 'contextual'} factorization")
           print(f"Ranks: Q={q_rank}, K={k_rank}, V={v_rank}")
+          
+          # Use shared factors approach with TensorLy
+          if HAS_TENSORLY:
+              print("Using shared factors approach for Tucker decomposition")
+              # Set up target ranks with shared factors configuration
+              tpa_model.target_ranks = {
+                  "use_shared_factors": True,
+                  "hidden_rank": 8,
+                  "head_rank": 4,
+                  "dim_rank": 4,
+                  "q_rank": q_rank,
+                  "k_rank": k_rank,
+                  "v_rank": v_rank
+              }
           
           # Make sure model config has correct ranks
           tpa_model.config.q_rank = q_rank

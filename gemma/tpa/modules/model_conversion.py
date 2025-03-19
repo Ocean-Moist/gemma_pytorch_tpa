@@ -105,11 +105,17 @@ def convert_from_standard_weights(standard_model, tpa_model, q_rank=6, k_rank=2,
                     # Use Tucker decomposition
                     combined_weight = torch.cat([q_weight, k_weight, v_weight], dim=1)
                     
-                    target_ranks = {
-                        "q_rank": q_rank,
-                        "k_rank": k_rank,
-                        "v_rank": v_rank
-                    }
+                    # Check if model has custom target_ranks
+                    if hasattr(tpa_model, "target_ranks"):
+                        target_ranks = tpa_model.target_ranks
+                        if verbose:
+                            print(f"Using custom target_ranks configuration: {target_ranks}")
+                    else:
+                        target_ranks = {
+                            "q_rank": q_rank,
+                            "k_rank": k_rank, 
+                            "v_rank": v_rank
+                        }
                     
                     factorized_weights = tucker_tensor_decomposition(
                         combined_weight,

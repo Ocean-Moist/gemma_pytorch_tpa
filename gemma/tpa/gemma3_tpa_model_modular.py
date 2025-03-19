@@ -45,6 +45,13 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
     ):
         super().__init__()
         self.dtype = config.get_dtype()
+        # Default target ranks configuration (can be overridden)
+        self.target_ranks = {
+            "q_rank": getattr(config, "q_rank", 6),
+            "k_rank": getattr(config, "k_rank", 2),
+            "v_rank": getattr(config, "v_rank", 2),
+            "use_shared_factors": False
+        }
         # Check for multimodal model by detecting vision_config
         # Remove architecture check to allow non-Gemma3 models (like 1B text-only)
         self.is_multimodal = (hasattr(config, 'vision_config') and 
