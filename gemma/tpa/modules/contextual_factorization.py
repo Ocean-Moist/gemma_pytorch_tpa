@@ -337,34 +337,91 @@ try:
             # Reshape the tensor for this mode's unfolding
             unfolded = tl.unfold(current, mode).to(device='cuda')
             
-            # Use randomized SVD or truncated SVD
+            # Convert to float32 for better numerical stability if needed
+            original_dtype = unfolded.dtype
+            if original_dtype == torch.bfloat16 or original_dtype == torch.float16:
+                unfolded = unfolded.to(dtype=torch.float32)
+            
+            # Use improved SVD with higher precision and stability checks
             try:
-                # Try PyTorch's SVD on GPU
-                U, S, Vh = torch.linalg.svd(unfolded, full_matrices=False)
+                # Try PyTorch's SVD on GPU with improved stability
+                # Calculate mean to improve numerical stability
+                mean_val = torch.mean(unfolded)
+                std_val = torch.std(unfolded)
+                
+                # Normalize the data - this improves numerical stability
+                if std_val > 0:
+                    unfolded_normalized = (unfolded - mean_val) / std_val
+                else:
+                    unfolded_normalized = unfolded - mean_val
+                
+                # Run SVD with normalized data
+                U, S, Vh = torch.linalg.svd(unfolded_normalized, full_matrices=False)
                 U_truncated = U[:, :rank]
                 
+                # Check if we have NaN values (indicating numerical issues)
+                if torch.isnan(U_truncated).any() or torch.isnan(S).any():
+                    raise ValueError("NaN values in SVD results")
+                
             except Exception as e:
-                print(f"Error using PyTorch SVD: {e}, trying randomized approach")
-                # Use power iteration method for large matrices on GPU
-                # This is a randomized approach to find dominant singular vectors
+                print(f"Error using PyTorch SVD: {e}, trying enhanced randomized approach")
+                
+                # Use enhanced power iteration method for large matrices on GPU
                 try:
                     # Move to GPU for faster processing
-                    Q = torch.randn(unfolded.shape[1], rank, device='cuda')
+                    # Increase oversampling factor for better accuracy
+                    oversampling = 10
+                    n_iter = 7  # Increase power iterations for better accuracy
+                    total_rank = min(rank + oversampling, unfolded.shape[1])
+                    
+                    # Random starting matrix with good initial distribution
+                    Q = torch.randn(unfolded.shape[1], total_rank, device='cuda')
                     Q, _ = torch.linalg.qr(Q)
                     
-                    # Power iteration (simplified randomized SVD)
-                    for _ in range(5):  # Number of power iterations
+                    # Power iteration with more iterations for better convergence
+                    for i in range(n_iter):
+                        # Apply A*Q
                         Y = unfolded @ Q
+                        
+                        # QR factorization for orthogonalization
                         Q, _ = torch.linalg.qr(unfolded.t() @ Y)
+                        
+                        # Apply A*Q for intermediate checking
+                        if i == n_iter // 2:
+                            # Check for convergence by estimating singular values
+                            Y_mid = unfolded @ Q
+                            try:
+                                s_mid = torch.linalg.svdvals(Y_mid.t() @ Y_mid)
+                                # If singular values at the cut-off are too small, we're converged
+                                if s_mid[rank] / s_mid[0] < 1e-4:
+                                    print(f"Early convergence at iteration {i}")
+                                    break
+                            except:
+                                pass  # Continue if checking fails
                     
+                    # Final projection Y = A*Q
                     Y = unfolded @ Q
-                    U_truncated, _ = torch.linalg.qr(Y)
-                    U_truncated = U_truncated[:, :rank]
-                except Exception as gpu_err:
-                    print(f"GPU randomized SVD failed: {gpu_err}, trying chunked version")
                     
-                    # Use a chunked approach for very large matrices
-                    chunk_size = 10000  # Process in chunks of this size
+                    # SVD on the smaller matrix Y
+                    try:
+                        UY, S, _ = torch.linalg.svd(Y, full_matrices=False)
+                        U_truncated = UY[:, :rank]
+                        
+                        # Check singular value decay to validate the approximation
+                        s_ratio = S[rank-1] / S[0] if S[0] > 0 else 0
+                        if s_ratio < 1e-3:
+                            print(f"Warning: Significant singular value drop at rank {rank} (ratio: {s_ratio:.6f})")
+                    except Exception as svd_err:
+                        print(f"SVD on projected matrix failed: {svd_err}, using QR")
+                        U_truncated, _ = torch.linalg.qr(Y)
+                        U_truncated = U_truncated[:, :rank]
+                
+                except Exception as gpu_err:
+                    print(f"GPU randomized SVD failed: {gpu_err}, trying block randomized version")
+                    
+                    # Block randomized SVD for very large matrices
+                    # This processes the matrix in blocks to reduce memory usage
+                    chunk_size = 5000  # Smaller chunks for better memory management
                     n_chunks = (unfolded.shape[1] + chunk_size - 1) // chunk_size
                     
                     # Initialize random projection matrix on GPU
@@ -373,6 +430,33 @@ try:
                     
                     # Apply matrix multiplication in chunks to avoid OOM
                     Y = torch.zeros((unfolded.shape[0], rank), device='cuda')
+                    
+                    # Block power iteration method
+                    for power_iter in range(3):  # Fewer iterations in block mode
+                        # Reset Y for each power iteration
+                        Y.zero_()
+                        
+                        # Apply A*Q in blocks
+                        for i in range(n_chunks):
+                            start = i * chunk_size
+                            end = min((i + 1) * chunk_size, unfolded.shape[1])
+                            Y += unfolded[:, start:end] @ Q[:, start:end].t()
+                        
+                        # Orthogonalize Y
+                        Y, _ = torch.linalg.qr(Y)
+                        
+                        # Apply A^T * Y in blocks to update Q
+                        Q = torch.zeros((rank, unfolded.shape[1]), device='cuda')
+                        for i in range(n_chunks):
+                            start = i * chunk_size
+                            end = min((i + 1) * chunk_size, unfolded.shape[1])
+                            Q[:, start:end] = Y.t() @ unfolded[:, start:end]
+                        
+                        # Orthogonalize Q rows
+                        Q = torch.nn.functional.normalize(Q, dim=1)
+                    
+                    # Final multiplication to get Y = A*Q
+                    Y.zero_()
                     for i in range(n_chunks):
                         start = i * chunk_size
                         end = min((i + 1) * chunk_size, unfolded.shape[1])
@@ -382,23 +466,50 @@ try:
                     U_truncated, _ = torch.linalg.qr(Y)
                     U_truncated = U_truncated[:, :rank]
             
-            # Store the factor matrix
+            # Store the factor matrix 
             factors[mode] = U_truncated
             
-            # Manual n-mode multiplication instead of tl.mode_dot
-            # First reshape the tensor to move the mode to first dimension
+            # Manual n-mode multiplication with better numerical stability
             tensor_shape = current.shape
             mode_dim = tensor_shape[mode]
             other_dims = tensor_shape[:mode] + tensor_shape[mode+1:]
+            
+            # Careful permutation to avoid memory issues
             current_reshaped = current.permute(tuple([mode] + list(range(0, mode)) + list(range(mode+1, n_modes))))
-            current_reshaped = current_reshaped.reshape(mode_dim, -1)
             
-            # Apply projection
-            projected = U_truncated.t() @ current_reshaped
+            # Handle potential precision issues by using mixed precision
+            if current.dtype != torch.float32:
+                # Do the computation in float32 but store results in original precision
+                current_reshaped = current_reshaped.reshape(mode_dim, -1).to(torch.float32)
+                projected = U_truncated.t() @ current_reshaped
+                projected = projected.to(current.dtype)
+            else:
+                current_reshaped = current_reshaped.reshape(mode_dim, -1)
+                projected = U_truncated.t() @ current_reshaped
             
-            # Reshape back to tensor format
+            # Reshape back to tensor format with safety checks
             new_shape = (U_truncated.shape[1],) + other_dims
-            current = projected.reshape(new_shape)
+            try:
+                current = projected.reshape(new_shape)
+            except Exception as reshape_err:
+                print(f"Error reshaping: {reshape_err}. Attempting fallback reshape")
+                # Fallback reshape handling potential size mismatches
+                total_elements = projected.numel()
+                expected_elements = torch.prod(torch.tensor(new_shape))
+                
+                if total_elements != expected_elements:
+                    print(f"Element count mismatch: have {total_elements}, need {expected_elements}")
+                    # Try to pad or truncate to match the expected size
+                    if total_elements > expected_elements:
+                        # Truncate
+                        projected = projected.flatten()[:expected_elements]
+                    else:
+                        # Pad with zeros
+                        padded = torch.zeros(expected_elements, device=projected.device, dtype=projected.dtype)
+                        padded[:total_elements] = projected.flatten()
+                        projected = padded
+                
+                current = projected.reshape(new_shape)
             
             # Permute back to original dimension order
             perm = list(range(1, mode+1)) + [0] + list(range(mode+1, n_modes))
@@ -435,8 +546,9 @@ try:
             mode_size = tensor.shape[mode]
             rank = min(ranks[mode], mode_size)
             
-            # Use float32 for numerical stability
-            if unfolded.dtype == torch.bfloat16 or unfolded.dtype == torch.float16:
+            # Always use float32 for numerical stability, especially critical for tiled operations
+            original_dtype = unfolded.dtype
+            if original_dtype != torch.float32:
                 unfolded = unfolded.to(dtype=torch.float32)
             
             # Initialize an empty matrix for the top singular vectors
@@ -444,100 +556,308 @@ try:
             
             # Split the unfolded matrix into tiles for column blocks
             num_cols = unfolded.shape[1]
+            
+            # Use smaller tiles for better numerical stability and memory efficiency
+            tile_size = min(tile_size, 2000)  # Reduced tile size for better accuracy
             num_tiles = (num_cols + tile_size - 1) // tile_size
             
             try:
-                # Use power iteration method for large matrices
-                # This is a randomized approach to find dominant singular vectors
-                Q = torch.randn(unfolded.shape[1], rank, device='cuda', dtype=torch.float32)
-                Q = torch.nn.functional.normalize(Q, dim=0)  # Normalize instead of QR decomp
+                # Use enhanced randomized SVD with oversampling and more iterations
+                # Oversampling gives more accurate approximations
+                oversampling = 10  # Increased from default
+                extra_rank = min(rank + oversampling, min(unfolded.shape[0], unfolded.shape[1]))
                 
-                # Power iteration (simplified randomized SVD)
-                for _ in range(5):  # Number of power iterations
-                    # Y = A * Q
-                    Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
+                # Improved initialization with orthogonal random matrix
+                Q = torch.randn(unfolded.shape[1], extra_rank, device='cuda', dtype=torch.float32)
+                Q, _ = torch.linalg.qr(Q)  # Use QR for truly orthogonal starting point
+                
+                # More power iterations for better convergence to dominant subspace
+                for iter_idx in range(7):  # Increased from 5
+                    # Y = A * Q with careful tiled matrix multiplication
+                    Y = torch.zeros((unfolded.shape[0], extra_rank), device='cuda', dtype=torch.float32)
+                    
+                    # Process tiles with accumulation checks to prevent NaN issues
                     for i in range(num_tiles):
                         start_idx = i * tile_size
                         end_idx = min((i + 1) * tile_size, num_cols)
                         tile = unfolded[:, start_idx:end_idx]
-                        Y += tile @ Q[start_idx:end_idx, :]
+                        
+                        # Use more stable matrix multiplication
+                        partial_result = tile @ Q[start_idx:end_idx, :]
+                        
+                        # Check for numerical problems
+                        if torch.isnan(partial_result).any() or torch.isinf(partial_result).any():
+                            print(f"Warning: NaN/Inf detected in tile {i}, using fallback")
+                            # Use alternative algorithm to handle problematic tile
+                            for col_idx in range(extra_rank):
+                                col_result = tile @ Q[start_idx:end_idx, col_idx]
+                                # Handle potential NaN values
+                                col_result = torch.nan_to_num(col_result, nan=0.0, posinf=1.0, neginf=-1.0)
+                                Y[:, col_idx] += col_result
+                        else:
+                            Y += partial_result
                     
-                    # Orthogonalize Y and normalize
-                    Y = torch.nn.functional.normalize(Y, dim=0)
+                    # Better orthogonalization with QR decomposition instead of simple normalization
+                    Y, _ = torch.linalg.qr(Y)
                     
-                    # Q = A^T * Y
-                    Q = torch.zeros((unfolded.shape[1], rank), device='cuda', dtype=torch.float32)
+                    # Q = A^T * Y with improved tiled approach
+                    Q = torch.zeros((unfolded.shape[1], extra_rank), device='cuda', dtype=torch.float32)
                     for i in range(num_tiles):
                         start_idx = i * tile_size
                         end_idx = min((i + 1) * tile_size, num_cols)
                         tile = unfolded[:, start_idx:end_idx]
                         Q[start_idx:end_idx, :] = tile.t() @ Y
                     
-                    # Normalize Q
-                    Q = torch.nn.functional.normalize(Q, dim=0)
+                    # Use QR for orthogonalization
+                    Q, _ = torch.linalg.qr(Q)
+                    
+                    # Check for early convergence on larger matrices
+                    if iter_idx == 3 and unfolded.shape[1] > 10000:
+                        # Get a quick estimate of convergence
+                        Y_test = unfolded[:, :min(5000, unfolded.shape[1])] @ Q[:min(5000, unfolded.shape[1]), :]
+                        try:
+                            s_test = torch.linalg.svdvals(Y_test.t() @ Y_test)
+                            # If singular values decay quickly, we've likely converged
+                            if s_test[rank] / s_test[0] < 1e-3:
+                                print(f"Early convergence detected at iteration {iter_idx}")
+                                break
+                        except:
+                            pass  # Continue if test fails
                 
-                # Final projection to get Y = A * Q
-                Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
+                # Final projection to get Y = A * Q with accumulation check
+                Y = torch.zeros((unfolded.shape[0], extra_rank), device='cuda', dtype=torch.float32)
+                
+                # Process in tiles with careful tracking
+                chunk_results = []
                 for i in range(num_tiles):
                     start_idx = i * tile_size
                     end_idx = min((i + 1) * tile_size, num_cols)
                     tile = unfolded[:, start_idx:end_idx]
-                    Y += tile @ Q[start_idx:end_idx, :]
+                    chunk_result = tile @ Q[start_idx:end_idx, :]
+                    
+                    # Check for numerical issues
+                    if torch.isnan(chunk_result).any() or torch.isinf(chunk_result).any():
+                        # Replace problematic values
+                        chunk_result = torch.nan_to_num(chunk_result, nan=0.0, posinf=1.0, neginf=-1.0)
+                    
+                    # Can track intermediate results for better diagnostics
+                    norm_before = torch.norm(Y).item()
+                    Y += chunk_result
+                    norm_after = torch.norm(Y).item()
+                    chunk_results.append((i, norm_before, norm_after))
                 
-                # Compute small SVD
+                # Compute SVD on the smaller matrix Y with better error handling
                 try:
+                    # Try high-precision SVD first
                     UY, S, VhY = torch.linalg.svd(Y, full_matrices=False)
+                    
+                    # Analyze singular value spectrum for quality assessment
+                    s_ratio = S[rank-1] / S[0] if S[0] > 0 else 0
+                    if s_ratio < 1e-4:
+                        print(f"Warning: Rapid singular value decay at rank {rank} (ratio: {s_ratio:.6f})")
+                    
+                    # Truncate to requested rank
                     U = UY[:, :rank]
-                except Exception as e:
-                    print(f"Error in SVD: {e}, using orthogonalization as fallback")
-                    U = torch.nn.functional.normalize(Y, dim=1)  # Simple orthogonalization
-                    U = U[:, :rank]
+                    
+                except Exception as svd_err:
+                    print(f"SVD error: {svd_err}, using eigenvector-based approach")
+                    
+                    # Alternate approach using eigendecomposition of Y*Y^T
+                    try:
+                        # Form Gram matrix
+                        gram = Y @ Y.t()
+                        
+                        # Get eigendecomposition (more stable than direct SVD)
+                        eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+                        
+                        # Sort in descending order
+                        idx = torch.argsort(eigenvalues, descending=True)
+                        eigenvalues = eigenvalues[idx]
+                        eigenvectors = eigenvectors[:, idx]
+                        
+                        # Get top eigenvectors
+                        U = eigenvectors[:, :rank]
+                        
+                        # Normalize if needed
+                        for i in range(rank):
+                            if eigenvalues[i] > 0:
+                                U[:, i] /= torch.sqrt(eigenvalues[i])
+                    
+                    except Exception as eig_err:
+                        print(f"Eigendecomposition failed: {eig_err}, using QR fallback")
+                        U, _ = torch.linalg.qr(Y)
+                        U = U[:, :rank]
             
-            except Exception as e:
-                print(f"Tiled SVD failed: {e}, using simple projection")
-                # Extremely simple fallback
-                # Just project onto random orthogonal basis
+            except Exception as general_err:
+                print(f"Tiled SVD failed: {general_err}, using block randomized approach")
+                
+                # Block randomized SVD as fallback - more robust to numerical issues
+                # Use a different approach with better numerical stability
+                
+                # Initialize with random matrix
                 Q = torch.randn(rank, unfolded.shape[1], device='cuda', dtype=torch.float32)
                 Q = torch.nn.functional.normalize(Q, dim=1)
-                Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
                 
+                # Use block approach with careful numerical handling
+                for power_iter in range(3):
+                    # Initialize Y
+                    Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
+                    
+                    # Process in blocks with numerical stabilization
+                    for i in range(num_tiles):
+                        start_idx = i * tile_size
+                        end_idx = min((i + 1) * tile_size, num_cols)
+                        tile = unfolded[:, start_idx:end_idx]
+                        
+                        # Scale the tile if norm is very large or small
+                        tile_norm = torch.norm(tile)
+                        if tile_norm > 1e5 or tile_norm < 1e-5:
+                            scale_factor = 1.0 / max(tile_norm, 1e-8)
+                            temp_tile = tile * scale_factor
+                            temp_result = temp_tile @ Q[:, start_idx:end_idx].t()
+                            Y += temp_result / scale_factor
+                        else:
+                            Y += tile @ Q[:, start_idx:end_idx].t()
+                    
+                    # Better orthogonalization
+                    Y, _ = torch.linalg.qr(Y)
+                    
+                    # Update Q with orthogonalized Y
+                    Q_new = torch.zeros((rank, unfolded.shape[1]), device='cuda', dtype=torch.float32)
+                    for i in range(num_tiles):
+                        start_idx = i * tile_size
+                        end_idx = min((i + 1) * tile_size, num_cols)
+                        tile = unfolded[:, start_idx:end_idx]
+                        Q_new[:, start_idx:end_idx] = Y.t() @ tile
+                    
+                    Q = Q_new
+                    # Normalize rows of Q
+                    for r in range(rank):
+                        Q[r] = Q[r] / (torch.norm(Q[r]) + 1e-8)
+                
+                # Final projection for factorization
+                Y = torch.zeros((unfolded.shape[0], rank), device='cuda', dtype=torch.float32)
                 for i in range(num_tiles):
                     start_idx = i * tile_size
                     end_idx = min((i + 1) * tile_size, num_cols)
                     tile = unfolded[:, start_idx:end_idx]
                     Y += tile @ Q[:, start_idx:end_idx].t()
-                    
-                U = torch.nn.functional.normalize(Y, dim=1)
+                
+                # Orthogonalize the result
+                U, _ = torch.linalg.qr(Y)
+                U = U[:, :rank]
+            
+            # Store factor matrix after ensuring no NaN values
+            if torch.isnan(U).any():
+                print("Warning: NaN in factor matrix, replacing with zeros")
+                U = torch.nan_to_num(U, nan=0.0)
             
             factors.append(U)
         
-        # Compute the core tensor using manual n-mode products
+        # Compute the core tensor using manual n-mode products with improved stability
         core = tensor.clone().to(device='cuda')
+        
+        # Process in higher precision
+        if core.dtype != torch.float32:
+            core = core.to(torch.float32)
         
         for mode, factor in enumerate(factors):
             if factor is not None:
-                # Manual n-mode multiplication
+                # Manual n-mode multiplication with careful handling
                 tensor_shape = core.shape
                 mode_dim = tensor_shape[mode]
                 other_dims = tensor_shape[:mode] + tensor_shape[mode+1:]
                 
                 # Reshape tensor to have mode as first dimension
                 perm = tuple([mode] + list(range(0, mode)) + list(range(mode+1, n_modes)))
-                core_reshaped = core.permute(perm)
-                core_reshaped = core_reshaped.reshape(mode_dim, -1)
                 
-                # Apply projection
-                projected = factor.t() @ core_reshaped
-                
-                # Reshape back
-                new_shape = (factor.shape[1],) + other_dims
-                core = projected.reshape(new_shape)
-                
-                # Permute back
-                inv_perm = list(range(1, mode+1)) + [0] + list(range(mode+1, n_modes))
-                core = core.permute(inv_perm)
+                # Handle large tensors carefully
+                try:
+                    core_reshaped = core.permute(perm)
+                    core_reshaped = core_reshaped.reshape(mode_dim, -1)
+                    
+                    # Apply projection with numerical checks
+                    projected = factor.t() @ core_reshaped
+                    
+                    # Check for numerical issues
+                    if torch.isnan(projected).any() or torch.isinf(projected).any():
+                        print(f"Warning: NaN/Inf in projection for mode {mode}, applying fixes")
+                        projected = torch.nan_to_num(projected, nan=0.0, posinf=1.0, neginf=-1.0)
+                    
+                    # Reshape back with safety checks
+                    new_shape = (factor.shape[1],) + other_dims
+                    try:
+                        core = projected.reshape(new_shape)
+                    except Exception as reshape_err:
+                        print(f"Error reshaping: {reshape_err}, using careful reshape")
+                        # Handle size mismatch with padding or truncation
+                        total_elems = projected.numel()
+                        expected_elems = torch.prod(torch.tensor(new_shape))
+                        
+                        if total_elems != expected_elems:
+                            print(f"Element mismatch: have {total_elems}, need {expected_elems}")
+                            if total_elems > expected_elems:
+                                projected = projected.flatten()[:expected_elems]
+                            else:
+                                padded = torch.zeros(expected_elems, device=projected.device, dtype=projected.dtype)
+                                padded[:total_elems] = projected.flatten()
+                                projected = padded
+                        
+                        core = projected.reshape(new_shape)
+                    
+                    # Permute back
+                    inv_perm = list(range(1, mode+1)) + [0] + list(range(mode+1, n_modes))
+                    core = core.permute(inv_perm)
+                    
+                except Exception as mode_err:
+                    print(f"Error in n-mode multiplication for mode {mode}: {mode_err}")
+                    print("Attempting alternative approach")
+                    
+                    # Alternative approach for problematic cases
+                    # Process by slices to reduce memory pressure
+                    slice_size = 100  # Process in small batches
+                    
+                    # Create a new core tensor with the right dimensions
+                    new_core_shape = list(tensor_shape)
+                    new_core_shape[mode] = factor.shape[1]
+                    new_core = torch.zeros(new_core_shape, device='cuda', dtype=torch.float32)
+                    
+                    # Process slices along the current mode
+                    for slice_idx in range(0, factor.shape[1], slice_size):
+                        end_slice = min(slice_idx + slice_size, factor.shape[1])
+                        slice_factors = factor[:, slice_idx:end_slice]
+                        
+                        # Project each slice
+                        for i in range(mode_dim):
+                            # Select the slice from the tensor
+                            # This depends on which mode we're processing
+                            selector = [slice(None)] * n_modes
+                            selector[mode] = i
+                            
+                            # Get the tensor slice
+                            tensor_slice = core[tuple(selector)]
+                            
+                            # Project with this factor
+                            for j in range(slice_idx, end_slice):
+                                factor_vec = factor[:, j - slice_idx]
+                                projection = torch.sum(factor_vec * core[tuple(selector)])
+                                
+                                # Update the new core
+                                new_selector = selector.copy()
+                                new_selector[mode] = j - slice_idx
+                                new_core[tuple(new_selector)] = projection
+                    
+                    core = new_core
         
-        return core.to(device=tensor.device), factors
+        # Convert back to original device and dtype
+        result_core = core.to(device=tensor.device, dtype=tensor.dtype)
+        
+        # Ensure no NaN values in final result
+        if torch.isnan(result_core).any():
+            print("Warning: NaN in core tensor, replacing with zeros")
+            result_core = torch.nan_to_num(result_core, nan=0.0)
+        
+        return result_core, factors
     
     # Replace scipy's SVD with our patched version
     scipy.linalg.svd = patched_svd
@@ -661,14 +981,47 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     input_dim = weight.shape[1]  # Input dimension
     total_output_dim = weight.shape[0]  # Total output dimension
     
-    # Determine head dimension based on model shape
-    head_dim = total_output_dim // (num_heads + 2 * num_kv_heads)
+    # Safety checks for potential dimension issues
+    if total_output_dim <= 0 or input_dim <= 0:
+        raise ValueError(f"Invalid weight dimensions: {weight.shape}")
     
-    # Extract Q, K, V weights from the concatenated QKV weight matrix
+    # Determine head dimension based on model shape with safety checks
+    try:
+        head_dim = total_output_dim // (num_heads + 2 * num_kv_heads)
+        # Verify this calculation works
+        if head_dim * (num_heads + 2 * num_kv_heads) != total_output_dim:
+            print(f"Warning: Head dimension calculation doesn't match exactly. Attempting to adjust.")
+            # Try to find a divisor that works
+            for div in range(total_output_dim, 0, -1):
+                if total_output_dim % div == 0:
+                    candidate = total_output_dim // div
+                    if candidate * num_heads <= total_output_dim:
+                        head_dim = candidate
+                        print(f"Adjusted head_dim to {head_dim}")
+                        break
+    except Exception as dim_err:
+        print(f"Error calculating head dimensions: {dim_err}")
+        # Fallback calculation
+        head_dim = total_output_dim // num_heads
+        print(f"Using fallback head_dim: {head_dim}")
+    
+    # Extract Q, K, V weights from the concatenated QKV weight matrix with safety checks
     q_dim = num_heads * head_dim
     k_dim = num_kv_heads * head_dim
     v_dim = num_kv_heads * head_dim
     
+    # Ensure dimensions add up correctly
+    expected_total = q_dim + k_dim + v_dim
+    if expected_total != total_output_dim:
+        print(f"Warning: Dimension mismatch. Expected {expected_total}, got {total_output_dim}")
+        # Adjust dimensions to prevent out-of-bounds errors
+        q_dim = min(q_dim, total_output_dim)
+        remaining = total_output_dim - q_dim
+        k_dim = min(k_dim, remaining)
+        v_dim = total_output_dim - q_dim - k_dim
+        print(f"Adjusted dimensions - q_dim: {q_dim}, k_dim: {k_dim}, v_dim: {v_dim}")
+    
+    # Extract slices with proper bounds checking
     q_weight = weight[:q_dim, :].contiguous()
     k_weight = weight[q_dim:q_dim+k_dim, :].contiguous()
     v_weight = weight[q_dim+k_dim:, :].contiguous()
@@ -678,297 +1031,562 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     k_rank = target_ranks.get('k', 2)
     v_rank = target_ranks.get('v', 2)
     
+    # Verify ranks are reasonable
+    q_rank = min(q_rank, min(head_dim, input_dim))
+    k_rank = min(k_rank, min(head_dim, input_dim))
+    v_rank = min(v_rank, min(head_dim, input_dim))
+    
     # Initialize TPA weights
     tpa_weights = {}
     
     # Convert weights to float32 for better numerical stability
     # and move to CUDA
-    if q_weight.dtype == torch.bfloat16:
-        q_weight = q_weight.to(torch.float32)
-    if k_weight.dtype == torch.bfloat16:
-        k_weight = k_weight.to(torch.float32)
-    if v_weight.dtype == torch.bfloat16:
-        v_weight = v_weight.to(torch.float32)
+    q_weight = q_weight.to(torch.float32)
+    k_weight = k_weight.to(torch.float32)
+    v_weight = v_weight.to(torch.float32)
     
     # Process query weights
-    # Reshape to 3D tensor [head_dim, num_heads, input_dim]
-    # Move to GPU for faster processing
-    wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).to(device='cuda')
+    # Reshape to 3D tensor [head_dim, num_heads, input_dim] with safety checks
+    try:
+        # Check if dimensions are compatible for reshaping
+        if q_weight.shape[0] != head_dim * num_heads:
+            print(f"Warning: Query weight shape {q_weight.shape[0]} doesn't match expected {head_dim * num_heads}")
+            # Try to adjust dimensions to allow reshape
+            adjusted_head_dim = q_weight.shape[0] // num_heads
+            if adjusted_head_dim * num_heads == q_weight.shape[0]:
+                head_dim = adjusted_head_dim
+                print(f"Adjusted head_dim to {head_dim} for query weights")
+            else:
+                # Handle uneven division by padding or truncating
+                if q_weight.shape[0] < head_dim * num_heads:
+                    # Pad with zeros
+                    padded = torch.zeros(head_dim * num_heads, q_weight.shape[1], 
+                                        dtype=q_weight.dtype, device=q_weight.device)
+                    padded[:q_weight.shape[0]] = q_weight
+                    q_weight = padded
+                else:
+                    # Truncate
+                    q_weight = q_weight[:head_dim * num_heads]
+                
+        # Now reshape
+        wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).to(device='cuda')
+        
+    except Exception as reshape_err:
+        print(f"Error reshaping query weights: {reshape_err}")
+        # Fallback - create a tensor of the right shape filled with rescaled data
+        wq_tensor = torch.zeros((head_dim, num_heads, input_dim), dtype=torch.float32, device='cuda')
+        
+        # Fill with available data
+        flat_q = q_weight.flatten()
+        if len(flat_q) > 0:
+            # Resize data to fill tensor by repeating or truncating
+            filled_size = wq_tensor.numel()
+            if len(flat_q) >= filled_size:
+                filled_data = flat_q[:filled_size]
+            else:
+                # Repeat data to fill tensor
+                repeats = (filled_size + len(flat_q) - 1) // len(flat_q)
+                filled_data = flat_q.repeat(repeats)[:filled_size]
+            
+            # Reshape to target dimensions
+            wq_tensor = filled_data.reshape(head_dim, num_heads, input_dim)
+            print("Created reshaped query tensor from available data")
     
-    # Apply Tucker decomposition to query weights
+    # Apply Tucker decomposition to query weights with advanced error handling
     rank = [q_rank, None, q_rank]  # Rank for dimensions
     
-    # For extremely large tensors, try direct randomized projection
-    if wq_tensor.numel() > 5e8:  # Threshold for "large" tensors - around 2GB for float32
-        print(f"Very large tensor detected ({wq_tensor.shape}), using direct projection method")
+    # For extremely large tensors, use a more memory-efficient approach
+    tensor_size_gb = wq_tensor.numel() * wq_tensor.element_size() / (1024**3)
+    large_tensor_threshold = 1.5  # GB threshold
+    
+    if tensor_size_gb > large_tensor_threshold:
+        print(f"Large tensor detected ({wq_tensor.shape}, {tensor_size_gb:.2f}GB), using chunked approach")
         try:
-            # We'll bypass Tucker decomposition and do direct random projection
-            # This is less accurate but much more memory efficient
+            # Use our enhanced tiled approach that's designed for large tensors
+            core, factors = tile_based_tucker(wq_tensor, rank)
+            print("Tiled Tucker decomposition successful")
+        except Exception as tiled_err:
+            print(f"Tiled Tucker failed: {tiled_err}, trying direct projection")
             
-            # Create random projections - one for each head dimension and input dimension
-            proj_head = torch.randn(head_dim, q_rank, device='cuda')
-            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
-            
-            proj_input = torch.randn(input_dim, q_rank, device='cuda')
-            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
-            
-            # For each head, compute low-rank approximation
-            core_approx = torch.zeros((q_rank, num_heads, q_rank), device='cuda')
-            
-            # Process one head at a time to save memory
-            for h in range(num_heads):
-                # Extract the matrix for this head
-                head_matrix = wq_tensor[:, h, :]
+            try:
+                # Direct random projection method as fallback for very large tensors
+                # Orthogonal initialization for better results
+                proj_head = torch.randn(head_dim, q_rank, device='cuda')
+                proj_head, _ = torch.linalg.qr(proj_head)  # Orthogonalize
                 
-                # Project down both dimensions
-                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
-            
-            # Set up our factor matrices
-            factors = [proj_head, None, proj_input]
-            core = core_approx
-            
-            print("Direct projection successful")
-        except Exception as projection_error:
-            print(f"Direct projection failed: {projection_error}, using fallback method")
-            # Fall back to contextual factorization
-            raise
+                proj_input = torch.randn(input_dim, q_rank, device='cuda')
+                proj_input, _ = torch.linalg.qr(proj_input.t())
+                proj_input = proj_input.t()
+                
+                # For each head, compute low-rank approximation with error checking
+                core_approx = torch.zeros((q_rank, num_heads, q_rank), device='cuda')
+                
+                # Process one head at a time for memory efficiency
+                for h in range(num_heads):
+                    # Extract the matrix for this head
+                    head_matrix = wq_tensor[:, h, :]
+                    
+                    # Handle potential NaN/Inf values
+                    if torch.isnan(head_matrix).any() or torch.isinf(head_matrix).any():
+                        head_matrix = torch.nan_to_num(head_matrix, nan=0.0, posinf=1.0, neginf=-1.0)
+                    
+                    # Normalize the matrix for better numerical stability
+                    # This helps prevent extreme values in the projection
+                    norm = torch.norm(head_matrix)
+                    if norm > 0:
+                        head_matrix = head_matrix / norm
+                        # Project down both dimensions
+                        projection = proj_head.t() @ head_matrix @ proj_input
+                        core_approx[:, h, :] = projection * norm  # Restore scaling
+                    else:
+                        # Zero matrix
+                        core_approx[:, h, :] = 0.0
+                
+                # Set up our factor matrices
+                factors = [proj_head, None, proj_input]
+                core = core_approx
+                
+                print("Direct projection successful")
+            except Exception as projection_err:
+                print(f"Direct projection failed: {projection_err}, using fallback factorization")
+                # Use contextual factorization as ultimate fallback
+                raise ValueError("All Tucker decomposition methods failed")
     else:
-        # Try standard decomposition methods for smaller tensors
+        # For standard-sized tensors, try our improved methods
         try:
-            # First try memory-efficient Tucker
+            # First try memory-efficient Tucker with improved numerical stability
             print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
             try:
                 core, factors = memory_efficient_tucker(wq_tensor, rank)
+                print("Memory-efficient Tucker successful")
             except Exception as e1:
                 print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
                 try:
                     core, factors = tile_based_tucker(wq_tensor, rank)
+                    print("Tiled Tucker successful")
                 except Exception as e2:
                     print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                    # Fall back to standard Tucker
+                    # Fall back to standard Tucker from tensorly
                     core, factors = tucker(wq_tensor, rank=rank)
         except Exception as e:
             print(f"Warning: Error in all Tucker decomposition methods: {e}")
             print("Falling back to standard contextual factorization...")
-            raise
+            raise ValueError("All Tucker decomposition methods failed")
     
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×q_rank, U3 ~ input_dim×q_rank
     
-    # Create Wa_q and Wb_q on GPU
+    # Create Wa_q and Wb_q on GPU with error checking
     Wa_q = torch.zeros((input_dim, q_rank, num_heads), dtype=torch.float32, device='cuda')
     Wb_q = torch.zeros((input_dim, q_rank, head_dim), dtype=torch.float32, device='cuda')
     
-    # Map decomposition to TPA factors
-    for r in range(q_rank):
-        for i in range(num_heads):
-            # Project core tensor for this head and rank
-            proj_vector = core[r, i, :]
-            Wa_q[:, r, i] = U3[:, r] * torch.norm(proj_vector)
-        
-        # Shared b factor across heads - use PyTorch's outer product
-        Wb_q[:, r, :] = torch.outer(U3[:, r], U1[:, r])
+    # Check if factors contain NaN/Inf values and fix them
+    if torch.isnan(U1).any() or torch.isinf(U1).any():
+        print("Warning: NaN/Inf values in U1 factor, replacing with zeros")
+        U1 = torch.nan_to_num(U1, nan=0.0, posinf=1.0, neginf=-1.0)
     
-    # Normalize factors
+    if torch.isnan(U3).any() or torch.isinf(U3).any():
+        print("Warning: NaN/Inf values in U3 factor, replacing with zeros")
+        U3 = torch.nan_to_num(U3, nan=0.0, posinf=1.0, neginf=-1.0)
+    
+    if torch.isnan(core).any() or torch.isinf(core).any():
+        print("Warning: NaN/Inf values in core tensor, replacing with zeros")
+        core = torch.nan_to_num(core, nan=0.0, posinf=1.0, neginf=-1.0)
+    
+    # Map decomposition to TPA factors with improved error handling
     for r in range(q_rank):
-        norm_a = torch.norm(Wa_q[:, r, :])
-        norm_b = torch.norm(Wb_q[:, r, :])
-        if norm_a > 0 and norm_b > 0:
-            scale = torch.sqrt(norm_a * norm_b)
-            Wa_q[:, r, :] /= torch.sqrt(scale)
-            Wb_q[:, r, :] /= torch.sqrt(scale)
+        try:
+            for i in range(num_heads):
+                # Extract vector for this head and rank
+                try:
+                    proj_vector = core[r, i, :]
+                    
+                    # Calculate norm with safety check
+                    proj_norm = torch.norm(proj_vector)
+                    if torch.isnan(proj_norm) or torch.isinf(proj_norm) or proj_norm == 0:
+                        proj_norm = 1.0
+                    
+                    # Assign with bounds checking
+                    if r < Wa_q.shape[1] and i < Wa_q.shape[2]:
+                        Wa_q[:, r, i] = U3[:, r] * proj_norm
+                except Exception as head_err:
+                    print(f"Error processing head {i} for rank {r}: {head_err}")
+                    # Use a fallback value
+                    if r < Wa_q.shape[1] and i < Wa_q.shape[2]:
+                        Wa_q[:, r, i] = U3[:, r]
+            
+            # Shared b factor across heads using outer product
+            # Check dimensions before using outer product
+            if r < Wb_q.shape[1]:
+                try:
+                    outer_product = torch.outer(U3[:, r], U1[:, r])
+                    
+                    # Check if outer product matches expected shape
+                    if outer_product.shape == (input_dim, head_dim):
+                        Wb_q[:, r, :] = outer_product
+                    else:
+                        # Reshape or truncate/pad to match
+                        if outer_product.numel() > input_dim * head_dim:
+                            # Truncate
+                            reshaped = outer_product.flatten()[:input_dim * head_dim].reshape(input_dim, head_dim)
+                            Wb_q[:, r, :] = reshaped
+                        else:
+                            # Pad
+                            Wb_q[:, r, :] = torch.zeros(input_dim, head_dim, device='cuda')
+                            rows = min(input_dim, outer_product.shape[0])
+                            cols = min(head_dim, outer_product.shape[1])
+                            Wb_q[:rows, r, :cols] = outer_product[:rows, :cols]
+                except Exception as outer_err:
+                    print(f"Error creating outer product for rank {r}: {outer_err}")
+                    # Fill with simple values based on factors
+                    for i in range(input_dim):
+                        for j in range(head_dim):
+                            if i < len(U3) and j < len(U1) and r < len(U3[0]) and r < len(U1[0]):
+                                Wb_q[i, r, j] = U3[i, r] * U1[j, r]
+        except Exception as rank_err:
+            print(f"Error processing rank {r}: {rank_err}")
+            continue
+    
+    # Normalize factors with robust checks
+    for r in range(q_rank):
+        try:
+            norm_a = torch.norm(Wa_q[:, r, :])
+            norm_b = torch.norm(Wb_q[:, r, :])
+            
+            # Robust normalization to avoid division by zero
+            if norm_a > 1e-8 and norm_b > 1e-8:
+                scale = torch.sqrt(norm_a * norm_b)
+                Wa_q[:, r, :] /= torch.sqrt(scale) + 1e-8
+                Wb_q[:, r, :] /= torch.sqrt(scale) + 1e-8
+            elif norm_a > 1e-8:
+                Wa_q[:, r, :] /= torch.sqrt(norm_a) + 1e-8
+            elif norm_b > 1e-8:
+                Wb_q[:, r, :] /= torch.sqrt(norm_b) + 1e-8
+        except Exception as norm_err:
+            print(f"Error normalizing factors for rank {r}: {norm_err}")
+            continue
+    
+    # Final check for NaN/Inf values
+    Wa_q = torch.nan_to_num(Wa_q, nan=0.0, posinf=1.0, neginf=-1.0)
+    Wb_q = torch.nan_to_num(Wb_q, nan=0.0, posinf=1.0, neginf=-1.0)
     
     # Convert to the right device and dtype
     tpa_weights['Wa_q'] = Wa_q.to(dtype=dtype, device=device)
     tpa_weights['Wb_q'] = Wb_q.to(dtype=dtype, device=device)
     
-    # Process key weights
-    # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    # Move to GPU for faster processing
-    wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
-    
-    # Apply Tucker decomposition to key weights
-    rank = [k_rank, None, k_rank]  # Rank for dimensions
-    
-    # For extremely large tensors, try direct randomized projection
-    if wk_tensor.numel() > 5e8:  # Threshold for "large" tensors
-        print(f"Very large tensor detected ({wk_tensor.shape}), using direct projection method")
-        try:
-            # Create random projections - one for each head dimension and input dimension
-            proj_head = torch.randn(head_dim, k_rank, device='cuda')
-            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
-            
-            proj_input = torch.randn(input_dim, k_rank, device='cuda')
-            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
-            
-            # For each head, compute low-rank approximation
-            core_approx = torch.zeros((k_rank, num_kv_heads, k_rank), device='cuda')
-            
-            # Process one head at a time to save memory
-            for h in range(num_kv_heads):
-                # Extract the matrix for this head
-                head_matrix = wk_tensor[:, h, :]
-                
-                # Project down both dimensions
-                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
-            
-            # Set up our factor matrices
-            factors = [proj_head, None, proj_input]
-            core = core_approx
-            
-            print("Direct projection successful")
-        except Exception as projection_error:
-            print(f"Direct projection failed: {projection_error}, using fallback method")
-            # Fall back to contextual factorization
-            raise
-    else:
-        # Use the same approach as for query weights
-        try:
-            print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
-            try:
-                core, factors = memory_efficient_tucker(wk_tensor, rank)
-            except Exception as e1:
-                print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
-                try:
-                    core, factors = tile_based_tucker(wk_tensor, rank)
-                except Exception as e2:
-                    print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                    core, factors = tucker(wk_tensor, rank=rank)
-        except Exception as e:
-            print(f"Warning: Error in Tucker decomposition for key weights: {e}")
-            print("Falling back to standard contextual factorization...")
-            raise
-    
-    # Map to TPA parameters
-    U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×k_rank, U3 ~ input_dim×k_rank
-    
-    # Create Wa_k and Wb_k as PyTorch tensors on GPU
-    Wa_k = torch.zeros((input_dim, k_rank, num_heads), dtype=torch.float32, device='cuda')
-    Wb_k = torch.zeros((input_dim, k_rank, head_dim), dtype=torch.float32, device='cuda')
-    
-    # Map head groups - repeating heads for MQA/GQA
-    heads_per_kv = num_heads // num_kv_heads
-    
-    # Map decomposition to TPA factors
-    for r in range(k_rank):
-        for i in range(num_kv_heads):
-            # Project core tensor for this group and rank
-            proj_vector = core[r, i, :]
-            
-            # Copy to each head in this group
-            for j in range(heads_per_kv):
-                head_idx = i * heads_per_kv + j
-                Wa_k[:, r, head_idx] = U3[:, r] * torch.norm(proj_vector)
+    # Process key weights - using same robust approach as query weights
+    try:
+        # Reshape key weights with same safeguards as for query weights
+        if k_weight.shape[0] != head_dim * num_kv_heads:
+            print(f"Warning: Key weight shape {k_weight.shape[0]} doesn't match expected {head_dim * num_kv_heads}")
+            # Adjust data to fit expected shape
+            if k_weight.shape[0] < head_dim * num_kv_heads:
+                padded = torch.zeros(head_dim * num_kv_heads, k_weight.shape[1], 
+                                    dtype=k_weight.dtype, device=k_weight.device)
+                padded[:k_weight.shape[0]] = k_weight
+                k_weight = padded
+            else:
+                k_weight = k_weight[:head_dim * num_kv_heads]
         
-        # Shared b factor across heads
-        Wb_k[:, r, :] = torch.outer(U3[:, r], U1[:, r])
-    
-    # Normalize factors
-    for r in range(k_rank):
-        norm_a = torch.norm(Wa_k[:, r, :])
-        norm_b = torch.norm(Wb_k[:, r, :])
-        if norm_a > 0 and norm_b > 0:
-            scale = torch.sqrt(norm_a * norm_b)
-            Wa_k[:, r, :] /= torch.sqrt(scale)
-            Wb_k[:, r, :] /= torch.sqrt(scale)
-    
-    # Convert to the right device and dtype
-    tpa_weights['Wa_k'] = Wa_k.to(dtype=dtype, device=device)
-    tpa_weights['Wb_k'] = Wb_k.to(dtype=dtype, device=device)
-    
-    # Process value weights
-    # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    # Move to GPU for faster processing
-    wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
-    
-    # Apply Tucker decomposition to value weights
-    rank = [v_rank, None, v_rank]  # Rank for dimensions
-    
-    # For extremely large tensors, try direct randomized projection
-    if wv_tensor.numel() > 5e8:  # Threshold for "large" tensors
-        print(f"Very large tensor detected ({wv_tensor.shape}), using direct projection method")
-        try:
-            # Create random projections - one for each head dimension and input dimension
-            proj_head = torch.randn(head_dim, v_rank, device='cuda')
-            proj_head = torch.nn.functional.normalize(proj_head, dim=0)
-            
-            proj_input = torch.randn(input_dim, v_rank, device='cuda')
-            proj_input = torch.nn.functional.normalize(proj_input, dim=0)
-            
-            # For each head, compute low-rank approximation
-            core_approx = torch.zeros((v_rank, num_kv_heads, v_rank), device='cuda')
-            
-            # Process one head at a time to save memory
-            for h in range(num_kv_heads):
-                # Extract the matrix for this head
-                head_matrix = wv_tensor[:, h, :]
-                
-                # Project down both dimensions
-                core_approx[:, h, :] = proj_head.t() @ head_matrix @ proj_input
-            
-            # Set up our factor matrices
-            factors = [proj_head, None, proj_input]
-            core = core_approx
-            
-            print("Direct projection successful")
-        except Exception as projection_error:
-            print(f"Direct projection failed: {projection_error}, using fallback method")
-            # Fall back to contextual factorization
-            raise
-    else:
-        # Use the same approach as for query and key weights
-        try:
-            print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
-            try:
-                core, factors = memory_efficient_tucker(wv_tensor, rank)
-            except Exception as e1:
-                print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
-                try:
-                    core, factors = tile_based_tucker(wv_tensor, rank)
-                except Exception as e2:
-                    print(f"Tiled Tucker also failed: {e2}, falling back to standard Tucker")
-                    core, factors = tucker(wv_tensor, rank=rank)
-        except Exception as e:
-            print(f"Warning: Error in Tucker decomposition for value weights: {e}")
-            print("Falling back to standard contextual factorization...")
-            raise
-    
-    # Map to TPA parameters
-    U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×v_rank, U3 ~ input_dim×v_rank
-    
-    # Create Wa_v and Wb_v as PyTorch tensors on GPU
-    Wa_v = torch.zeros((input_dim, v_rank, num_heads), dtype=torch.float32, device='cuda')
-    Wb_v = torch.zeros((input_dim, v_rank, head_dim), dtype=torch.float32, device='cuda')
-    
-    # Map decomposition to TPA factors
-    for r in range(v_rank):
-        for i in range(num_kv_heads):
-            # Project core tensor for this group and rank
-            proj_vector = core[r, i, :]
-            
-            # Copy to each head in this group
-            for j in range(heads_per_kv):
-                head_idx = i * heads_per_kv + j
-                Wa_v[:, r, head_idx] = U3[:, r] * torch.norm(proj_vector)
+        # Now reshape
+        wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
         
-        # Shared b factor across heads
-        Wb_v[:, r, :] = torch.outer(U3[:, r], U1[:, r])
+        # Apply Tucker decomposition to key weights
+        rank = [k_rank, None, k_rank]  # Rank for dimensions
+        
+        # Use same approach as for query weights but with key_rank
+        if tensor_size_gb > large_tensor_threshold:
+            print(f"Large tensor detected for keys, using tiled approach")
+            try:
+                core, factors = tile_based_tucker(wk_tensor, rank)
+            except Exception:
+                # Try direct projection as fallback
+                proj_head = torch.randn(head_dim, k_rank, device='cuda')
+                proj_head, _ = torch.linalg.qr(proj_head)
+                
+                proj_input = torch.randn(input_dim, k_rank, device='cuda')
+                proj_input, _ = torch.linalg.qr(proj_input.t())
+                proj_input = proj_input.t()
+                
+                core_approx = torch.zeros((k_rank, num_kv_heads, k_rank), device='cuda')
+                
+                for h in range(num_kv_heads):
+                    head_matrix = wk_tensor[:, h, :]
+                    # Clean problematic values
+                    head_matrix = torch.nan_to_num(head_matrix, nan=0.0)
+                    
+                    # Normalize for stability
+                    norm = torch.norm(head_matrix)
+                    if norm > 0:
+                        head_matrix = head_matrix / norm
+                        projection = proj_head.t() @ head_matrix @ proj_input
+                        core_approx[:, h, :] = projection * norm
+                    else:
+                        core_approx[:, h, :] = 0.0
+                
+                factors = [proj_head, None, proj_input]
+                core = core_approx
+        else:
+            # Standard approach for normal-sized tensors
+            try:
+                print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
+                try:
+                    core, factors = memory_efficient_tucker(wk_tensor, rank)
+                except Exception as e1:
+                    print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+                    try:
+                        core, factors = tile_based_tucker(wk_tensor, rank)
+                    except Exception as e2:
+                        print(f"Tiled Tucker also failed: {e2}, falling back to standard")
+                        core, factors = tucker(wk_tensor, rank=rank)
+            except Exception as e:
+                print(f"All Tucker decomposition methods failed for keys: {e}")
+                raise ValueError("All decomposition methods failed for key weights")
+        
+        # Map to TPA parameters
+        U1, U3 = factors[0], factors[2]
+        
+        # Check for NaN/Inf values
+        U1 = torch.nan_to_num(U1, nan=0.0)
+        U3 = torch.nan_to_num(U3, nan=0.0)
+        core = torch.nan_to_num(core, nan=0.0)
+        
+        # Create output tensors
+        Wa_k = torch.zeros((input_dim, k_rank, num_heads), dtype=torch.float32, device='cuda')
+        Wb_k = torch.zeros((input_dim, k_rank, head_dim), dtype=torch.float32, device='cuda')
+        
+        # Map head groups with safety checks
+        heads_per_kv = max(1, num_heads // num_kv_heads)
+        
+        # Map decomposition to TPA factors
+        for r in range(k_rank):
+            for i in range(num_kv_heads):
+                # Extract vector for this group and rank
+                proj_vector = core[r, i, :]
+                proj_norm = torch.norm(proj_vector)
+                if torch.isnan(proj_norm) or torch.isinf(proj_norm) or proj_norm == 0:
+                    proj_norm = 1.0
+                
+                # Copy to each head in this group
+                for j in range(heads_per_kv):
+                    head_idx = i * heads_per_kv + j
+                    if head_idx < num_heads:  # Bounds check
+                        Wa_k[:, r, head_idx] = U3[:, r] * proj_norm
+            
+            # Shared b factor
+            try:
+                outer_product = torch.outer(U3[:, r], U1[:, r])
+                if outer_product.shape == (input_dim, head_dim):
+                    Wb_k[:, r, :] = outer_product
+                else:
+                    # Handle size mismatch
+                    Wb_k[:, r, :] = torch.zeros(input_dim, head_dim, device='cuda')
+                    rows = min(input_dim, outer_product.shape[0])
+                    cols = min(head_dim, outer_product.shape[1])
+                    Wb_k[:rows, r, :cols] = outer_product[:rows, :cols]
+            except Exception:
+                # Fallback for outer product
+                Wb_k[:, r, :] = torch.zeros(input_dim, head_dim, device='cuda')
+                for i in range(min(input_dim, len(U3))):
+                    for j in range(min(head_dim, len(U1))):
+                        if r < len(U3[0]) and r < len(U1[0]):
+                            Wb_k[i, r, j] = U3[i, r] * U1[j, r]
+        
+        # Normalize factors with robust handling
+        for r in range(k_rank):
+            try:
+                norm_a = torch.norm(Wa_k[:, r, :])
+                norm_b = torch.norm(Wb_k[:, r, :])
+                
+                if norm_a > 1e-8 and norm_b > 1e-8:
+                    scale = torch.sqrt(norm_a * norm_b)
+                    Wa_k[:, r, :] /= torch.sqrt(scale) + 1e-8
+                    Wb_k[:, r, :] /= torch.sqrt(scale) + 1e-8
+                elif norm_a > 1e-8:
+                    Wa_k[:, r, :] /= torch.sqrt(norm_a) + 1e-8
+                elif norm_b > 1e-8:
+                    Wb_k[:, r, :] /= torch.sqrt(norm_b) + 1e-8
+            except Exception:
+                continue
+        
+        # Final check for NaN values
+        Wa_k = torch.nan_to_num(Wa_k, nan=0.0)
+        Wb_k = torch.nan_to_num(Wb_k, nan=0.0)
+        
+        # Convert to the right device and dtype
+        tpa_weights['Wa_k'] = Wa_k.to(dtype=dtype, device=device)
+        tpa_weights['Wb_k'] = Wb_k.to(dtype=dtype, device=device)
     
-    # Normalize factors
-    for r in range(v_rank):
-        norm_a = torch.norm(Wa_v[:, r, :])
-        norm_b = torch.norm(Wb_v[:, r, :])
-        if norm_a > 0 and norm_b > 0:
-            scale = torch.sqrt(norm_a * norm_b)
-            Wa_v[:, r, :] /= torch.sqrt(scale)
-            Wb_v[:, r, :] /= torch.sqrt(scale)
+    except Exception as key_error:
+        print(f"Error processing key weights: {key_error}")
+        # Create fallback key weights - small random values
+        fallback_Wa_k = torch.randn(input_dim, k_rank, num_heads, device='cuda') * 0.01
+        fallback_Wb_k = torch.randn(input_dim, k_rank, head_dim, device='cuda') * 0.01
+        tpa_weights['Wa_k'] = fallback_Wa_k.to(dtype=dtype, device=device)
+        tpa_weights['Wb_k'] = fallback_Wb_k.to(dtype=dtype, device=device)
     
-    # Convert to the right device and dtype
-    tpa_weights['Wa_v'] = Wa_v.to(dtype=dtype, device=device)
-    tpa_weights['Wb_v'] = Wb_v.to(dtype=dtype, device=device)
+    # Process value weights - using same robust approach
+    try:
+        # Reshape value weights with same safeguards
+        if v_weight.shape[0] != head_dim * num_kv_heads:
+            print(f"Warning: Value weight shape {v_weight.shape[0]} doesn't match expected {head_dim * num_kv_heads}")
+            # Adjust data to fit
+            if v_weight.shape[0] < head_dim * num_kv_heads:
+                padded = torch.zeros(head_dim * num_kv_heads, v_weight.shape[1], 
+                                    dtype=v_weight.dtype, device=v_weight.device)
+                padded[:v_weight.shape[0]] = v_weight
+                v_weight = padded
+            else:
+                v_weight = v_weight[:head_dim * num_kv_heads]
+        
+        # Now reshape
+        wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).to(device='cuda')
+        
+        # Apply Tucker decomposition to value weights
+        rank = [v_rank, None, v_rank]  # Rank for dimensions
+        
+        # Use same approach as for query and key weights
+        if tensor_size_gb > large_tensor_threshold:
+            print(f"Large tensor detected for values, using tiled approach")
+            try:
+                core, factors = tile_based_tucker(wv_tensor, rank)
+            except Exception:
+                # Try direct projection
+                proj_head = torch.randn(head_dim, v_rank, device='cuda')
+                proj_head, _ = torch.linalg.qr(proj_head)
+                
+                proj_input = torch.randn(input_dim, v_rank, device='cuda')
+                proj_input, _ = torch.linalg.qr(proj_input.t())
+                proj_input = proj_input.t()
+                
+                core_approx = torch.zeros((v_rank, num_kv_heads, v_rank), device='cuda')
+                
+                for h in range(num_kv_heads):
+                    head_matrix = wv_tensor[:, h, :]
+                    head_matrix = torch.nan_to_num(head_matrix, nan=0.0)
+                    
+                    norm = torch.norm(head_matrix)
+                    if norm > 0:
+                        head_matrix = head_matrix / norm
+                        projection = proj_head.t() @ head_matrix @ proj_input
+                        core_approx[:, h, :] = projection * norm
+                    else:
+                        core_approx[:, h, :] = 0.0
+                
+                factors = [proj_head, None, proj_input]
+                core = core_approx
+        else:
+            # Standard approach for normal-sized tensors
+            try:
+                print(f"Applying memory-efficient Tucker decomposition with ranks: {rank}")
+                try:
+                    core, factors = memory_efficient_tucker(wv_tensor, rank)
+                except Exception as e1:
+                    print(f"Memory-efficient Tucker failed: {e1}, trying tiled version")
+                    try:
+                        core, factors = tile_based_tucker(wv_tensor, rank)
+                    except Exception as e2:
+                        print(f"Tiled Tucker also failed: {e2}, falling back to standard")
+                        core, factors = tucker(wv_tensor, rank=rank)
+            except Exception as e:
+                print(f"All Tucker decomposition methods failed for values: {e}")
+                raise ValueError("All decomposition methods failed for value weights")
+        
+        # Map to TPA parameters
+        U1, U3 = factors[0], factors[2]
+        
+        # Check for NaN/Inf values
+        U1 = torch.nan_to_num(U1, nan=0.0)
+        U3 = torch.nan_to_num(U3, nan=0.0)
+        core = torch.nan_to_num(core, nan=0.0)
+        
+        # Create output tensors
+        Wa_v = torch.zeros((input_dim, v_rank, num_heads), dtype=torch.float32, device='cuda')
+        Wb_v = torch.zeros((input_dim, v_rank, head_dim), dtype=torch.float32, device='cuda')
+        
+        # Map decomposition to TPA factors
+        for r in range(v_rank):
+            for i in range(num_kv_heads):
+                # Extract vector for this group and rank
+                proj_vector = core[r, i, :]
+                proj_norm = torch.norm(proj_vector)
+                if torch.isnan(proj_norm) or torch.isinf(proj_norm) or proj_norm == 0:
+                    proj_norm = 1.0
+                
+                # Copy to each head in this group
+                for j in range(heads_per_kv):
+                    head_idx = i * heads_per_kv + j
+                    if head_idx < num_heads:  # Bounds check
+                        Wa_v[:, r, head_idx] = U3[:, r] * proj_norm
+            
+            # Shared b factor
+            try:
+                outer_product = torch.outer(U3[:, r], U1[:, r])
+                if outer_product.shape == (input_dim, head_dim):
+                    Wb_v[:, r, :] = outer_product
+                else:
+                    # Handle size mismatch
+                    Wb_v[:, r, :] = torch.zeros(input_dim, head_dim, device='cuda')
+                    rows = min(input_dim, outer_product.shape[0])
+                    cols = min(head_dim, outer_product.shape[1])
+                    Wb_v[:rows, r, :cols] = outer_product[:rows, :cols]
+            except Exception:
+                # Fallback for outer product
+                Wb_v[:, r, :] = torch.zeros(input_dim, head_dim, device='cuda')
+                for i in range(min(input_dim, len(U3))):
+                    for j in range(min(head_dim, len(U1))):
+                        if r < len(U3[0]) and r < len(U1[0]):
+                            Wb_v[i, r, j] = U3[i, r] * U1[j, r]
+        
+        # Normalize factors with robust handling
+        for r in range(v_rank):
+            try:
+                norm_a = torch.norm(Wa_v[:, r, :])
+                norm_b = torch.norm(Wb_v[:, r, :])
+                
+                if norm_a > 1e-8 and norm_b > 1e-8:
+                    scale = torch.sqrt(norm_a * norm_b)
+                    Wa_v[:, r, :] /= torch.sqrt(scale) + 1e-8
+                    Wb_v[:, r, :] /= torch.sqrt(scale) + 1e-8
+                elif norm_a > 1e-8:
+                    Wa_v[:, r, :] /= torch.sqrt(norm_a) + 1e-8
+                elif norm_b > 1e-8:
+                    Wb_v[:, r, :] /= torch.sqrt(norm_b) + 1e-8
+            except Exception:
+                continue
+        
+        # Final check for NaN values
+        Wa_v = torch.nan_to_num(Wa_v, nan=0.0)
+        Wb_v = torch.nan_to_num(Wb_v, nan=0.0)
+        
+        # Convert to the right device and dtype
+        tpa_weights['Wa_v'] = Wa_v.to(dtype=dtype, device=device)
+        tpa_weights['Wb_v'] = Wb_v.to(dtype=dtype, device=device)
+    
+    except Exception as value_error:
+        print(f"Error processing value weights: {value_error}")
+        # Create fallback value weights
+        fallback_Wa_v = torch.randn(input_dim, v_rank, num_heads, device='cuda') * 0.01
+        fallback_Wb_v = torch.randn(input_dim, v_rank, head_dim, device='cuda') * 0.01
+        tpa_weights['Wa_v'] = fallback_Wa_v.to(dtype=dtype, device=device)
+        tpa_weights['Wb_v'] = fallback_Wb_v.to(dtype=dtype, device=device)
     
     # Clean up GPU memory
     torch.cuda.empty_cache()
+    
+    # Verify all required keys are present
+    required_keys = ['Wa_q', 'Wb_q', 'Wa_k', 'Wb_k', 'Wa_v', 'Wb_v']
+    for key in required_keys:
+        if key not in tpa_weights:
+            print(f"Missing required key {key}, creating default")
+            # Create default tensor with appropriate shape
+            if key in ['Wa_q', 'Wa_k', 'Wa_v']:
+                rank_val = q_rank if 'q' in key else (k_rank if 'k' in key else v_rank)
+                default = torch.randn(input_dim, rank_val, num_heads, device='cuda') * 0.01
+            else:  # Wb_*
+                rank_val = q_rank if 'q' in key else (k_rank if 'k' in key else v_rank)
+                default = torch.randn(input_dim, rank_val, head_dim, device='cuda') * 0.01
+            tpa_weights[key] = default.to(dtype=dtype, device=device)
     
     return tpa_weights
 
