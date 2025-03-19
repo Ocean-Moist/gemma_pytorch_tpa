@@ -963,45 +963,45 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
             k_rank = layer_specific_ranks.get('k_rank', 2)
             v_rank = layer_specific_ranks.get('v_rank', 2)
             
-            # For each weight matrix in the converted standard model
-            weight_pairs = [
-                ('W_A_q', 'W_A_q', hidden_dim, num_heads * q_rank),
-                ('W_A_k', 'W_A_k', hidden_dim, num_kv_heads * k_rank),
-                ('W_A_v', 'W_A_v', hidden_dim, num_kv_heads * v_rank), 
-                ('W_B_q', 'W_B_q', hidden_dim, q_rank * head_dim),
-                ('W_B_k', 'W_B_k', hidden_dim, k_rank * head_dim),
-                ('W_B_v', 'W_B_v', hidden_dim, v_rank * head_dim)
-            ]
-            
-            # Create Linear modules with the weights
-            for std_key, tpa_key, in_dim, out_dim in weight_pairs:
+            # For each weight matrix in the converted standard model, we need to create matching Linear modules
+            # Use the actual weight shapes from factorized weights, not the expected dimensions
+            for std_key in ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v']:
+                tpa_key = std_key  # Same name in TPA module
+                
                 if hasattr(module, std_key):
                     # Get weight from standard model
                     weight = getattr(module, std_key)
+                    print(f"  Source {std_key} shape: {weight.shape}")
                     
-                    # Create a nn.Linear module with the weight
-                    linear = nn.Linear(in_dim, out_dim, bias=False)
+                    # Create Linear modules with dimensions matching the actual weights
+                    # For W_A weights, in_features = rows, out_features = cols
+                    # For W_B weights, in_features = cols, out_features = rows (needs transpose)
+                    if std_key.startswith('W_A_'):
+                        # A matrices: [hidden_dim, num_heads*rank] or similar
+                        in_features = weight.shape[0]  # First dimension
+                        out_features = weight.shape[1]  # Second dimension
+                        transpose_needed = False
+                    else:
+                        # B matrices: [rank, head_dim] or similar, which need transposing for nn.Linear
+                        # nn.Linear weight shape is [out_features, in_features]
+                        in_features = weight.shape[1]  # Second dimension becomes in_features
+                        out_features = weight.shape[0]  # First dimension becomes out_features
+                        transpose_needed = True
+                        
+                    print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
                     
-                    # Set the weight
-                    if weight.shape == linear.weight.shape:
-                        linear.weight.data.copy_(weight)
-                    elif weight.shape == linear.weight.t().shape:
-                        # Need to transpose
+                    # Create Linear with matched dimensions
+                    linear = nn.Linear(in_features, out_features, bias=False)
+                    
+                    # Set the weights with appropriate transposition
+                    if transpose_needed:
                         linear.weight.data.copy_(weight.t())
                     else:
-                        print(f"  Warning: Weight shape mismatch for {std_key}: {weight.shape} vs {linear.weight.shape}")
-                        # Try to adapt using reshape if possible
-                        if weight.numel() == linear.weight.numel():
-                            try:
-                                linear.weight.data.copy_(weight.reshape(linear.weight.shape))
-                                print(f"  Successfully reshaped weight to {linear.weight.shape}")
-                            except Exception as reshape_error:
-                                print(f"  Error reshaping weight: {reshape_error}")
-                        else:
-                            print(f"  Cannot adapt weights: {weight.numel()} != {linear.weight.numel()}")
+                        linear.weight.data.copy_(weight)
                     
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
+                    print(f"  Created {tpa_key} with shape {linear.weight.shape}")
             
             # Mark the TPA module as using factorized weights
             tpa_module.use_factorized_weights = True

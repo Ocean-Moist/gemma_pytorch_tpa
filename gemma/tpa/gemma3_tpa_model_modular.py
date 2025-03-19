@@ -287,6 +287,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         
         # Create KV caches if needed
         if kv_caches is None:
+            self._sync_layer_ranks_to_config()  # Update config with actual ranks from layers
             kv_caches = create_tpa_kv_caches(
                 self.config, batch_size, self.config.max_position_embeddings, device)
         
@@ -431,7 +432,8 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Handle multimodal inputs
         has_images = self.is_multimodal and image_patches is not None and image_presence_mask is not None
         
-        # Create KV caches
+        # Create KV caches with updated layer ranks
+        self._sync_layer_ranks_to_config()  # Update config with actual ranks from layers
         kv_caches = create_tpa_kv_caches(
             self.config, batch_size, max_seq_len, device)
         
@@ -523,6 +525,38 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             
         return outputs
     
+    def _sync_layer_ranks_to_config(self):
+        """
+        Collect actual rank values from model layers and update config.
+        This ensures KV cache creation uses the correct ranks.
+        """
+        layer_ranks = []
+        try:
+            # Extract actual ranks from model's attention layers
+            for i, layer in enumerate(self.model.layers):
+                if hasattr(layer.self_attn, 'k_rank') and hasattr(layer.self_attn, 'v_rank'):
+                    k_rank = getattr(layer.self_attn, 'k_rank')
+                    v_rank = getattr(layer.self_attn, 'v_rank')
+                    q_rank = getattr(layer.self_attn, 'q_rank', self.config.q_rank)
+                    
+                    # Store this layer's actual ranks
+                    layer_ranks.append({
+                        "q_rank": q_rank,
+                        "k_rank": k_rank,
+                        "v_rank": v_rank
+                    })
+                    print(f"Layer {i}: Using actual attention module ranks: q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
+            
+            # Update config with actual layer ranks
+            if layer_ranks:
+                print(f"Updating config with {len(layer_ranks)} layer-specific ranks from attention modules")
+                if not hasattr(self.config, 'model_structure'):
+                    self.config.model_structure = {}
+                self.config.model_structure["layer_ranks"] = layer_ranks
+                
+        except Exception as e:
+            print(f"Error collecting layer ranks: {e}, using default config ranks")
+
     def load_weights(self, weights_path: str):
         """Load model weights from a file or directory."""
         if os.path.isdir(weights_path):
