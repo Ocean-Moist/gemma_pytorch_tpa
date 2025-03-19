@@ -511,14 +511,28 @@ def main(_):
       prompt = [_PROMPT.value]  # Format compatible with Gemma3 models
       
       if hasattr(model, 'generate'):
-          # Use the correct parameter name (max_tokens) from the Gemma3ForMultimodalLMwithTPA class
-          outputs = model.generate(
-              prompts=prompt,
-              max_tokens=_OUTPUT_LEN.value,
-              temperature=_TEMPERATURE.value,
-              top_p=_TOP_P.value,
-              top_k=_TOP_K.value
-          )
+          # Check which class the model is and use appropriate parameter names
+          if isinstance(model, Gemma3ForMultimodalLMwithTPA):
+              # For the TPA modular model which takes max_tokens
+              print("Using Gemma3ForMultimodalLMwithTPA generate() interface")
+              outputs = model.generate(
+                  prompts=prompt,
+                  max_tokens=_OUTPUT_LEN.value,
+                  temperature=_TEMPERATURE.value,
+                  top_p=_TOP_P.value,
+                  top_k=_TOP_K.value
+              )
+          else:
+              # For the standard GemmaForCausalLM model which takes output_len
+              print("Using GemmaForCausalLM generate() interface")
+              outputs = model.generate(
+                  prompts=prompt,
+                  device=device,
+                  output_len=_OUTPUT_LEN.value,
+                  temperature=_TEMPERATURE.value,
+                  top_p=_TOP_P.value,
+                  top_k=_TOP_K.value
+              )
       else:
           raise ValueError("Model does not have a generate method")
       
