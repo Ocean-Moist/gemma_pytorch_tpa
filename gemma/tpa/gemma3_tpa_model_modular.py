@@ -94,9 +94,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             self.tokenizer = None
             print("No tokenizer configuration found in model config")
             
-        # Initialize embedder - using 'text_token_embedder' for Gemma3 naming convention
-        self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, 
-                                                     getattr(config, 'quant', False))
+        # Initialize embedder - match naming with standard Gemma model
+        self.embedder = gemma_model.Embedding(vocab_size, config.hidden_size, 
+                                           getattr(config, 'quant', False))
+        # Also create an alias for compatibility with any code using Gemma3 naming convention
+        self.text_token_embedder = self.embedder
         
         # Initialize TPA model
         self.model = GemmaTPAModel(config)
@@ -236,7 +238,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             freqs_cis = self.freqs_cis.index_select(0, input_positions)
         
         # Get text embeddings
-        hidden_states = self.text_token_embedder(input_token_ids)
+        hidden_states = self.embedder(input_token_ids)
         
         # Handle multimodal inputs
         if self.is_multimodal and image_patches is not None and image_presence_mask is not None:
@@ -302,14 +304,25 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Get outputs only at the specified positions
         outputs = hidden_states.index_select(1, output_positions)
         
-        # Get logits and sample next tokens
-        logits = self.sampler(outputs)
-        
+        # Get embedder weight for sampler
+        embedder_weight = self.embedder.weight
+        if getattr(self.config, 'quant', False):
+            embedder_weight = embedder_weight * self.embedder.weight_scaler.unsqueeze(-1)
+            
+        # Get default sampling parameters if not provided
         temperatures = temperatures if temperatures is not None else torch.ones(batch_size, device=device)
         top_ps = top_ps if top_ps is not None else torch.ones(batch_size, device=device)
         top_ks = top_ks if top_ks is not None else torch.full((batch_size,), 50, device=device)
         
-        next_tokens = self.sampler.sample(logits, temperatures, top_ps, top_ks)
+        # Call sampler with all required parameters
+        next_tokens, logits = self.sampler(
+            embedding=embedder_weight,
+            hidden_states=hidden_states,
+            output_positions=output_positions,
+            temperatures=temperatures,
+            top_ps=top_ps,
+            top_ks=top_ks
+        )
         
         return next_tokens, logits
         

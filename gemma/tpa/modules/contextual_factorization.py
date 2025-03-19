@@ -238,10 +238,17 @@ def convert_from_standard_weights(standard_model, tpa_model, q_rank=6, k_rank=2,
     
     # Copy embedding weights
     try:
-        tpa_model.text_token_embedder.weight.data.copy_(
-            standard_model.text_token_embedder.weight.data)
-        if verbose:
-            print("Copied text token embedder weights")
+        # Try with either embedder or text_token_embedder naming
+        if hasattr(standard_model, 'embedder'):
+            tpa_model.embedder.weight.data.copy_(standard_model.embedder.weight.data)
+            if verbose:
+                print("Copied embedder weights")
+        elif hasattr(standard_model, 'text_token_embedder'):
+            tpa_model.embedder.weight.data.copy_(standard_model.text_token_embedder.weight.data)
+            if verbose:
+                print("Copied text_token_embedder weights")
+        else:
+            print("WARNING: Could not find embedder weights in standard model")
     except Exception as e:
         print(f"Error copying embedder weights: {e}")
     
@@ -312,10 +319,9 @@ def convert_from_standard_weights(standard_model, tpa_model, q_rank=6, k_rank=2,
     except Exception as e:
         print(f"Error copying final norm: {e}")
     
-    # Copy sampler weight
-    try:
-        tpa_model.sampler.weight.data.copy_(standard_model.sampler.weight.data)
-    except Exception as e:
-        print(f"Error copying sampler weight: {e}")
+    # Standard Gemma sampler doesn't have weights to copy
+    # Just report this as informational rather than an error
+    if verbose:
+        print("Note: Sampler doesn't have weights to copy - this is expected")
     
     return tpa_model
