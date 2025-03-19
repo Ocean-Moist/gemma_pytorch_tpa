@@ -6,6 +6,7 @@ for converting standard attention layers to TPA (Tensor Product Attention).
 """
 
 import torch
+import torch.nn.functional as F
 import math
 import time
 import numpy as np
@@ -374,6 +375,30 @@ def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_
         W_B_v_reshaped = W_B_v_reshaped.permute(1, 0, 2)  # [num_kv_heads, v_rank, head_dim]
         W_B_v_reshaped = W_B_v_reshaped.reshape(num_kv_heads * v_rank, head_dim)
         
+        # CRITICAL: Check if the factors are all zeros which would cause attention failure
+        if W_A_q.abs().sum() < 1e-6 or W_B_q.abs().sum() < 1e-6:
+            print("WARNING: Q factors are nearly zero! Using random initialization instead")
+            # Initialize with random orthogonal matrices for numerical stability
+            W_A_q = torch.randn((hidden_dim, q_rank), device=W_A_q.device, dtype=W_A_q.dtype)
+            W_B_q = torch.randn((q_rank, num_heads * head_dim), device=W_B_q.device, dtype=W_B_q.dtype)
+            # Normalize for stability
+            W_A_q = F.normalize(W_A_q, dim=0) * 0.1
+            W_B_q = F.normalize(W_B_q, dim=1) * 0.1
+            
+        if W_A_k.abs().sum() < 1e-6 or W_B_k.abs().sum() < 1e-6:
+            print("WARNING: K factors are nearly zero! Using random initialization instead")
+            W_A_k = torch.randn((hidden_dim, k_rank), device=W_A_k.device, dtype=W_A_k.dtype)
+            W_B_k = torch.randn((k_rank, num_kv_heads * head_dim), device=W_B_k.device, dtype=W_B_k.dtype)
+            W_A_k = F.normalize(W_A_k, dim=0) * 0.1
+            W_B_k = F.normalize(W_B_k, dim=1) * 0.1
+            
+        if W_A_v.abs().sum() < 1e-6 or W_B_v.abs().sum() < 1e-6:
+            print("WARNING: V factors are nearly zero! Using random initialization instead")
+            W_A_v = torch.randn((hidden_dim, v_rank), device=W_A_v.device, dtype=W_A_v.dtype)
+            W_B_v = torch.randn((v_rank, num_kv_heads * head_dim), device=W_B_v.device, dtype=W_B_v.dtype)
+            W_A_v = F.normalize(W_A_v, dim=0) * 0.1
+            W_B_v = F.normalize(W_B_v, dim=1) * 0.1
+            
         # TPA also expects A weights in a specific format
         # We need to expand from [hidden_dim, rank] to [hidden_dim, num_heads*rank]
         W_A_q_expanded = torch.zeros((hidden_dim, num_heads * q_rank), device=W_A_q.device, dtype=W_A_q.dtype)
@@ -387,6 +412,42 @@ def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_
         for h in range(num_kv_heads):
             W_A_k_expanded[:, h*k_rank:(h+1)*k_rank] = W_A_k
             W_A_v_expanded[:, h*v_rank:(h+1)*v_rank] = W_A_v
+            
+        # CRITICAL: Verify expanded weights are not all zeros
+        if W_A_q_expanded.abs().sum() < 1e-6:
+            print("ERROR: Expanded Q factors still zero! Using random orthogonal initialization")
+            # Last resort: pure orthogonal random initialization 
+            for h in range(num_heads):
+                rand_mat = torch.randn((hidden_dim, q_rank), device=W_A_q_expanded.device)
+                q, r = torch.linalg.qr(rand_mat)
+                W_A_q_expanded[:, h*q_rank:(h+1)*q_rank] = q * 0.1
+                
+        if W_A_k_expanded.abs().sum() < 1e-6:
+            print("ERROR: Expanded K factors still zero! Using random orthogonal initialization")
+            for h in range(num_kv_heads):
+                rand_mat = torch.randn((hidden_dim, k_rank), device=W_A_k_expanded.device)
+                q, r = torch.linalg.qr(rand_mat)
+                W_A_k_expanded[:, h*k_rank:(h+1)*k_rank] = q * 0.1
+                
+        if W_A_v_expanded.abs().sum() < 1e-6:
+            print("ERROR: Expanded V factors still zero! Using random orthogonal initialization")
+            for h in range(num_kv_heads):
+                rand_mat = torch.randn((hidden_dim, v_rank), device=W_A_v_expanded.device)
+                q, r = torch.linalg.qr(rand_mat)
+                W_A_v_expanded[:, h*v_rank:(h+1)*v_rank] = q * 0.1
+        
+        # Check B factors for zeros before storing
+        if W_B_q_reshaped.abs().sum() < 1e-6:
+            print("ERROR: Reshaped B_q factors are all zeros! Using random initialization")
+            W_B_q_reshaped = torch.randn((num_heads * q_rank, head_dim), device=W_B_q_reshaped.device, dtype=W_B_q_reshaped.dtype) * 0.1
+            
+        if W_B_k_reshaped.abs().sum() < 1e-6:
+            print("ERROR: Reshaped B_k factors are all zeros! Using random initialization")
+            W_B_k_reshaped = torch.randn((num_kv_heads * k_rank, head_dim), device=W_B_k_reshaped.device, dtype=W_B_k_reshaped.dtype) * 0.1
+            
+        if W_B_v_reshaped.abs().sum() < 1e-6:
+            print("ERROR: Reshaped B_v factors are all zeros! Using random initialization")
+            W_B_v_reshaped = torch.randn((num_kv_heads * v_rank, head_dim), device=W_B_v_reshaped.device, dtype=W_B_v_reshaped.dtype) * 0.1
         
         # Store results with the expected keys for the TPA model
         result["Q_core"] = torch.ones((q_rank, q_rank, q_rank), device=device).to(dtype)
@@ -403,6 +464,13 @@ def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_
         result["V_hidden_factor"] = W_A_v_expanded.to(dtype=dtype, device=device)
         result["V_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype)
         result["V_dim_factor"] = W_B_v_reshaped.to(dtype=dtype, device=device)
+        
+        # Final sanity check on returned factors
+        for key, tensor in result.items():
+            if tensor.abs().sum() < 1e-6:
+                print(f"WARNING: {key} still has all zeros! Randomizing")
+                # Create a random tensor of the same shape
+                result[key] = torch.randn_like(tensor) * 0.1
         
     except Exception as e:
         print(f"Error in direct decomposition: {e}, using stable initialization fallback")
