@@ -392,15 +392,21 @@ def main(_):
                   use_dynamic_ranks = extra_config.get("use_dynamic_ranks", True)
                   print(f"Using dynamic ranks: {use_dynamic_ranks}")
                   
-                  tpa_model = convert_gqa_model_to_tpa(
-                      standard_model, 
-                      q_rank=q_rank,
-                      k_rank=k_rank,
-                      v_rank=v_rank,
-                      dtype=tpa_model.dtype,
-                      device=device,
-                      use_dynamic_ranks=use_dynamic_ranks
-                  )
+                  # The right way to do this is to use the built-in convert_from_standard_weights
+                  # method that handles all the complexities of the TPA model structure
+                  print("Applying TPA-specific conversion using convert_from_standard_weights...")
+                  
+                  # Configure TPA model to use GQA to TPA factorization method
+                  tpa_model.factorization_method = "gqa_to_tpa"
+                  tpa_model.tpa_config = {
+                      "q_rank": q_rank,
+                      "k_rank": k_rank,
+                      "v_rank": v_rank,
+                      "use_dynamic_ranks": use_dynamic_ranks
+                  }
+                  
+                  # Use the proper conversion method that knows about TPA models
+                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
                   
               except Exception as gqa_error:
                   print(f"Error in GQA to TPA conversion: {gqa_error}")
