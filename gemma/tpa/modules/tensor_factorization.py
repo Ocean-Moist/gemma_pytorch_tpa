@@ -179,10 +179,11 @@ def direct_tensorly_tucker_decomposition(weight, num_heads, num_kv_heads, target
 
 def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_ranks, dtype=torch.float16, device="cuda", use_separate_factors=True):
     """
-    TensorLLM-style Tucker decomposition with shared factor matrices.
+    TPA-style factorization of attention weights.
     
-    This implements the approach described in the provided documentation,
-    using shared factor matrices across attention heads.
+    This implements direct factorization of attention weights into A and B factors
+    following the Tensor Product Attention (TPA) approach described in the paper
+    "Tensor Product Attention Is All You Need".
     
     Args:
         weight: Input attention weight matrix (combined QKV)
@@ -194,7 +195,7 @@ def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_
         use_separate_factors: Whether to decompose Q, K, V separately (more stable)
         
     Returns:
-        Dictionary of factorized weights
+        Dictionary of factorized weights for TPA implementation
     """
     if not HAS_TENSORLY:
         raise ImportError("TensorLy is required for shared_factors_tucker_decomposition but not available")
@@ -242,118 +243,119 @@ def shared_factors_tucker_decomposition(weight, num_heads, num_kv_heads, target_
     # Create result dictionary
     result = {}
     
-    # USE A DIFFERENT APPROACH: Create separate decompositions for Q, K, V 
-    # that follow the native TPA structure more closely
-    print("Performing separate Tucker decompositions aligned with TPA structure")
+    # Directly create TPA-compatible A and B matrices, following the TPA paper
+    print("Performing factorization aligned with native TPA implementation")
     
-    # Reshape to 3D tensors
-    q_weight_3d = q_weight.reshape(hidden_dim, num_heads, head_dim)
-    k_weight_3d = k_weight.reshape(hidden_dim, num_kv_heads, head_dim)
-    v_weight_3d = v_weight.reshape(hidden_dim, num_kv_heads, head_dim)
+    # Get target ranks for QKV
+    q_rank = target_ranks.get("q_rank", 6)  # Higher rank for Q as in TPA paper
+    k_rank = target_ranks.get("k_rank", 2)  # Lower rank for K as in TPA paper
+    v_rank = target_ranks.get("v_rank", 2)  # Lower rank for V as in TPA paper
     
-    # Get target ranks for A and B
-    q_rank_a = q_rank
-    q_rank_b = q_rank
-    k_rank_a = k_rank
-    k_rank_b = k_rank
-    v_rank_a = v_rank
-    v_rank_b = v_rank
+    # Reshape to match the structure in the TPA implementation
+    q_weight_reshaped = q_weight.reshape(hidden_dim, num_heads * head_dim)
+    k_weight_reshaped = k_weight.reshape(hidden_dim, num_kv_heads * head_dim)
+    v_weight_reshaped = v_weight.reshape(hidden_dim, num_kv_heads * head_dim)
     
-    # Create A and B factors more directly aligned with TPA structure
     try:
-        # For Q: Decompose into hidden_dim × num_heads × q_rank_a and q_rank_b × head_dim
-        # Transpose to [hidden_dim, head_dim, num_heads]
-        q_transposed = q_weight_3d.permute(0, 2, 1)
-        q_reshaped = q_transposed.reshape(hidden_dim, -1)
+        # Following the native TPA implementation, create W_A_q, W_B_q, etc.
+        # These directly correspond to the linear projections in the TPA attention module
         
-        # Use SVD to create rank-r decomposition
-        U, S, Vh = torch.linalg.svd(q_reshaped, full_matrices=False)
-        # Take top-r components
-        U_q = U[:, :q_rank_a]  # [hidden_dim, q_rank_a]
-        S_q = S[:q_rank_a]  # [q_rank_a]
-        Vh_q = Vh[:q_rank_a, :]  # [q_rank_a, head_dim*num_heads]
+        # APPROACH 1: Direct construction of A and B weights
+        # Use SVD to create optimal low-rank factorizations
+
+        # For query weights
+        U_q, S_q, Vh_q = torch.linalg.svd(q_weight_reshaped, full_matrices=False)
         
-        # Factor A will be used to create [batch, seq_len, num_heads, q_rank]
-        q_a_weight = U_q  # [hidden_dim, q_rank_a]
-        # Reshape to head-wise format [hidden_dim, num_heads, q_rank_a/num_heads]
-        q_a_weight = q_a_weight.reshape(hidden_dim, num_heads, -1)
-        q_a_weight = q_a_weight.permute(0, 1, 2)  # [hidden_dim, num_heads, q_rank_a/num_heads]
+        # Take the top q_rank factors
+        W_A_q = U_q[:, :q_rank] @ torch.diag(torch.sqrt(S_q[:q_rank]))  # [hidden_dim, q_rank]
+        W_B_q = torch.diag(torch.sqrt(S_q[:q_rank])) @ Vh_q[:q_rank, :]  # [q_rank, num_heads*head_dim]
         
-        # Factor B will be used to create [batch, seq_len, q_rank, head_dim]
-        q_b_weight = torch.diag(S_q) @ Vh_q  # [q_rank_a, head_dim*num_heads]
-        q_b_weight = q_b_weight.reshape(q_rank_a, head_dim, num_heads)
-        q_b_weight = q_b_weight.permute(2, 0, 1)  # [num_heads, q_rank_a, head_dim]
+        # For key weights
+        U_k, S_k, Vh_k = torch.linalg.svd(k_weight_reshaped, full_matrices=False)
         
-        # Now do the same for K and V
-        # For K: Decompose into hidden_dim × num_kv_heads × k_rank_a and k_rank_b × head_dim
-        k_transposed = k_weight_3d.permute(0, 2, 1)
-        k_reshaped = k_transposed.reshape(hidden_dim, -1)
+        # Take the top k_rank factors
+        W_A_k = U_k[:, :k_rank] @ torch.diag(torch.sqrt(S_k[:k_rank]))  # [hidden_dim, k_rank]
+        W_B_k = torch.diag(torch.sqrt(S_k[:k_rank])) @ Vh_k[:k_rank, :]  # [k_rank, num_kv_heads*head_dim]
         
-        U, S, Vh = torch.linalg.svd(k_reshaped, full_matrices=False)
-        U_k = U[:, :k_rank_a]
-        S_k = S[:k_rank_a]
-        Vh_k = Vh[:k_rank_a, :]
+        # For value weights
+        U_v, S_v, Vh_v = torch.linalg.svd(v_weight_reshaped, full_matrices=False)
         
-        k_a_weight = U_k
-        k_a_weight = k_a_weight.reshape(hidden_dim, num_kv_heads, -1)
-        k_a_weight = k_a_weight.permute(0, 1, 2)
+        # Take the top v_rank factors
+        W_A_v = U_v[:, :v_rank] @ torch.diag(torch.sqrt(S_v[:v_rank]))  # [hidden_dim, v_rank]
+        W_B_v = torch.diag(torch.sqrt(S_v[:v_rank])) @ Vh_v[:v_rank, :]  # [v_rank, num_kv_heads*head_dim]
         
-        k_b_weight = torch.diag(S_k) @ Vh_k
-        k_b_weight = k_b_weight.reshape(k_rank_a, head_dim, num_kv_heads)
-        k_b_weight = k_b_weight.permute(2, 0, 1)
+        # Reshape B weights to match TPA's expected format
+        # The TPA implementation expects B_q with shape [bsz, seqlen, q_rank, head_dim]
+        # We need to reshape from [q_rank, num_heads*head_dim] to [q_rank*num_heads, head_dim]
+        W_B_q_reshaped = W_B_q.reshape(q_rank, num_heads, head_dim)
+        W_B_q_reshaped = W_B_q_reshaped.permute(1, 0, 2)  # [num_heads, q_rank, head_dim]
+        W_B_q_reshaped = W_B_q_reshaped.reshape(num_heads * q_rank, head_dim)
         
-        # For V: Decompose into hidden_dim × num_kv_heads × v_rank_a and v_rank_b × head_dim
-        v_transposed = v_weight_3d.permute(0, 2, 1)
-        v_reshaped = v_transposed.reshape(hidden_dim, -1)
+        W_B_k_reshaped = W_B_k.reshape(k_rank, num_kv_heads, head_dim)
+        W_B_k_reshaped = W_B_k_reshaped.permute(1, 0, 2)  # [num_kv_heads, k_rank, head_dim]
+        W_B_k_reshaped = W_B_k_reshaped.reshape(num_kv_heads * k_rank, head_dim)
         
-        U, S, Vh = torch.linalg.svd(v_reshaped, full_matrices=False)
-        U_v = U[:, :v_rank_a]
-        S_v = S[:v_rank_a]
-        Vh_v = Vh[:v_rank_a, :]
+        W_B_v_reshaped = W_B_v.reshape(v_rank, num_kv_heads, head_dim)
+        W_B_v_reshaped = W_B_v_reshaped.permute(1, 0, 2)  # [num_kv_heads, v_rank, head_dim]
+        W_B_v_reshaped = W_B_v_reshaped.reshape(num_kv_heads * v_rank, head_dim)
         
-        v_a_weight = U_v
-        v_a_weight = v_a_weight.reshape(hidden_dim, num_kv_heads, -1)
-        v_a_weight = v_a_weight.permute(0, 1, 2)
+        # Reshape A weights to also match expected format
+        # The TPA implementation expects A_q with shape [bsz, seqlen, n_head, q_rank]
+        # We need to reshape from [hidden_dim, q_rank] to [hidden_dim, n_head * q_rank]
+        W_A_q_reshaped = W_A_q.repeat(1, num_heads)  # Simple repeat for now
+        W_A_k_reshaped = W_A_k.repeat(1, num_kv_heads)
+        W_A_v_reshaped = W_A_v.repeat(1, num_kv_heads)
         
-        v_b_weight = torch.diag(S_v) @ Vh_v
-        v_b_weight = v_b_weight.reshape(v_rank_a, head_dim, num_kv_heads)
-        v_b_weight = v_b_weight.permute(2, 0, 1)
-        
-        # Store results directly in TPA-compatible format
-        result["Q_core"] = torch.eye(q_rank_a, device=device).to(dtype)
-        result["Q_hidden_factor"] = q_a_weight.reshape(hidden_dim, -1).to(dtype, device=device)
+        # Store results with the expected keys used by the TPA model
+        # The tucker_tensor_decomposition function expects specific keys
+        result["Q_core"] = torch.ones((q_rank, q_rank, q_rank), device=device).to(dtype)
+        result["Q_hidden_factor"] = W_A_q_reshaped.to(dtype=dtype, device=device)
         result["Q_head_factor"] = torch.eye(num_heads, device=device).to(dtype)
-        result["Q_dim_factor"] = q_b_weight.reshape(-1, head_dim).to(dtype, device=device)
+        result["Q_dim_factor"] = W_B_q_reshaped.to(dtype=dtype, device=device)
         
-        result["K_core"] = torch.eye(k_rank_a, device=device).to(dtype)
-        result["K_hidden_factor"] = k_a_weight.reshape(hidden_dim, -1).to(dtype, device=device)
+        result["K_core"] = torch.ones((k_rank, k_rank, k_rank), device=device).to(dtype)
+        result["K_hidden_factor"] = W_A_k_reshaped.to(dtype=dtype, device=device)
         result["K_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype)
-        result["K_dim_factor"] = k_b_weight.reshape(-1, head_dim).to(dtype, device=device)
+        result["K_dim_factor"] = W_B_k_reshaped.to(dtype=dtype, device=device)
         
-        result["V_core"] = torch.eye(v_rank_a, device=device).to(dtype)
-        result["V_hidden_factor"] = v_a_weight.reshape(hidden_dim, -1).to(dtype, device=device)
+        result["V_core"] = torch.ones((v_rank, v_rank, v_rank), device=device).to(dtype)
+        result["V_hidden_factor"] = W_A_v_reshaped.to(dtype=dtype, device=device)
         result["V_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype)
-        result["V_dim_factor"] = v_b_weight.reshape(-1, head_dim).to(dtype, device=device)
+        result["V_dim_factor"] = W_B_v_reshaped.to(dtype=dtype, device=device)
         
     except Exception as e:
         print(f"Error in direct decomposition: {e}, falling back to basic initialization")
         
-        # Initialize with random factors (still separating Q, K, V)
-        # These match the dimensions expected by the TPA model's forward pass
+        # Initialize A and B weights directly with TPA-compatible structure
+        # These matrices directly match what the TPA implementation expects
+        
+        # For query weights: W_A_q and W_B_q
+        W_A_q = torch.randn((hidden_dim, num_heads * q_rank), device=device) / math.sqrt(q_rank)
+        W_B_q = torch.randn((num_heads * q_rank, head_dim), device=device) / math.sqrt(q_rank)
+        
+        # For key weights: W_A_k and W_B_k
+        W_A_k = torch.randn((hidden_dim, num_kv_heads * k_rank), device=device) / math.sqrt(k_rank)
+        W_B_k = torch.randn((num_kv_heads * k_rank, head_dim), device=device) / math.sqrt(k_rank)
+        
+        # For value weights: W_A_v and W_B_v
+        W_A_v = torch.randn((hidden_dim, num_kv_heads * v_rank), device=device) / math.sqrt(v_rank)
+        W_B_v = torch.randn((num_kv_heads * v_rank, head_dim), device=device) / math.sqrt(v_rank)
+        
+        # Store results with expected keys for tucker_tensor_decomposition compatibility
         result["Q_core"] = torch.ones((q_rank, q_rank, q_rank), device=device).to(dtype)
-        result["Q_hidden_factor"] = torch.randn((hidden_dim, q_rank), device=device).to(dtype) / math.sqrt(q_rank)
-        result["Q_head_factor"] = torch.randn((num_heads, q_rank), device=device).to(dtype) / math.sqrt(q_rank)
-        result["Q_dim_factor"] = torch.randn((q_rank, head_dim), device=device).to(dtype) / math.sqrt(q_rank)
+        result["Q_hidden_factor"] = W_A_q.to(dtype)
+        result["Q_head_factor"] = torch.eye(num_heads, device=device).to(dtype)
+        result["Q_dim_factor"] = W_B_q.to(dtype)
         
         result["K_core"] = torch.ones((k_rank, k_rank, k_rank), device=device).to(dtype)
-        result["K_hidden_factor"] = torch.randn((hidden_dim, k_rank), device=device).to(dtype) / math.sqrt(k_rank)
-        result["K_head_factor"] = torch.randn((num_kv_heads, k_rank), device=device).to(dtype) / math.sqrt(k_rank)
-        result["K_dim_factor"] = torch.randn((k_rank, head_dim), device=device).to(dtype) / math.sqrt(k_rank)
+        result["K_hidden_factor"] = W_A_k.to(dtype)
+        result["K_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype)
+        result["K_dim_factor"] = W_B_k.to(dtype)
         
         result["V_core"] = torch.ones((v_rank, v_rank, v_rank), device=device).to(dtype)
-        result["V_hidden_factor"] = torch.randn((hidden_dim, v_rank), device=device).to(dtype) / math.sqrt(v_rank)
-        result["V_head_factor"] = torch.randn((num_kv_heads, v_rank), device=device).to(dtype) / math.sqrt(v_rank)
-        result["V_dim_factor"] = torch.randn((v_rank, head_dim), device=device).to(dtype) / math.sqrt(v_rank)
+        result["V_hidden_factor"] = W_A_v.to(dtype)
+        result["V_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype)
+        result["V_dim_factor"] = W_B_v.to(dtype)
     print(f"Direct SVD decomposition complete in {time.time() - tic:.2f}s")
     
     # Check reconstruction accuracy
