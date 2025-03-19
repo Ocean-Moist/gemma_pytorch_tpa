@@ -131,8 +131,18 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     Returns:
         List of tuples containing factorized KV caches for each layer
     """
-    k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
-    v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
+    # Get ranks directly from model layers if available
+    layer_specific_ranks = []
+    if hasattr(config, "model_structure") and config.model_structure is not None:
+        # This would be populated during conversion to share ranks between model and cache
+        model_structure = config.model_structure
+        if isinstance(model_structure, dict) and "layer_ranks" in model_structure:
+            layer_specific_ranks = model_structure["layer_ranks"]
+            print(f"Using layer-specific ranks from model: {layer_specific_ranks}")
+    
+    # Default ranks from config
+    default_k_rank = getattr(config, "k_rank", 2)  # Default to 2 as in the TPA paper
+    default_v_rank = getattr(config, "v_rank", 2)  # Default to 2 as in the TPA paper
     
     # Ensure we have valid dimensions
     if batch_size <= 0:
@@ -147,25 +157,34 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
     if max_seq_len > 8192:
         print(f"Warning: Limiting excessive max_seq_len {max_seq_len} to 8192")
         max_seq_len = 8192
-        
-    # Ensure we have valid ranks
-    if k_rank <= 0:
-        k_rank = 1
-        print(f"Warning: Invalid k_rank {k_rank}, using 1 instead")
-        
-    if v_rank <= 0:
-        v_rank = 1
-        print(f"Warning: Invalid v_rank {v_rank}, using 1 instead")
     
     # Ensure num_key_value_heads is set
     num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
     head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
     
     print(f"Creating TPA KV caches with dimensions: batch_size={batch_size}, max_seq_len={max_seq_len}, "
-          f"num_kv_heads={num_kv_heads}, k_rank={k_rank}, v_rank={v_rank}, head_dim={head_dim}")
+          f"num_kv_heads={num_kv_heads}, default_k_rank={default_k_rank}, default_v_rank={default_v_rank}, head_dim={head_dim}")
     
     kv_caches = []
     for i in range(config.num_hidden_layers):
+        # Get layer-specific ranks if available
+        if i < len(layer_specific_ranks) and isinstance(layer_specific_ranks[i], dict):
+            k_rank = layer_specific_ranks[i].get("k_rank", default_k_rank)
+            v_rank = layer_specific_ranks[i].get("v_rank", default_v_rank)
+            print(f"Layer {i}: Using specific ranks k_rank={k_rank}, v_rank={v_rank}")
+        else:
+            k_rank = default_k_rank
+            v_rank = default_v_rank
+        
+        # Ensure we have valid ranks
+        if k_rank <= 0:
+            k_rank = 1
+            print(f"Warning: Invalid k_rank {k_rank} for layer {i}, using 1 instead")
+            
+        if v_rank <= 0:
+            v_rank = 1
+            print(f"Warning: Invalid v_rank {v_rank} for layer {i}, using 1 instead")
+        
         # Create separate caches for A and B factors
         try:
             # Use a safe max sequence length to prevent OOM errors
@@ -176,6 +195,8 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
             safe_head_dim = max(1, head_dim)      # Ensure at least dimension 1
             safe_k_rank = max(1, min(k_rank, 16))  # Limit rank to reasonable values
             safe_v_rank = max(1, min(v_rank, 16))  # Limit rank to reasonable values
+            
+            print(f"Layer {i} KV cache using ranks: k_rank={safe_k_rank}, v_rank={safe_v_rank}")
             
             # Create caches with safe dimensions
             k_cache_A = torch.zeros(

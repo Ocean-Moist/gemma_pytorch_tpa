@@ -415,9 +415,13 @@ def gqa_to_tpa_conversion(
         v_recon[:, g, :] = (v_group_A @ v_group_B).reshape(hidden_dim, head_dim)
         
     # Add factorization ranks to results - store as simple integers, not tensors
-    result["q_rank"] = q_rank
-    result["k_rank"] = k_rank
-    result["v_rank"] = v_rank
+    # This is critical for proper KV cache creation
+    result["q_rank"] = int(q_rank)
+    result["k_rank"] = int(k_rank)
+    result["v_rank"] = int(v_rank)
+    
+    print(f"Using ACTUAL ranks for factorized weights - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
+    print(f"Important: These might differ from the requested ranks")
     
     # Reshape for error calculation
     q_recon = q_recon.reshape(hidden_dim, -1)
@@ -895,6 +899,9 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
         use_dynamic_ranks=use_dynamic_ranks
     )
     
+    # Initialize structure to record layer-specific ranks
+    layer_ranks = []
+    
     # Now copy the factorized weights from the converted model to the TPA model
     print("Copying factorized TPA weights...")
     for name, module in standard_model_converted.named_modules():
@@ -903,6 +910,18 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
             
             # Determine the corresponding name in the TPA model
             tpa_module_name = name
+            
+            # Extract layer index if possible
+            layer_idx = -1
+            if "layers." in tpa_module_name:
+                try:
+                    parts = tpa_module_name.split("layers.")
+                    if len(parts) > 1:
+                        idx_part = parts[1].split(".")[0]
+                        layer_idx = int(idx_part)
+                        print(f"  Layer index: {layer_idx}")
+                except Exception as e:
+                    print(f"  Could not extract layer index: {e}")
             
             # Find the module in the TPA model
             tpa_module = tpa_model
@@ -917,20 +936,32 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
             # So we need to create proper nn.Linear modules with the weights
 
             # First, extract the dimensions and ranks
+            layer_specific_ranks = {}
             for key in ['q_rank', 'k_rank', 'v_rank']:
                 if hasattr(module, key):
                     value = getattr(module, key)
-                    # Set these directly
+                    # Store the rank in our layer-specific dict
+                    layer_specific_ranks[key] = value
+                    # Set these directly on the module
                     setattr(tpa_module, key, value)
+            
+            # Record the layer-specific ranks for KV cache creation
+            if layer_idx >= 0:
+                # Ensure list is long enough
+                while len(layer_ranks) <= layer_idx:
+                    layer_ranks.append({})
+                # Store this layer's ranks
+                layer_ranks[layer_idx] = layer_specific_ranks
+                print(f"  Recorded ranks for layer {layer_idx}: {layer_specific_ranks}")
             
             # Extract head dimensions and counts from the TPA module
             num_heads = getattr(tpa_module, 'num_heads', 4)
             num_kv_heads = getattr(tpa_module, 'num_kv_heads', 1)
             head_dim = getattr(tpa_module, 'head_dim', 256)
             hidden_dim = getattr(tpa_module, 'hidden_size', 1024)
-            q_rank = getattr(tpa_module, 'q_rank', 6)
-            k_rank = getattr(tpa_module, 'k_rank', 2) 
-            v_rank = getattr(tpa_module, 'v_rank', 2)
+            q_rank = layer_specific_ranks.get('q_rank', 6)
+            k_rank = layer_specific_ranks.get('k_rank', 2)
+            v_rank = layer_specific_ranks.get('v_rank', 2)
             
             # For each weight matrix in the converted standard model
             weight_pairs = [
@@ -974,6 +1005,16 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
             
             # Mark the TPA module as using factorized weights
             tpa_module.use_factorized_weights = True
+    
+    # Store layer-specific ranks in config for KV cache creation
+    if layer_ranks:
+        print(f"Storing layer-specific ranks in model config: {layer_ranks}")
+        if not hasattr(config, 'model_structure'):
+            config.model_structure = {}
+        config.model_structure["layer_ranks"] = layer_ranks
+        
+        # Update the model's config to match
+        tpa_model.config = config
     
     # Set the tokenizer if available
     if hasattr(standard_model, 'tokenizer'):
