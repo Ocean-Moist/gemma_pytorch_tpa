@@ -326,11 +326,10 @@ def main(_):
   
   try:
       # Use the model's built-in generate method
-      prompt = [(_PROMPT.value,)]  # Format compatible with Gemma3 models
+      prompt = [_PROMPT.value]  # Format compatible with Gemma3 models
       outputs = model.generate(
           prompts=prompt,
-          device=device,
-          output_len=_OUTPUT_LEN.value,
+          max_tokens=_OUTPUT_LEN.value,
           temperature=_TEMPERATURE.value,
           top_p=_TOP_P.value,
           top_k=_TOP_K.value

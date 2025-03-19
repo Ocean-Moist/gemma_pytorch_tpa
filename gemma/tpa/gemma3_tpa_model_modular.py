@@ -391,6 +391,9 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         batch_size = len(prompts)
         tokenized = []
         for prompt in prompts:
+            # Make sure prompt is a string
+            if not isinstance(prompt, str):
+                prompt = str(prompt)
             tokens = self.tokenizer.encode(prompt)
             tokenized.append(tokens)
         
