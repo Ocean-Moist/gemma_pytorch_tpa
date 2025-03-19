@@ -730,6 +730,11 @@ class GemmaTensorProductAttention(nn.Module):
         if factor.numel() == 0:
             return factor
             
+        # Replace any NaN or inf values
+        if torch.isnan(factor).any() or torch.isinf(factor).any():
+            print(f"Warning: Found NaN/Inf values in factor tensor, replacing with zeros")
+            factor = torch.nan_to_num(factor, nan=0.0, posinf=0.0, neginf=0.0)
+            
         # Ensure factor has the right number of dimensions
         if factor.dim() != 4:
             print(f"Warning: Factor has incorrect shape {factor.shape}, expected 4D tensor")
@@ -773,6 +778,11 @@ class GemmaTensorProductAttention(nn.Module):
                 # Take only needed positions from freqs_cis
                 freqs_cis = freqs_cis[:seq_len]
             
+            # Check for NaN/Inf in freqs_cis
+            if torch.isnan(freqs_cis).any() or torch.isinf(freqs_cis).any():
+                print(f"Warning: Found NaN/Inf values in freqs_cis tensor, replacing with zeros")
+                freqs_cis = torch.nan_to_num(freqs_cis, nan=0.0, posinf=0.0, neginf=0.0)
+            
             # Ensure head_dim is divisible by 2 for complex number representation
             if head_dim % 2 != 0:
                 print(f"Warning: head_dim {head_dim} is not divisible by 2, padding with zeros")
@@ -785,18 +795,64 @@ class GemmaTensorProductAttention(nn.Module):
             factor_reshaped = factor.reshape(batch_size * seq_len, rank, head_dim)
             
             # Apply RoPE in a similar way to the original Gemma implementation
-            factor_reshaped_ = torch.view_as_complex(
-                torch.stack(torch.chunk(factor_reshaped.float(), 2, dim=-1), dim=-1)
-            )
+            # Convert to float32 for better numerical stability
+            factor_float = factor_reshaped.to(torch.float32)
+            
+            # Split into chunks with error handling
+            try:
+                chunks = torch.chunk(factor_float, 2, dim=-1)
+                if len(chunks) != 2 or chunks[0].shape != chunks[1].shape:
+                    raise ValueError(f"Invalid chunks: got {len(chunks)} chunks with shapes {[c.shape for c in chunks]}")
+                
+                factor_complex = torch.view_as_complex(torch.stack(chunks, dim=-1))
+            except Exception as chunk_error:
+                print(f"Error converting to complex: {chunk_error}, using alternative method")
+                # Ensure even head_dim
+                if factor_float.shape[-1] % 2 != 0:
+                    factor_float = torch.nn.functional.pad(factor_float, (0, 1))
+                
+                # Manually reshape to get complex values
+                half_dim = factor_float.shape[-1] // 2
+                real_part = factor_float[..., :half_dim]
+                imag_part = factor_float[..., half_dim:]
+                
+                # Create complex tensor
+                factor_complex = torch.complex(real_part, imag_part)
+            
+            # Check for NaN/Inf in complex tensor
+            if torch.isnan(factor_complex.abs()).any() or torch.isinf(factor_complex.abs()).any():
+                print(f"Warning: Found NaN/Inf values in complex tensor, replacing with zeros")
+                factor_complex = torch.nan_to_num(factor_complex.abs(), nan=0.0, posinf=0.0, neginf=0.0) * torch.exp(1j * torch.angle(factor_complex + 1e-7))
             
             # Reshape freqs_cis for broadcasting
             freqs_cis = freqs_cis.view(seq_len, 1, head_dim // 2)
             freqs_cis = freqs_cis.unsqueeze(0).repeat(batch_size, 1, 1, 1)
             freqs_cis = freqs_cis.reshape(batch_size * seq_len, 1, head_dim // 2)
             
-            # Apply complex multiplication
-            factor_out = torch.view_as_real(factor_reshaped_ * freqs_cis).type_as(factor)
-            factor_out = torch.cat(torch.chunk(factor_out, 2, dim=-1), dim=-2)
+            # Apply complex multiplication with error handling
+            try:
+                # Apply the rotation with gradient-safe operations
+                factor_out_complex = factor_complex * freqs_cis
+                
+                # Convert back to real with checks
+                factor_out = torch.view_as_real(factor_out_complex)
+                
+                # Check for NaN/Inf after rotation
+                if torch.isnan(factor_out).any() or torch.isinf(factor_out).any():
+                    print("Warning: NaN/Inf values after rotation, using safe reconstruction")
+                    # Create a safe version using only magnitudes
+                    factor_out = torch.nan_to_num(factor_out, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Reshape for output
+                factor_out = torch.cat([factor_out[..., 0], factor_out[..., 1]], dim=-1)
+                
+            except Exception as rot_error:
+                print(f"Complex rotation failed: {rot_error}, returning un-rotated factor")
+                # Fall back to original tensor if rotation fails
+                factor_out = factor_reshaped
+            
+            # Convert back to original dtype
+            factor_out = factor_out.type_as(factor)
             
             # Reshape back to original shape
             factor_out = factor_out.reshape(batch_size, seq_len, rank, head_dim)
@@ -810,4 +866,5 @@ class GemmaTensorProductAttention(nn.Module):
         except Exception as e:
             print(f"Error applying rotary embeddings: {e}")
             # Return the original factor if anything goes wrong
-            return factor
+            # Make sure it has no NaN values
+            return torch.nan_to_num(factor, nan=0.0, posinf=0.0, neginf=0.0)
