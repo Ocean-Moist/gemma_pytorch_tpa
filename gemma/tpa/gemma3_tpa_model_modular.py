@@ -23,13 +23,7 @@ from ..siglip_vision import siglip_vision_model
 from .tpa_model import GemmaTPAModel, create_tpa_kv_caches
 import torch.nn.functional as F
 
-# Import modular components
-from .modules.tucker_factorization import (
-    factorize_all_layers_with_shared_factors,
-    _factorize_mha_weights_with_shared_factors,
-    adaptive_rank_selection,
-    _factorize_and_set_weights
-)
+
 from .modules.contextual_factorization import (
     contextual_tensor_decomposition,
     apply_contextual_tensor_decomposition,
@@ -550,11 +544,6 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         gc.collect()
         torch.cuda.empty_cache()
         
-    # Delegate factorization methods to module functions
-    def factorize_all_layers_with_shared_factors(self):
-        """Factorize all layers using Tucker decomposition with shared factors."""
-        return factorize_all_layers_with_shared_factors(self.model, self.config)
-    
     def apply_contextual_tensor_decomposition(self):
         """Apply T6-style contextual tensor factorization to all layers."""
         return apply_contextual_tensor_decomposition(

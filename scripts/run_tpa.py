@@ -274,16 +274,23 @@ def main(_):
               except Exception as e:
                   print(f"Error copying parameter {name}: {e}")
           
-          # Apply Tucker factorization directly to the standard model, then transfer to TPA model
-          # Import the factorization function
-          from gemma.tpa.modules.tucker_factorization import factorize_all_layers_with_shared_factors
+          # Import the factorization functions
+          from gemma.tpa.modules.contextual_factorization import tucker_tensor_decomposition, HAS_TENSORLY
           
-          # Factorize the standard model
-          print("Applying Tucker factorization to standard model")
-          tucker_results = factorize_all_layers_with_shared_factors(standard_model.model, model_config)
+          # Use the built-in convert_from_standard_weights method which now supports Tucker factorization
+          q_rank = _Q_RANK.value
+          k_rank = _K_RANK.value
+          v_rank = _V_RANK.value
+          print(f"Converting model using {'Tucker' if HAS_TENSORLY else 'contextual'} factorization")
+          print(f"Ranks: Q={q_rank}, K={k_rank}, V={v_rank}")
           
-          # Now transfer the factorized weights to the TPA model
-          print("Transferring factorized weights to TPA model")
+          # Make sure model config has correct ranks
+          tpa_model.config.q_rank = q_rank
+          tpa_model.config.k_rank = k_rank
+          tpa_model.config.v_rank = v_rank
+          
+          # Convert using the built-in method that now uses Tucker factorization when available
+          tpa_model = tpa_model.convert_from_standard_weights(standard_model)
           
           convert_time = time() - convert_start
           print(f"Model converted to TPA in {convert_time:.2f} seconds")
@@ -433,14 +440,17 @@ if __name__ == '__main__':
 
 # Example commands:
 # 
-# Convert standard weights to TPA and run inference:
+# Convert standard weights to TPA using Tucker factorization and run inference:
 # python scripts/run_tpa.py \
 #   --ckpt=/path/to/gemma_model.ckpt \
 #   --variant=1b \
 #   --prompt="Write a poem about mathematics" \
 #   --convert \
 #   --save_tpa=/path/to/save/tpa_model.pt \
-#   --device=cpu
+#   --q_rank=6 \
+#   --k_rank=2 \
+#   --v_rank=2 \
+#   --device=cuda
 #
 # Run inference with already converted TPA model:
 # python scripts/run_tpa.py \
@@ -448,4 +458,4 @@ if __name__ == '__main__':
 #   --variant=1b \
 #   --prompt="Explain quantum mechanics" \
 #   --convert=False \
-#   --device=cpu
+#   --device=cuda
