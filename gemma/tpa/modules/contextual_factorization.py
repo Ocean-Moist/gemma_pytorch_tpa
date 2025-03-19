@@ -167,7 +167,8 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     
     # Process query weights
     # Reshape to 3D tensor [head_dim, num_heads, input_dim]
-    wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).cpu().numpy()
+    # Keep as PyTorch tensor rather than converting to numpy
+    wq_tensor = q_weight.reshape(head_dim, num_heads, input_dim).cpu()
     
     # Apply Tucker decomposition to query weights
     rank = [q_rank, None, q_rank]  # Rank for dimensions
@@ -176,32 +177,32 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×q_rank, U3 ~ input_dim×q_rank
     
-    # Create Wa_q and Wb_q
-    Wa_q = np.zeros((input_dim, q_rank, num_heads))
-    Wb_q = np.zeros((input_dim, q_rank, head_dim))
+    # Create Wa_q and Wb_q as PyTorch tensors
+    Wa_q = torch.zeros((input_dim, q_rank, num_heads), dtype=torch.float32)
+    Wb_q = torch.zeros((input_dim, q_rank, head_dim), dtype=torch.float32)
     
     # Map decomposition to TPA factors
     for r in range(q_rank):
         for i in range(num_heads):
             # Project core tensor for this head and rank
             proj_vector = core[r, i, :]
-            Wa_q[:, r, i] = U3[:, r] * np.linalg.norm(proj_vector)
+            Wa_q[:, r, i] = U3[:, r] * torch.norm(proj_vector)
         
-        # Shared b factor across heads
-        Wb_q[:, r, :] = np.outer(U3[:, r], U1[:, r])
+        # Shared b factor across heads - use PyTorch's outer product
+        Wb_q[:, r, :] = torch.outer(U3[:, r], U1[:, r])
     
     # Normalize factors
     for r in range(q_rank):
-        norm_a = np.linalg.norm(Wa_q[:, r, :])
-        norm_b = np.linalg.norm(Wb_q[:, r, :])
+        norm_a = torch.norm(Wa_q[:, r, :])
+        norm_b = torch.norm(Wb_q[:, r, :])
         if norm_a > 0 and norm_b > 0:
-            scale = np.sqrt(norm_a * norm_b)
-            Wa_q[:, r, :] /= np.sqrt(scale)
-            Wb_q[:, r, :] /= np.sqrt(scale)
+            scale = torch.sqrt(norm_a * norm_b)
+            Wa_q[:, r, :] /= torch.sqrt(scale)
+            Wb_q[:, r, :] /= torch.sqrt(scale)
     
-    # Convert to torch tensors
-    tpa_weights['Wa_q'] = torch.tensor(Wa_q, dtype=dtype, device=device)
-    tpa_weights['Wb_q'] = torch.tensor(Wb_q, dtype=dtype, device=device)
+    # Convert to the right device and dtype
+    tpa_weights['Wa_q'] = Wa_q.to(dtype=dtype, device=device)
+    tpa_weights['Wb_q'] = Wb_q.to(dtype=dtype, device=device)
     
     # Process key weights
     # Make sure we have float32 for numpy compatibility
@@ -209,7 +210,8 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
         k_weight = k_weight.to(torch.float32)
     
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).cpu().numpy()
+    # Keep as PyTorch tensor rather than converting to numpy
+    wk_tensor = k_weight.reshape(head_dim, num_kv_heads, input_dim).cpu()
     
     # Apply Tucker decomposition to key weights
     rank = [k_rank, None, k_rank]  # Rank for dimensions
@@ -218,9 +220,9 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×k_rank, U3 ~ input_dim×k_rank
     
-    # Create Wa_k and Wb_k
-    Wa_k = np.zeros((input_dim, k_rank, num_heads))
-    Wb_k = np.zeros((input_dim, k_rank, head_dim))
+    # Create Wa_k and Wb_k as PyTorch tensors
+    Wa_k = torch.zeros((input_dim, k_rank, num_heads), dtype=torch.float32)
+    Wb_k = torch.zeros((input_dim, k_rank, head_dim), dtype=torch.float32)
     
     # Map head groups - repeating heads for MQA/GQA
     heads_per_kv = num_heads // num_kv_heads
@@ -234,23 +236,23 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
             # Copy to each head in this group
             for j in range(heads_per_kv):
                 head_idx = i * heads_per_kv + j
-                Wa_k[:, r, head_idx] = U3[:, r] * np.linalg.norm(proj_vector)
+                Wa_k[:, r, head_idx] = U3[:, r] * torch.norm(proj_vector)
         
         # Shared b factor across heads
-        Wb_k[:, r, :] = np.outer(U3[:, r], U1[:, r])
+        Wb_k[:, r, :] = torch.outer(U3[:, r], U1[:, r])
     
     # Normalize factors
     for r in range(k_rank):
-        norm_a = np.linalg.norm(Wa_k[:, r, :])
-        norm_b = np.linalg.norm(Wb_k[:, r, :])
+        norm_a = torch.norm(Wa_k[:, r, :])
+        norm_b = torch.norm(Wb_k[:, r, :])
         if norm_a > 0 and norm_b > 0:
-            scale = np.sqrt(norm_a * norm_b)
-            Wa_k[:, r, :] /= np.sqrt(scale)
-            Wb_k[:, r, :] /= np.sqrt(scale)
+            scale = torch.sqrt(norm_a * norm_b)
+            Wa_k[:, r, :] /= torch.sqrt(scale)
+            Wb_k[:, r, :] /= torch.sqrt(scale)
     
-    # Convert to torch tensors
-    tpa_weights['Wa_k'] = torch.tensor(Wa_k, dtype=dtype, device=device)
-    tpa_weights['Wb_k'] = torch.tensor(Wb_k, dtype=dtype, device=device)
+    # Convert to the right device and dtype
+    tpa_weights['Wa_k'] = Wa_k.to(dtype=dtype, device=device)
+    tpa_weights['Wb_k'] = Wb_k.to(dtype=dtype, device=device)
     
     # Process value weights
     # Make sure we have float32 for numpy compatibility
@@ -258,7 +260,8 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
         v_weight = v_weight.to(torch.float32)
     
     # Reshape to 3D tensor [head_dim, num_kv_heads, input_dim]
-    wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).cpu().numpy()
+    # Keep as PyTorch tensor rather than converting to numpy
+    wv_tensor = v_weight.reshape(head_dim, num_kv_heads, input_dim).cpu()
     
     # Apply Tucker decomposition to value weights
     rank = [v_rank, None, v_rank]  # Rank for dimensions
@@ -267,9 +270,9 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
     # Map to TPA parameters
     U1, U3 = factors[0], factors[2]  # U1 ~ head_dim×v_rank, U3 ~ input_dim×v_rank
     
-    # Create Wa_v and Wb_v
-    Wa_v = np.zeros((input_dim, v_rank, num_heads))
-    Wb_v = np.zeros((input_dim, v_rank, head_dim))
+    # Create Wa_v and Wb_v as PyTorch tensors
+    Wa_v = torch.zeros((input_dim, v_rank, num_heads), dtype=torch.float32)
+    Wb_v = torch.zeros((input_dim, v_rank, head_dim), dtype=torch.float32)
     
     # Map decomposition to TPA factors
     for r in range(v_rank):
@@ -280,23 +283,23 @@ def tucker_tensor_decomposition(weight, num_heads, num_kv_heads, target_ranks, d
             # Copy to each head in this group
             for j in range(heads_per_kv):
                 head_idx = i * heads_per_kv + j
-                Wa_v[:, r, head_idx] = U3[:, r] * np.linalg.norm(proj_vector)
+                Wa_v[:, r, head_idx] = U3[:, r] * torch.norm(proj_vector)
         
         # Shared b factor across heads
-        Wb_v[:, r, :] = np.outer(U3[:, r], U1[:, r])
+        Wb_v[:, r, :] = torch.outer(U3[:, r], U1[:, r])
     
     # Normalize factors
     for r in range(v_rank):
-        norm_a = np.linalg.norm(Wa_v[:, r, :])
-        norm_b = np.linalg.norm(Wb_v[:, r, :])
+        norm_a = torch.norm(Wa_v[:, r, :])
+        norm_b = torch.norm(Wb_v[:, r, :])
         if norm_a > 0 and norm_b > 0:
-            scale = np.sqrt(norm_a * norm_b)
-            Wa_v[:, r, :] /= np.sqrt(scale)
-            Wb_v[:, r, :] /= np.sqrt(scale)
+            scale = torch.sqrt(norm_a * norm_b)
+            Wa_v[:, r, :] /= torch.sqrt(scale)
+            Wb_v[:, r, :] /= torch.sqrt(scale)
     
-    # Convert to torch tensors
-    tpa_weights['Wa_v'] = torch.tensor(Wa_v, dtype=dtype, device=device)
-    tpa_weights['Wb_v'] = torch.tensor(Wb_v, dtype=dtype, device=device)
+    # Convert to the right device and dtype
+    tpa_weights['Wa_v'] = Wa_v.to(dtype=dtype, device=device)
+    tpa_weights['Wb_v'] = Wb_v.to(dtype=dtype, device=device)
     
     return tpa_weights
 
