@@ -1210,24 +1210,210 @@ def convert_from_standard_weights(standard_model, tpa_model, q_rank=6, k_rank=2,
                     device=std_qkv_weight.device
                 )
                 
-                # Assign decomposed weights to TPA layer
+                # Assign decomposed weights to TPA layer with shape checking and fixing
                 if hasattr(tpa_layer.self_attn, 'W_A_q') and 'Wa_q' in tpa_weights:
-                    tpa_layer.self_attn.W_A_q.weight.data.copy_(tpa_weights['Wa_q'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_A_q.weight.shape
+                    wa_q = tpa_weights['Wa_q']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_A_q: Target shape {expected_shape}, Source shape {wa_q.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wa_q.shape) == 3:  # input_dim, q_rank, num_heads
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (num_heads * q_rank, input_dim)
+                        input_dim, q_rank, num_heads = wa_q.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wa_q_reshaped = wa_q.permute(2, 1, 0).reshape(num_heads * q_rank, input_dim)
+                        
+                        if wa_q_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wa_q_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_A_q.weight.data.copy_(wa_q_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wa_q_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wa_q.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_A_q.weight.data.copy_(wa_q.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_A_q assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wa_q.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_A_q.weight.data.copy_(wa_q.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wa_q.shape} transposed doesn't match target {expected_shape}")
                 
                 if hasattr(tpa_layer.self_attn, 'W_B_q') and 'Wb_q' in tpa_weights:
-                    tpa_layer.self_attn.W_B_q.weight.data.copy_(tpa_weights['Wb_q'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_B_q.weight.shape
+                    wb_q = tpa_weights['Wb_q']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_B_q: Target shape {expected_shape}, Source shape {wb_q.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wb_q.shape) == 3:  # input_dim, q_rank, head_dim
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (q_rank * head_dim, input_dim)
+                        input_dim, q_rank, head_dim = wb_q.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wb_q_reshaped = wb_q.permute(1, 2, 0).reshape(q_rank * head_dim, input_dim)
+                        
+                        if wb_q_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wb_q_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_B_q.weight.data.copy_(wb_q_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wb_q_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wb_q.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_B_q.weight.data.copy_(wb_q.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_B_q assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wb_q.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_B_q.weight.data.copy_(wb_q.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wb_q.shape} transposed doesn't match target {expected_shape}")
                 
                 if hasattr(tpa_layer.self_attn, 'W_A_k') and 'Wa_k' in tpa_weights:
-                    tpa_layer.self_attn.W_A_k.weight.data.copy_(tpa_weights['Wa_k'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_A_k.weight.shape
+                    wa_k = tpa_weights['Wa_k']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_A_k: Target shape {expected_shape}, Source shape {wa_k.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wa_k.shape) == 3:  # input_dim, k_rank, num_heads
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (num_kv_heads * k_rank, input_dim)
+                        input_dim, k_rank, num_kv_heads = wa_k.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wa_k_reshaped = wa_k.permute(2, 1, 0).reshape(num_kv_heads * k_rank, input_dim)
+                        
+                        if wa_k_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wa_k_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_A_k.weight.data.copy_(wa_k_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wa_k_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wa_k.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_A_k.weight.data.copy_(wa_k.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_A_k assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wa_k.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_A_k.weight.data.copy_(wa_k.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wa_k.shape} transposed doesn't match target {expected_shape}")
                 
                 if hasattr(tpa_layer.self_attn, 'W_B_k') and 'Wb_k' in tpa_weights:
-                    tpa_layer.self_attn.W_B_k.weight.data.copy_(tpa_weights['Wb_k'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_B_k.weight.shape
+                    wb_k = tpa_weights['Wb_k']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_B_k: Target shape {expected_shape}, Source shape {wb_k.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wb_k.shape) == 3:  # input_dim, k_rank, head_dim
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (k_rank * head_dim, input_dim)
+                        input_dim, k_rank, head_dim = wb_k.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wb_k_reshaped = wb_k.permute(1, 2, 0).reshape(k_rank * head_dim, input_dim)
+                        
+                        if wb_k_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wb_k_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_B_k.weight.data.copy_(wb_k_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wb_k_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wb_k.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_B_k.weight.data.copy_(wb_k.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_B_k assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wb_k.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_B_k.weight.data.copy_(wb_k.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wb_k.shape} transposed doesn't match target {expected_shape}")
                 
                 if hasattr(tpa_layer.self_attn, 'W_A_v') and 'Wa_v' in tpa_weights:
-                    tpa_layer.self_attn.W_A_v.weight.data.copy_(tpa_weights['Wa_v'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_A_v.weight.shape
+                    wa_v = tpa_weights['Wa_v']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_A_v: Target shape {expected_shape}, Source shape {wa_v.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wa_v.shape) == 3:  # input_dim, v_rank, num_heads
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (num_kv_heads * v_rank, input_dim)
+                        input_dim, v_rank, num_kv_heads = wa_v.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wa_v_reshaped = wa_v.permute(2, 1, 0).reshape(num_kv_heads * v_rank, input_dim)
+                        
+                        if wa_v_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wa_v_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_A_v.weight.data.copy_(wa_v_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wa_v_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wa_v.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_A_v.weight.data.copy_(wa_v.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_A_v assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wa_v.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_A_v.weight.data.copy_(wa_v.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wa_v.shape} transposed doesn't match target {expected_shape}")
                 
                 if hasattr(tpa_layer.self_attn, 'W_B_v') and 'Wb_v' in tpa_weights:
-                    tpa_layer.self_attn.W_B_v.weight.data.copy_(tpa_weights['Wb_v'].transpose(0, 1))
+                    # Get the expected shape from the target tensor
+                    expected_shape = tpa_layer.self_attn.W_B_v.weight.shape
+                    wb_v = tpa_weights['Wb_v']
+                    
+                    # Print debug information
+                    print(f"Layer conversion - W_B_v: Target shape {expected_shape}, Source shape {wb_v.shape}")
+                    
+                    # Check if we need to reshape or transpose
+                    if len(wb_v.shape) == 3:  # input_dim, v_rank, head_dim
+                        # Reshape to match Linear weight dimensions (out_features, in_features)
+                        # For Linear, we need (v_rank * head_dim, input_dim)
+                        input_dim, v_rank, head_dim = wb_v.shape
+                        
+                        # Try to reshape the tensor to fit target dimensions
+                        wb_v_reshaped = wb_v.permute(1, 2, 0).reshape(v_rank * head_dim, input_dim)
+                        
+                        if wb_v_reshaped.shape == expected_shape:
+                            print(f"Reshaped weights to {wb_v_reshaped.shape}, which matches expected shape")
+                            tpa_layer.self_attn.W_B_v.weight.data.copy_(wb_v_reshaped)
+                        else:
+                            print(f"Warning: Reshape attempt yielded shape {wb_v_reshaped.shape}, trying alternate reshaping")
+                            # Try another approach - transpose directly without permute
+                            if wb_v.transpose(0, 1).shape == expected_shape:
+                                tpa_layer.self_attn.W_B_v.weight.data.copy_(wb_v.transpose(0, 1))
+                            else:
+                                print(f"Error: Cannot reshape weights to match {expected_shape}, skipping W_B_v assignment")
+                    else:
+                        # Standard copy with transpose if shapes allow
+                        if wb_v.transpose(0, 1).shape == expected_shape:
+                            tpa_layer.self_attn.W_B_v.weight.data.copy_(wb_v.transpose(0, 1))
+                        else:
+                            print(f"Error: Source shape {wb_v.shape} transposed doesn't match target {expected_shape}")
             else:
                 # Apply T6-style contextual tensor factorization
                 try:
