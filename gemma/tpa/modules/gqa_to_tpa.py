@@ -375,90 +375,191 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
     print(f"Model type: {type(model).__name__}")
     print("Searching for attention modules...")
     
-    # Count modules with attention structure
-    for name, module in model.named_modules():
-        if hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
-            attention_modules_found += 1
-            print(f"Found attention module: {name}, type: {type(module).__name__}")
-            
-            # Check if it has GQA structure
-            if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
-                num_heads = module.num_heads
-                num_kv_heads = module.num_key_value_heads
-                print(f"  GQA structure verified: {num_heads} heads, {num_kv_heads} KV heads")
-                
-                # Check if apply_factorized_weights exists
-                if hasattr(module, "apply_factorized_weights"):
-                    print(f"  Module supports factorized weights")
-                else:
-                    print(f"  WARNING: Module does not support applying factorized weights")
+    # GemmaAttention modules are found in different structures based on the model architecture
+    # We'll handle both GemmaForCausalLM and Gemma3ForMultimodalLM structures
+    attention_modules = []
+    
+    # Check if using standard GemmaForCausalLM structure
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        print("Detected standard GemmaForCausalLM structure")
+        for i, layer in enumerate(model.model.layers):
+            if hasattr(layer, "self_attn"):
+                attention_module = layer.self_attn
+                if hasattr(attention_module, "qkv_proj"):
+                    # Standard Gemma attention with combined QKV projection
+                    print(f"  Found QKV-combined attention module in layer {i}")
+                    # For standard Gemma attention, we need to split the QKV projection
+                    # This requires additional handling for the weights
+                    attention_modules.append((f"model.layers.{i}.self_attn", attention_module, "combined_qkv"))
+                    attention_modules_found += 1
+                elif hasattr(attention_module, "q_proj") and hasattr(attention_module, "k_proj") and hasattr(attention_module, "v_proj"):
+                    # Already split Q,K,V projections
+                    print(f"  Found split-QKV attention module in layer {i}")
+                    attention_modules.append((f"model.layers.{i}.self_attn", attention_module, "split_qkv"))
+                    attention_modules_found += 1
+    
+    # Check if using Gemma TPA model structure
+    elif hasattr(model, "model") and hasattr(model.model, "layers") and hasattr(model.model.layers[0], "self_attn"):
+        print("Detected Gemma TPA model structure")
+        for i, layer in enumerate(model.model.layers):
+            attention_module = layer.self_attn
+            if hasattr(attention_module, "W_A_q") and hasattr(attention_module, "W_B_q"):
+                # Already a TPA module
+                print(f"  Layer {i} already using TPA attention - skipping")
+            elif hasattr(attention_module, "q_proj") and hasattr(attention_module, "k_proj") and hasattr(attention_module, "v_proj"):
+                print(f"  Found split-QKV attention module in layer {i}")
+                attention_modules.append((f"model.model.layers.{i}.self_attn", attention_module, "split_qkv"))
+                attention_modules_found += 1
+    
+    # If no attention modules found yet, try to find them in named_modules
+    if attention_modules_found == 0:
+        print("No attention modules found in standard structure, searching all modules...")
+        for name, module in model.named_modules():
+            if hasattr(module, "qkv_proj") and hasattr(module, "o_proj"):
+                # Standard Gemma attention with combined QKV projection
+                print(f"  Found combined-QKV attention module: {name}")
+                attention_modules.append((name, module, "combined_qkv"))
+                attention_modules_found += 1
+            elif hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
+                # Split Q,K,V projections
+                print(f"  Found split-QKV attention module: {name}")
+                attention_modules.append((name, module, "split_qkv"))
+                attention_modules_found += 1
     
     if attention_modules_found == 0:
         print("ERROR: No attention modules found in the model!")
         print("Model structure may not be compatible with this conversion method")
+        print("Expected structure: model.model.layers[i].self_attn")
+        print("Showing all top-level attributes of model:")
+        for attr_name in dir(model):
+            if not attr_name.startswith('_'):
+                print(f"  {attr_name}")
+        
+        if hasattr(model, "model"):
+            print("Showing all attributes of model.model:")
+            for attr_name in dir(model.model):
+                if not attr_name.startswith('_'):
+                    print(f"  {attr_name}")
+        
         return model
         
     print(f"Found {attention_modules_found} attention modules to convert")
     
     # Process each module
-    for name, module in model.named_modules():
-        # Identify modules that have the query, key, value projections
-        if hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
-            print(f"Converting attention layer: {name}")
-            layer_start = time.time()
+    for name, module, module_type in attention_modules:
+        print(f"Converting attention layer: {name} (type: {module_type})")
+        layer_start = time.time()
+        
+        # Get or derive the number of heads and kv heads
+        if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
+            num_heads = module.num_heads
+            num_kv_heads = module.num_key_value_heads
+            print(f"  GQA structure verified: {num_heads} heads, {num_kv_heads} KV heads")
+        else:
+            # Try to infer from model config
+            if hasattr(model, "config"):
+                num_heads = getattr(model.config, "num_attention_heads", None)
+                num_kv_heads = getattr(model.config, "num_key_value_heads", num_heads)
+                if num_heads is not None:
+                    print(f"  Inferred from config: {num_heads} heads, {num_kv_heads} KV heads")
+                else:
+                    print(f"  ERROR: Could not determine num_heads from config")
+                    continue
+            else:
+                print(f"  ERROR: Module {name} does not have GQA structure and no config found")
+                continue
+        
+        # Check if apply_factorized_weights exists
+        if hasattr(module, "apply_factorized_weights"):
+            print(f"  Module supports factorized weights")
+        else:
+            print(f"  WARNING: Module does not support applying factorized weights")
+            print(f"  Adding apply_factorized_weights method dynamically")
             
-            # Get the number of heads and kv heads (groups)
-            if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
-                num_heads = module.num_heads
-                num_kv_heads = module.num_key_value_heads
+            # Dynamically add method to apply_factorized_weights if it doesn't exist
+            def apply_factorized_weights_fn(self, weights_dict):
+                """Dynamically added method to apply factorized weights to attention module"""
+                # Set factorized flag
+                self.use_factorized_weights = True
                 
-                print(f"  Heads: {num_heads}, KV heads: {num_kv_heads}")
+                # Store the factorized weights
+                for key, weight in weights_dict.items():
+                    setattr(self, key, nn.Parameter(weight))
                 
-                # Print weight dimensions for debugging
+                # Remember original weights were factorized
+                self.original_weights_replaced = True
+            
+            # Bind the method to the module
+            import types
+            module.apply_factorized_weights = types.MethodType(apply_factorized_weights_fn, module)
+            module.use_factorized_weights = False
+            
+        try:
+            # Handle different module types
+            if module_type == "combined_qkv":
+                # For combined QKV projection, we need to extract the separate weights
+                qkv_weight = module.qkv_proj.weight
+                q_size = num_heads * module.head_dim
+                kv_size = num_kv_heads * module.head_dim
+                
+                # Split the combined weights
+                q_weight, k_weight, v_weight = qkv_weight.split(
+                    [q_size, kv_size, kv_size], dim=0
+                )
+                
+                o_weight = module.o_proj.weight
+                
+                print(f"  Split combined QKV projection: Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}")
+            
+            elif module_type == "split_qkv":
+                # Already has separate Q, K, V projections
                 q_weight = module.q_proj.weight
                 k_weight = module.k_proj.weight
                 v_weight = module.v_proj.weight
                 o_weight = module.o_proj.weight
                 
                 print(f"  Weight dimensions - Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}, O: {o_weight.shape}")
-                
-                try:
-                    # Apply GQA to TPA conversion
-                    print(f"  Starting tensor decomposition for layer {name}...")
-                    decomp_start = time.time()
-                    
-                    factorized_weights = gqa_to_tpa_conversion(
-                        q_weight, k_weight, v_weight, o_weight,
-                        num_heads, num_kv_heads,
-                        q_rank, k_rank, v_rank,
-                        dtype, device
-                    )
-                    
-                    decomp_end = time.time()
-                    print(f"  Decomposition completed in {decomp_end - decomp_start:.2f} seconds")
-                    
-                    # Check if factorized weights were created
-                    if not factorized_weights:
-                        print(f"  ERROR: Factorization returned empty result")
-                        continue
-                        
-                    print(f"  Factorized weights keys: {list(factorized_weights.keys())}")
-                    
-                    # Apply factorized weights to the model
-                    if hasattr(module, "apply_factorized_weights"):
-                        print(f"  Applying factorized weights to module...")
-                        module.apply_factorized_weights(factorized_weights)
-                        layers_converted += 1
-                    else:
-                        print(f"  WARNING: Module {name} does not support applying factorized weights")
-                
-                except Exception as e:
-                    print(f"  ERROR in layer {name}: {e}")
-                    import traceback
-                    traceback.print_exc()
             
-            layer_end = time.time()
-            print(f"  Layer conversion took {layer_end - layer_start:.2f} seconds")
+            else:
+                print(f"  ERROR: Unknown module type: {module_type}")
+                continue
+            
+            # Apply GQA to TPA conversion
+            print(f"  Starting tensor decomposition for layer {name}...")
+            decomp_start = time.time()
+            
+            factorized_weights = gqa_to_tpa_conversion(
+                q_weight, k_weight, v_weight, o_weight,
+                num_heads, num_kv_heads,
+                q_rank, k_rank, v_rank,
+                dtype, device
+            )
+            
+            decomp_end = time.time()
+            print(f"  Decomposition completed in {decomp_end - decomp_start:.2f} seconds")
+            
+            # Check if factorized weights were created
+            if not factorized_weights:
+                print(f"  ERROR: Factorization returned empty result")
+                continue
+                
+            print(f"  Factorized weights keys: {list(factorized_weights.keys())}")
+            
+            # Apply factorized weights to the model
+            if hasattr(module, "apply_factorized_weights"):
+                print(f"  Applying factorized weights to module...")
+                module.apply_factorized_weights(factorized_weights)
+                layers_converted += 1
+            else:
+                print(f"  ERROR: Module {name} does not support applying factorized weights")
+        
+        except Exception as e:
+            print(f"  ERROR in layer {name}: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        layer_end = time.time()
+        print(f"  Layer conversion took {layer_end - layer_start:.2f} seconds")
     
     end_time = time.time()
     total_time = end_time - start_time
