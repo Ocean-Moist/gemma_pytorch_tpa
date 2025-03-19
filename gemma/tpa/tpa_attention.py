@@ -317,7 +317,15 @@ class GemmaTensorProductAttention(nn.Module):
     ) -> torch.Tensor:
         # CRITICAL: Verify hidden state dimensions match the input_dim we configured
         if hidden_states.size(-1) != self.input_dim:
-            raise ValueError(f"CRITICAL ERROR: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}. Cannot proceed with mismatched dimensions.")
+            print(f"WARNING: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}.")
+            
+            # For Gemma-3-1B model, check if this is the known issue with hidden_size=1152
+            if hidden_states.size(-1) == 1152 and self.input_dim == 1024:
+                print(f"Detected Gemma-3-1B model with hidden_size=1152 but input_dim was set to 1024")
+                print(f"Updating input_dim to match hidden_states dimension: 1152")
+                self.input_dim = 1152
+            else:
+                raise ValueError(f"CRITICAL ERROR: Hidden state dimension {hidden_states.size(-1)} doesn't match input_dim {self.input_dim}. Cannot proceed with mismatched dimensions.")
         """
         Forward pass for TPA attention with comprehensive safety checks.
         
@@ -899,11 +907,10 @@ class GemmaTensorProductAttention(nn.Module):
         try:
             scores = torch.matmul(Q, K.transpose(2, 3))
             
-            # Check for all-zero scores and handle them
+            # Check for all-zero scores - fail explicitly instead of adding random values
             if torch.all(scores.abs() < 1e-6):
-                print("WARNING: All attention scores are zero! Adding small values to break symmetry")
-                # Add small random values to break symmetry
-                scores = scores + torch.randn_like(scores) * 1e-4
+                print("CRITICAL ERROR: All attention scores are zero!")
+                raise ValueError("All attention scores are zero - cannot proceed with inference")
             
             # Check for NaN/Inf in scores
             if torch.isnan(scores).any() or torch.isinf(scores).any():

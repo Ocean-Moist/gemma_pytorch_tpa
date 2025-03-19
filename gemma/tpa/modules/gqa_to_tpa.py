@@ -83,20 +83,55 @@ def gqa_to_tpa_conversion(
     else:
         print("Transposing output weights to match expected format")
         o_weight = o_weight.to(torch.float32).t()  # Transpose to expected format
+        
+    # Update transposed_weights if we transpose the q,k,v weights later
+    transposed_weights = transposed_weights or need_transpose
     
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
     # This ensures consistency with the model's actual hidden state dimensions
     config_hidden_size = getattr(config, 'hidden_size', None) if config is not None else None
     
+    # For Gemma models, check if weights need to be transposed
+    # In PyTorch Linear layers, weights have shape [out_features, in_features]
+    # But for TPA conversion, we need them in [hidden_dim, projection_dim] format
+    need_transpose = False
+    
     if config_hidden_size is not None:
         hidden_dim = config_hidden_size
         print(f"Using config.hidden_size={hidden_dim} instead of inferring from weights")
-        # CRITICAL: Fail explicitly if weight shape doesn't match config hidden_size
+        
+        # Check if weights are in the wrong orientation (common in PyTorch Linear layers)
+        if q_weight.shape[0] != hidden_dim and q_weight.shape[1] == hidden_dim:
+            print(f"Detected transposed weight orientation: q_weight shape is {q_weight.shape} but hidden_dim={hidden_dim}")
+            print(f"Weights appear to be in PyTorch Linear format [out_features, in_features]")
+            print(f"Transposing weights for proper TPA conversion")
+            
+            # Transpose the weights for TPA conversion
+            q_weight = q_weight.transpose(0, 1)
+            k_weight = k_weight.transpose(0, 1)
+            v_weight = v_weight.transpose(0, 1)
+            need_transpose = True
+            
+            print(f"After transposition: q_weight shape={q_weight.shape}, k_weight shape={k_weight.shape}, v_weight shape={v_weight.shape}")
+        
+        # After possible transposition, verify again
         if q_weight.shape[0] != hidden_dim:
             raise ValueError(f"CRITICAL ERROR: Weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}. Cannot proceed with mismatched dimensions.")
     else:
-        hidden_dim = q_weight.shape[0]
-        print(f"No config.hidden_size provided, inferring hidden_dim={hidden_dim} from weight shape")
+        # No config provided, infer from weights (and possibly transpose)
+        if q_weight.shape[0] > q_weight.shape[1]:
+            # Likely already in the right orientation
+            hidden_dim = q_weight.shape[0]
+        else:
+            # Likely needs transposition
+            print(f"No config.hidden_size provided. Weight shape suggests transposition needed")
+            q_weight = q_weight.transpose(0, 1)
+            k_weight = k_weight.transpose(0, 1)
+            v_weight = v_weight.transpose(0, 1)
+            hidden_dim = q_weight.shape[0]
+            need_transpose = True
+            
+        print(f"Inferred hidden_dim={hidden_dim} from weight shape")
     
     # Check if we have a forced head dimension
     if override_head_dim is not None:
