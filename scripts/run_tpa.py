@@ -47,9 +47,9 @@ _CONVERT = flags.DEFINE_boolean('convert', True,
                                'Whether to convert standard weights to TPA format.')
 _SAVE_TPA = flags.DEFINE_string('save_tpa', None, 
                                'Path to save converted TPA weights.')
-_Q_RANK = flags.DEFINE_integer('q_rank', 6, 'Rank for query factorization in TPA.')
-_K_RANK = flags.DEFINE_integer('k_rank', 2, 'Rank for key factorization in TPA.')
-_V_RANK = flags.DEFINE_integer('v_rank', 2, 'Rank for value factorization in TPA.')
+_Q_RANK = flags.DEFINE_integer('q_rank', 4, 'Rank for query factorization in TPA.')
+_K_RANK = flags.DEFINE_integer('k_rank', 1, 'Rank for key factorization in TPA.')
+_V_RANK = flags.DEFINE_integer('v_rank', 1, 'Rank for value factorization in TPA.')
 _PROMPT = flags.DEFINE_string('prompt', 'What are large language models?', 
                              'Input prompt for the model.')
 _TEMPERATURE = flags.DEFINE_float('temperature', 0.9, 'Temperature for sampling.')
