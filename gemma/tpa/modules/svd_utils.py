@@ -11,6 +11,13 @@ import math
 import scipy.linalg
 from typing import Tuple, Optional, Union, Any
 
+# Check if TensorLy is available
+try:
+    import tensorly as tl
+    HAS_TENSORLY = True
+except ImportError:
+    HAS_TENSORLY = False
+
 # Save the original SVD function
 original_svd = scipy.linalg.svd
 

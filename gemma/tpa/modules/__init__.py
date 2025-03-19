@@ -16,7 +16,8 @@ from .contextual_factorization import (
     memory_efficient_tucker,
     tile_based_tucker,
     unfold_tensor,
-    mode_dot
+    mode_dot,
+    HAS_TENSORLY
 )
 
 # SVD utilities
@@ -49,6 +50,7 @@ __all__ = [
     "patched_svd",
     "randomized_svd_low_memory",
     "randomized_svd_tiled",
+    "HAS_TENSORLY",
     
     # Model conversion
     "apply_contextual_tensor_decomposition",
