@@ -19,7 +19,12 @@ from .svd_utils import HAS_TENSORLY
 if HAS_TENSORLY:
     import tensorly as tl
     from tensorly.decomposition import tucker
+    # Set PyTorch as backend and make sure to use CUDA if available
     tl.set_backend('pytorch')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        # Force TensorLy operations to use CUDA
+        tl.set_device(device)
 
 def contextual_tensor_decomposition(weight, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda"):
     """

@@ -19,7 +19,12 @@ from .svd_utils import HAS_TENSORLY
 if HAS_TENSORLY:
     import tensorly as tl
     from tensorly.decomposition import tucker
+    # Set PyTorch as backend and make sure to use CUDA if available
     tl.set_backend('pytorch')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        # Force TensorLy operations to use CUDA
+        tl.set_device(device)
 
 def gqa_to_tpa_conversion(
     q_weight: torch.Tensor,
@@ -506,6 +511,14 @@ def gqa_to_tpa_conversion(
     W_B_k_optimal = torch.zeros((hidden_dim, k_rank * head_dim), device=k_weight.device, dtype=torch.float32)
     W_B_v_optimal = torch.zeros((hidden_dim, v_rank * head_dim), device=v_weight.device, dtype=torch.float32)
     
+    # Move tensors to the same device as q_weight for computation
+    device = q_weight.device
+    U1 = U1.to(device)
+    U2 = U2.to(device)
+    q_core = q_core.to(device)
+    k_core = k_core.to(device)
+    v_core = v_core.to(device)
+    
     # For queries: Use the core tensor and factors directly to construct optimal projections
     # The optimal approach uses the full Tucker decomposition rather than simplistic outer products
     
@@ -517,7 +530,7 @@ def gqa_to_tpa_conversion(
         # For each head dimension
         for d in range(head_dim):
             # Initialize accumulator for this column
-            col_vector = torch.zeros(hidden_dim, device=q_weight.device, dtype=torch.float32)
+            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
             
             # Compute contribution from each head (since Tucker gives shared factors)
             for h in range(num_heads):
@@ -542,7 +555,7 @@ def gqa_to_tpa_conversion(
     for r in range(k_rank):
         r_actual = r % actual_R2
         for d in range(head_dim):
-            col_vector = torch.zeros(hidden_dim, device=k_weight.device, dtype=torch.float32)
+            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
             for g in range(num_kv_heads):
                 head_core = k_core[:, :, g]
                 hidden_to_r2 = U1 @ head_core
@@ -553,7 +566,7 @@ def gqa_to_tpa_conversion(
     for r in range(v_rank):
         r_actual = r % actual_R2
         for d in range(head_dim):
-            col_vector = torch.zeros(hidden_dim, device=v_weight.device, dtype=torch.float32)
+            col_vector = torch.zeros(hidden_dim, device=device, dtype=torch.float32)
             for g in range(num_kv_heads):
                 head_core = v_core[:, :, g]
                 hidden_to_r2 = U1 @ head_core

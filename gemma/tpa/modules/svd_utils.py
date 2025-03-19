@@ -377,6 +377,12 @@ try:
     # First ensure TensorLy is using PyTorch backend
     tl.set_backend('pytorch')
     
+    # Set device to CUDA if available to ensure GPU usage
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        tl.set_device(device)
+        print(f"TensorLy set to use device: {device}")
+    
     print("Using TensorLy's default SVD implementation (not patched)")
 except ImportError:
     print("TensorLy not available, SVD patching limited to scipy")
