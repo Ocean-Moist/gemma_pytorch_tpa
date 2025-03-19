@@ -482,9 +482,10 @@ def gqa_to_tpa_conversion(
 def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda", use_dynamic_ranks=True):
     """
     Convert a GQA model to TPA format by applying the conversion to each attention layer.
+    This modifies the input model in-place and then returns it.
     
     Args:
-        model: The input model with GQA
+        model: The input model with GQA (GemmaForCausalLM)
         q_rank: Rank for query factorization
         k_rank: Rank for key factorization
         v_rank: Rank for value factorization
@@ -494,7 +495,7 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                           or force specified ranks (False)
         
     Returns:
-        Model with converted weights
+        The modified input model with TPA weights (still a GemmaForCausalLM)
     """
     if not HAS_TENSORLY:
         raise ImportError("TensorLy is required for convert_gqa_model_to_tpa")
@@ -800,3 +801,135 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
     total_time = end_time - start_time
     print(f"GQA to TPA conversion complete: {layers_converted}/{attention_modules_found} layers converted in {total_time:.2f} seconds")
     return model
+
+
+def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2, 
+                                 dtype=torch.float16, device="cuda", use_dynamic_ranks=True):
+    """
+    Create a Gemma3ForMultimodalLMwithTPA model from a standard GemmaForCausalLM model.
+    This function:
+    1. Creates a new TPA model with the same configuration
+    2. Applies TPA factorization to the weights
+    3. Copies over the factorized weights to the TPA model
+    
+    Args:
+        standard_model: A GemmaForCausalLM model to convert
+        q_rank: Rank for query factorization
+        k_rank: Rank for key factorization
+        v_rank: Rank for value factorization
+        dtype: Data type for output tensors
+        device: Device for computation
+        use_dynamic_ranks: Whether to use ranks from Tucker decomposition
+        
+    Returns:
+        A new Gemma3ForMultimodalLMwithTPA model with TPA weights
+    """
+    from ..gemma3_tpa_model_modular import Gemma3ForMultimodalLMwithTPA
+    
+    # Start timing
+    start_time = time.time()
+    print("Creating TPA model from standard model...")
+    
+    # First, create a config for the TPA model based on the standard model's config
+    if hasattr(standard_model, 'config'):
+        config = standard_model.config
+        
+        # Add TPA-specific configuration
+        config.q_rank = q_rank
+        config.k_rank = k_rank
+        config.v_rank = v_rank
+        
+        # For non-MQA/GQA models, ensure num_key_value_heads is set
+        if not hasattr(config, 'num_key_value_heads'):
+            config.num_key_value_heads = config.num_attention_heads
+    else:
+        print("Standard model has no config, creating a default one")
+        from ...config import GemmaConfig
+        
+        # Create a basic config
+        config = GemmaConfig()
+        # Fill in necessary fields
+        if hasattr(standard_model, 'model'):
+            if hasattr(standard_model.model, 'embedder'):
+                config.vocab_size = standard_model.model.embedder.weight.shape[0]
+                config.hidden_size = standard_model.model.embedder.weight.shape[1]
+            
+            if hasattr(standard_model.model, 'layers') and len(standard_model.model.layers) > 0:
+                config.num_layers = len(standard_model.model.layers)
+                if hasattr(standard_model.model.layers[0].self_attn, 'num_heads'):
+                    config.num_attention_heads = standard_model.model.layers[0].self_attn.num_heads
+                    config.num_key_value_heads = getattr(standard_model.model.layers[0].self_attn, 
+                                                       'num_key_value_heads', config.num_attention_heads)
+        
+        # Add TPA parameters
+        config.q_rank = q_rank
+        config.k_rank = k_rank
+        config.v_rank = v_rank
+    
+    # Create a new TPA model with this config
+    tpa_model = Gemma3ForMultimodalLMwithTPA(config)
+    
+    # Set the data type to match
+    tpa_model = tpa_model.to(dtype)
+    
+    # Copy over all non-attention weights
+    print("Copying non-attention weights...")
+    for name, param in standard_model.named_parameters():
+        # Skip attention-related parameters
+        if any(x in name for x in ['qkv_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj', 'attention']):
+            continue
+            
+        # Find corresponding parameter in the TPA model
+        if name in tpa_model.state_dict():
+            tpa_model.state_dict()[name].copy_(param.data)
+    
+    # Apply the GQA to TPA conversion on the standard model
+    print("Applying GQA to TPA conversion...")
+    standard_model_converted = convert_gqa_model_to_tpa(
+        standard_model, 
+        q_rank=q_rank,
+        k_rank=k_rank,
+        v_rank=v_rank,
+        dtype=dtype,
+        device=device,
+        use_dynamic_ranks=use_dynamic_ranks
+    )
+    
+    # Now copy the factorized weights from the converted model to the TPA model
+    print("Copying factorized TPA weights...")
+    for name, module in standard_model_converted.named_modules():
+        if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
+            print(f"  Found factorized module: {name}")
+            
+            # Determine the corresponding name in the TPA model
+            tpa_module_name = name
+            
+            # Find the module in the TPA model
+            tpa_module = tpa_model
+            for part in tpa_module_name.split('.'):
+                if hasattr(tpa_module, part):
+                    tpa_module = getattr(tpa_module, part)
+                else:
+                    print(f"  Warning: Could not find {part} in TPA model")
+                    break
+            
+            # Copy the factorized weights to the TPA module
+            tpa_weights = {}
+            for key in ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_rank', 'k_rank', 'v_rank']:
+                if hasattr(module, key):
+                    value = getattr(module, key)
+                    tpa_weights[key] = value
+                    # Set directly on the TPA module
+                    setattr(tpa_module, key, value)
+            
+            # Mark the TPA module as using factorized weights
+            tpa_module.use_factorized_weights = True
+    
+    # Set the tokenizer if available
+    if hasattr(standard_model, 'tokenizer'):
+        tpa_model.tokenizer = standard_model.tokenizer
+        
+    end_time = time.time()
+    print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
+    
+    return tpa_model

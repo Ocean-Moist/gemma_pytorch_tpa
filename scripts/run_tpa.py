@@ -392,21 +392,27 @@ def main(_):
                   use_dynamic_ranks = extra_config.get("use_dynamic_ranks", True)
                   print(f"Using dynamic ranks: {use_dynamic_ranks}")
                   
-                  # The right way to do this is to use the built-in convert_from_standard_weights
-                  # method that handles all the complexities of the TPA model structure
-                  print("Applying TPA-specific conversion using convert_from_standard_weights...")
+                  # Import the new standalone function
+                  from gemma.tpa.modules.gqa_to_tpa import create_tpa_model_from_standard
                   
-                  # Configure TPA model to use GQA to TPA factorization method
-                  tpa_model.factorization_method = "gqa_to_tpa"
-                  tpa_model.tpa_config = {
-                      "q_rank": q_rank,
-                      "k_rank": k_rank,
-                      "v_rank": v_rank,
-                      "use_dynamic_ranks": use_dynamic_ranks
-                  }
+                  # Create a new TPA model from the standard model using our standalone function
+                  # This function handles all the complexities of creating a proper TPA model
+                  new_tpa_model = create_tpa_model_from_standard(
+                      standard_model, 
+                      q_rank=q_rank,
+                      k_rank=k_rank,
+                      v_rank=v_rank,
+                      dtype=tpa_model.dtype,
+                      device=device,
+                      use_dynamic_ranks=use_dynamic_ranks
+                  )
                   
-                  # Use the proper conversion method that knows about TPA models
-                  tpa_model = tpa_model.convert_from_standard_weights(standard_model)
+                  # Replace the original TPA model with our properly created one
+                  del tpa_model
+                  torch.cuda.empty_cache()
+                  tpa_model = new_tpa_model
+                  
+                  print("Successfully created TPA model with factorized weights")
                   
               except Exception as gqa_error:
                   print(f"Error in GQA to TPA conversion: {gqa_error}")
