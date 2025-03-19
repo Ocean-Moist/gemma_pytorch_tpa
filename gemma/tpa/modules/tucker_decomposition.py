@@ -38,6 +38,12 @@ def memory_efficient_tucker(tensor, ranks):
     shape = tensor.shape
     device = tensor.device
     
+    # Ensure tensor is on GPU if available
+    if torch.cuda.is_available() and device.type != 'cuda':
+        tensor = tensor.cuda()
+        device = tensor.device
+        print(f"Moving tensor to {device} for Tucker decomposition")
+    
     # Check if tensor contains any NaN or Inf values
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         print("Warning: Tensor contains NaN or Inf values. Replacing with zeros...")
@@ -161,6 +167,13 @@ def tile_based_tucker(tensor, ranks, tile_size=1000):
     
     # Save original shape and device
     shape = tensor.shape
+    device = tensor.device
+    
+    # Ensure tensor is on GPU if available
+    if torch.cuda.is_available() and device.type != 'cuda':
+        tensor = tensor.cuda()
+        device = tensor.device
+        print(f"Moving tensor to {device} for tile-based Tucker decomposition")
     device = tensor.device
     
     # Replace any NaN/Inf values

@@ -19,12 +19,8 @@ from .svd_utils import HAS_TENSORLY
 if HAS_TENSORLY:
     import tensorly as tl
     from tensorly.decomposition import tucker
-    # Set PyTorch as backend and make sure to use CUDA if available
+    # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
     tl.set_backend('pytorch')
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        # Force TensorLy operations to use CUDA
-        tl.set_device(device)
 
 def gqa_to_tpa_conversion(
     q_weight: torch.Tensor,
@@ -506,13 +502,18 @@ def gqa_to_tpa_conversion(
     
     print(f"Creating optimal B projection weights from Tucker decomposition")
     
-    # Create B matrix weights for projecting from hidden_dim to rank*head_dim
-    W_B_q_optimal = torch.zeros((hidden_dim, q_rank * head_dim), device=q_weight.device, dtype=torch.float32)
-    W_B_k_optimal = torch.zeros((hidden_dim, k_rank * head_dim), device=k_weight.device, dtype=torch.float32)
-    W_B_v_optimal = torch.zeros((hidden_dim, v_rank * head_dim), device=v_weight.device, dtype=torch.float32)
-    
-    # Move tensors to the same device as q_weight for computation
+    # Ensure all operations happen on GPU if available
     device = q_weight.device
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"Using {device} for optimal B projection computation")
+    
+    # Create B matrix weights for projecting from hidden_dim to rank*head_dim
+    W_B_q_optimal = torch.zeros((hidden_dim, q_rank * head_dim), device=device, dtype=torch.float32)
+    W_B_k_optimal = torch.zeros((hidden_dim, k_rank * head_dim), device=device, dtype=torch.float32)
+    W_B_v_optimal = torch.zeros((hidden_dim, v_rank * head_dim), device=device, dtype=torch.float32)
+    
+    # Move tensors to device for computation
     U1 = U1.to(device)
     U2 = U2.to(device)
     q_core = q_core.to(device)
