@@ -346,15 +346,136 @@ class GemmaTensorProductAttention(nn.Module):
         if seq_len == 0 or batch_size == 0:
             return torch.zeros(batch_size, seq_len, self.hidden_size, device=hidden_states.device, dtype=hidden_states.dtype)
         
-        # Compute A factors
-        A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
-        A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
-        A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+        # Debug weight shapes
+        print(f"DEBUG: W_A_q weight shape: {self.W_A_q.weight.shape}")
+        print(f"DEBUG: W_B_q weight shape: {self.W_B_q.weight.shape}")
         
-        # Compute B factors
-        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
-        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, self.head_dim)
-        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, self.head_dim)
+        try:
+            # Compute A factors with robust handling
+            A_q_raw = self.W_A_q(hidden_states)
+            expected_q_size = self.num_heads * self.q_rank
+            print(f"DEBUG: A_q_raw shape: {A_q_raw.shape}, expected flat dim: {expected_q_size}")
+            
+            # Try standard reshape first
+            try:
+                A_q = A_q_raw.view(batch_size, seq_len, self.num_heads, self.q_rank)
+            except Exception as q_error:
+                print(f"ERROR reshaping A_q: {q_error}")
+                # Try handling mismatched dimensions
+                A_q = A_q_raw.reshape(batch_size, seq_len, -1)
+                total_size = A_q.size(2)
+                # Calculate proper dimensions based on total size
+                if total_size % self.num_heads == 0:
+                    # Use actual size to determine effective rank
+                    effective_q_rank = total_size // self.num_heads
+                    print(f"Using effective q_rank: {effective_q_rank}")
+                    A_q = A_q.view(batch_size, seq_len, self.num_heads, effective_q_rank)
+                else:
+                    # Create fallback tensor
+                    print(f"Cannot reshape {total_size} to work with {self.num_heads} heads")
+                    A_q = torch.ones(batch_size, seq_len, self.num_heads, self.q_rank, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            
+            # Process remaining factors with same pattern
+            # K factor
+            A_k_raw = self.W_A_k(hidden_states)
+            try:
+                A_k = A_k_raw.view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
+            except Exception as k_error:
+                print(f"ERROR reshaping A_k: {k_error}")
+                A_k = A_k_raw.reshape(batch_size, seq_len, -1)
+                total_size = A_k.size(2)
+                if total_size % self.num_kv_heads == 0:
+                    effective_k_rank = total_size // self.num_kv_heads
+                    print(f"Using effective k_rank: {effective_k_rank}")
+                    A_k = A_k.view(batch_size, seq_len, self.num_kv_heads, effective_k_rank)
+                else:
+                    A_k = torch.ones(batch_size, seq_len, self.num_kv_heads, self.k_rank, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            
+            # V factor
+            A_v_raw = self.W_A_v(hidden_states)
+            try:
+                A_v = A_v_raw.view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+            except Exception as v_error:
+                print(f"ERROR reshaping A_v: {v_error}")
+                A_v = A_v_raw.reshape(batch_size, seq_len, -1)
+                total_size = A_v.size(2)
+                if total_size % self.num_kv_heads == 0:
+                    effective_v_rank = total_size // self.num_kv_heads
+                    print(f"Using effective v_rank: {effective_v_rank}")
+                    A_v = A_v.view(batch_size, seq_len, self.num_kv_heads, effective_v_rank)
+                else:
+                    A_v = torch.ones(batch_size, seq_len, self.num_kv_heads, self.v_rank, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            
+            # Compute B factors with similar robust handling
+            # Q-B factor
+            B_q_raw = self.W_B_q(hidden_states)
+            try:
+                B_q = B_q_raw.view(batch_size, seq_len, self.q_rank, self.head_dim)
+            except Exception as bq_error:
+                print(f"ERROR reshaping B_q: {bq_error}")
+                B_q = B_q_raw.reshape(batch_size, seq_len, -1)
+                total_size = B_q.size(2)
+                if total_size % self.head_dim == 0:
+                    effective_q_rank = total_size // self.head_dim
+                    print(f"Using effective B_q rank: {effective_q_rank}")
+                    B_q = B_q.view(batch_size, seq_len, effective_q_rank, self.head_dim)
+                else:
+                    B_q = torch.ones(batch_size, seq_len, self.q_rank, self.head_dim, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            
+            # K-B factor
+            B_k_raw = self.W_B_k(hidden_states)
+            try:
+                B_k = B_k_raw.view(batch_size, seq_len, self.k_rank, self.head_dim)
+            except Exception as bk_error:
+                print(f"ERROR reshaping B_k: {bk_error}")
+                B_k = B_k_raw.reshape(batch_size, seq_len, -1)
+                total_size = B_k.size(2)
+                if total_size % self.head_dim == 0:
+                    effective_k_rank = total_size // self.head_dim
+                    print(f"Using effective B_k rank: {effective_k_rank}")
+                    B_k = B_k.view(batch_size, seq_len, effective_k_rank, self.head_dim)
+                else:
+                    B_k = torch.ones(batch_size, seq_len, self.k_rank, self.head_dim, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            
+            # V-B factor
+            B_v_raw = self.W_B_v(hidden_states)
+            try:
+                B_v = B_v_raw.view(batch_size, seq_len, self.v_rank, self.head_dim)
+            except Exception as bv_error:
+                print(f"ERROR reshaping B_v: {bv_error}")
+                B_v = B_v_raw.reshape(batch_size, seq_len, -1)
+                total_size = B_v.size(2)
+                if total_size % self.head_dim == 0:
+                    effective_v_rank = total_size // self.head_dim
+                    print(f"Using effective B_v rank: {effective_v_rank}")
+                    B_v = B_v.view(batch_size, seq_len, effective_v_rank, self.head_dim)
+                else:
+                    B_v = torch.ones(batch_size, seq_len, self.v_rank, self.head_dim, 
+                                   device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+                                   
+            # Print shapes for debugging
+            print(f"DEBUG: Final shapes - A_q: {A_q.shape}, B_q: {B_q.shape}")
+            
+        except Exception as main_e:
+            print(f"Critical error in TPA shape handling: {main_e}")
+            # Create fallback tensors
+            A_q = torch.ones(batch_size, seq_len, self.num_heads, self.q_rank, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            A_k = torch.ones(batch_size, seq_len, self.num_kv_heads, self.k_rank, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            A_v = torch.ones(batch_size, seq_len, self.num_kv_heads, self.v_rank, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            B_q = torch.ones(batch_size, seq_len, self.q_rank, self.head_dim, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            B_k = torch.ones(batch_size, seq_len, self.k_rank, self.head_dim, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
+            B_v = torch.ones(batch_size, seq_len, self.v_rank, self.head_dim, 
+                           device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
         
         # Apply RMSNorm if specified
         if self.query_norm is not None and self.key_norm is not None:

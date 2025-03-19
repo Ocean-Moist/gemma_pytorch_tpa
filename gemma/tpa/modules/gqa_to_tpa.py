@@ -977,25 +977,56 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                     # nn.Linear expects weights in transposed form from what we usually see
                     print(f"  Source {std_key} shape: {weight.shape}")
                     
+                    # Determine proper in_features and out_features based on the intended use in TPA
                     if std_key.startswith('W_A_'):
-                        # W_A weights should have shape [hidden_dim, num_heads*rank] 
-                        # For Linear, we need [out_features=num_heads*rank, in_features=hidden_dim]
-                        out_features = weight.shape[1]
-                        in_features = weight.shape[0]
+                        # W_A weights connect hidden_dim to num_heads*rank
+                        # For nn.Linear in TPA, we need [out_features=num_heads*rank, in_features=hidden_dim]
+                        # This needs to be consistent with usage in tpa_attention.py: 
+                        # A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
+                        
+                        if std_key == 'W_A_q':
+                            out_features = num_heads * q_rank
+                        elif std_key == 'W_A_k':
+                            out_features = num_kv_heads * k_rank
+                        elif std_key == 'W_A_v':
+                            out_features = num_kv_heads * v_rank
+                        else:
+                            out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
+                        
+                        in_features = hidden_dim
                     else:
-                        # W_B weights should have shape [rank, head_dim]
-                        # For Linear, we need [out_features=head_dim, in_features=rank]
-                        out_features = weight.shape[1]
-                        in_features = weight.shape[0]
+                        # W_B weights connect rank to head_dim
+                        # For nn.Linear in TPA, we need [out_features=head_dim, in_features=rank]
+                        # This needs to be consistent with usage in tpa_attention.py:
+                        # B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
+                        
+                        if std_key == 'W_B_q':
+                            in_features = q_rank
+                        elif std_key == 'W_B_k':
+                            in_features = k_rank
+                        elif std_key == 'W_B_v':
+                            in_features = v_rank
+                        else:
+                            in_features = weight.shape[0] if weight.shape[1] == head_dim else weight.shape[1]
+                        
+                        out_features = head_dim
                     
                     print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
                     
                     # Create new Linear module with correct dimensions
+                    # nn.Linear expects weights in shape [out_features, in_features]
+                    # We need to make sure we create this with the right dimensions and set weights properly
                     linear = nn.Linear(in_features, out_features, bias=False)
                     
-                    # Set weights properly to match Linear's expected shape [out_features, in_features]
-                    # We need to transpose because nn.Linear expects weights transposed
-                    linear.weight.data.copy_(weight.t())
+                    # Check current weight shape to see if we need to transpose
+                    if weight.shape[0] == out_features and weight.shape[1] == in_features:
+                        # Weight already in Linear's expected format [out_features, in_features]
+                        linear.weight.data.copy_(weight)
+                        print(f"  {tpa_key} using weight directly (already in correct shape)")
+                    else:
+                        # Weight needs transposing to match Linear's expected format
+                        linear.weight.data.copy_(weight.t())
+                        print(f"  {tpa_key} transposing weight from {weight.shape} to {linear.weight.shape}")
                     
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
