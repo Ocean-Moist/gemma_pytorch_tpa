@@ -300,11 +300,10 @@ def main(_):
                   except json.JSONDecodeError as e:
                       print(f"Error parsing extra_config: {e}, using default configuration")
               
-              # Determine which factorization method to use
-              use_tensorly = extra_config.get("use_tensorly", False)
-              use_shared_factors = extra_config.get("use_shared_factors", True)
+              # Get factorization method from extra_config or use default
+              factorization_method = extra_config.get("factorization_method", "shared_factors")
               
-              if use_tensorly and not use_shared_factors:
+              if factorization_method == "direct_tensorly":
                   print("Using direct TensorLy Tucker decomposition")
                   # Set up target ranks for direct TensorLy implementation
                   tpa_model.target_ranks = {
@@ -314,7 +313,7 @@ def main(_):
                       "k_rank": k_rank,
                       "v_rank": v_rank
                   }
-              else:
+              elif factorization_method == "shared_factors":
                   print("Using shared factors approach for Tucker decomposition")
                   # Set up target ranks with shared factors configuration
                   tpa_model.target_ranks = {
@@ -322,6 +321,19 @@ def main(_):
                       "hidden_rank": extra_config.get("hidden_rank", 8),
                       "head_rank": extra_config.get("head_rank", 4),
                       "dim_rank": extra_config.get("dim_rank", 4),
+                      "q_rank": q_rank,
+                      "k_rank": k_rank,
+                      "v_rank": v_rank
+                  }
+              elif factorization_method == "contextual":
+                  print("Using original contextual factorization (T6-style)")
+                  # No target_ranks needed for contextual factorization
+                  # Will fall back to this automatically if TensorLy isn't available
+                  pass
+              else:
+                  print(f"Unknown factorization method: {factorization_method}, using shared factors")
+                  tpa_model.target_ranks = {
+                      "use_shared_factors": True,
                       "q_rank": q_rank,
                       "k_rank": k_rank,
                       "v_rank": v_rank

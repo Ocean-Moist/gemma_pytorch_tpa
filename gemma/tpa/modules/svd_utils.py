@@ -366,39 +366,19 @@ def pytorch_svd(matrix, full_matrices=False):
         
         return U, S, V
 
-# Apply the patched SVD to TensorLy if available
+# Apply the patched SVD to scipy only, not to TensorLy
 try:
     # Patch scipy's SVD
     scipy.linalg.svd = patched_svd
     
-    # Try to patch TensorLy's SVD if it's available
+    # Import TensorLy but DO NOT patch its SVD implementation
     import tensorly as tl
     
     # First ensure TensorLy is using PyTorch backend
     tl.set_backend('pytorch')
     
-    # Create a wrapper function for TensorLy's PyTorch backend
-    def tensorly_svd_wrapper(matrix, full_matrices=False):
-        return pytorch_svd(matrix, full_matrices=full_matrices)
-    
-    # Determine the correct way to patch TensorLy's SVD based on its version
-    if hasattr(tl.backend, 'pytorch_backend') and hasattr(tl.backend.pytorch_backend, 'svd'):
-        original_tensorly_svd = tl.backend.pytorch_backend.svd
-        tl.backend.pytorch_backend.svd = tensorly_svd_wrapper
-        print("Successfully patched TensorLy PyTorch backend SVD")
-    elif hasattr(tl.backend, 'pytorch') and hasattr(tl.backend.pytorch, 'svd'):
-        original_tensorly_svd = tl.backend.pytorch.svd
-        tl.backend.pytorch.svd = tensorly_svd_wrapper
-        print("Successfully patched TensorLy PyTorch module SVD")
-    else:
-        # Create SVD attribute if it doesn't exist
-        if not hasattr(tl.backend, 'pytorch_backend'):
-            tl.backend.pytorch_backend = type('DummyModule', (), {})()
-        tl.backend.pytorch_backend.svd = tensorly_svd_wrapper
-        print("Added SVD function to TensorLy PyTorch backend")
-    
-    print("TensorLy SVD patched successfully with PyTorch-native implementation")
+    print("Using TensorLy's default SVD implementation (not patched)")
 except ImportError:
     print("TensorLy not available, SVD patching limited to scipy")
 except Exception as e:
-    print(f"Warning: Failed to patch TensorLy SVD: {e}")
+    print(f"Warning: Failed to set up TensorLy: {e}")
