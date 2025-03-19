@@ -519,13 +519,54 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
             if module_type == "combined_qkv":
                 # For combined QKV projection, we need to extract the separate weights
                 qkv_weight = module.qkv_proj.weight
-                q_size = num_heads * module.head_dim
-                kv_size = num_kv_heads * module.head_dim
                 
-                # Split the combined weights
-                q_weight, k_weight, v_weight = qkv_weight.split(
-                    [q_size, kv_size, kv_size], dim=0
-                )
+                # Calculate the head dimension
+                head_dim = getattr(module, "head_dim", None)
+                if head_dim is None:
+                    # Try to infer from the model's config
+                    if hasattr(model, "config") and hasattr(model.config, "head_dim"):
+                        head_dim = model.config.head_dim
+                    else:
+                        # Last resort - infer from hidden size and num_heads
+                        hidden_size = qkv_weight.shape[1]
+                        head_dim = hidden_size // num_heads
+                
+                # Calculate sizes for splitting
+                q_size = num_heads * head_dim
+                kv_size = num_kv_heads * head_dim
+                
+                # Check if the dimensions match what we expect
+                total_size = q_size + kv_size * 2
+                if total_size != qkv_weight.shape[0]:
+                    print(f"  WARNING: QKV weight dimension {qkv_weight.shape[0]} doesn't match expected {total_size}")
+                    print(f"  Attempting to determine split based on observed shape...")
+                    
+                    # The QKV is in (out_dim, hidden_dim) format
+                    # Try to detect a fixed ratio for q:k:v sizes 
+                    if num_heads >= num_kv_heads and num_heads % num_kv_heads == 0:
+                        # Standard GQA setup
+                        ratio = num_heads / num_kv_heads  # How many q heads per kv head
+                        
+                        # Calculate sizes keeping the ratio
+                        total = qkv_weight.shape[0]  
+                        base_unit = total / (ratio + 2)  # denominator is ratio*k + k + v
+                        
+                        # Split into q, k, v proportionally
+                        k_part = int(base_unit + 0.5)  # round to nearest int
+                        q_part = int(ratio * k_part + 0.5)
+                        v_part = total - q_part - k_part
+                        
+                        print(f"  Using inferred split sizes - Q: {q_part}, K: {k_part}, V: {v_part}")
+                        q_weight, k_weight, v_weight = qkv_weight.split([q_part, k_part, v_part], dim=0)
+                    else:
+                        # Can't determine - try an equal split (fallback)
+                        split_size = qkv_weight.shape[0] // 3
+                        print(f"  Using equal split size of {split_size}")
+                        splits = [split_size, split_size, qkv_weight.shape[0] - 2*split_size]  # Ensure all adds up
+                        q_weight, k_weight, v_weight = qkv_weight.split(splits, dim=0)
+                else:
+                    # Normal case - dimensions match expectations
+                    q_weight, k_weight, v_weight = qkv_weight.split([q_size, kv_size, kv_size], dim=0)
                 
                 o_weight = module.o_proj.weight
                 
