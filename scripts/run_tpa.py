@@ -388,13 +388,18 @@ def main(_):
                   
                   # Apply the actual conversion
                   print("Applying GQA to TPA conversion...")
+                  # Check if dynamic ranks should be used
+                  use_dynamic_ranks = extra_config.get("use_dynamic_ranks", True)
+                  print(f"Using dynamic ranks: {use_dynamic_ranks}")
+                  
                   tpa_model = convert_gqa_model_to_tpa(
                       standard_model, 
                       q_rank=q_rank,
                       k_rank=k_rank,
                       v_rank=v_rank,
                       dtype=tpa_model.dtype,
-                      device=device
+                      device=device,
+                      use_dynamic_ranks=use_dynamic_ranks
                   )
                   
               except Exception as gqa_error:

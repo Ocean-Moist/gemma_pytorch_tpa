@@ -33,7 +33,8 @@ def gqa_to_tpa_conversion(
     dtype: torch.dtype = torch.float16,
     device: str = "cuda",
     override_head_dim: int = None,  # Optional parameter to force a specific head dimension
-    transposed_weights: bool = False  # Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
+    transposed_weights: bool = False,  # Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
+    use_dynamic_ranks: bool = True  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
 ) -> Dict[str, torch.Tensor]:
     """
     Convert GQA attention weights to TPA format using Tucker decomposition.
@@ -329,21 +330,41 @@ def gqa_to_tpa_conversion(
     # A_q = W_A_q(x) - shape [batch, seq, heads, q_rank]
     # B_q = W_B_q(x) - shape [batch, seq, q_rank, head_dim]
     
-    # Expand dimensions for TPA format
-    W_A_q_expanded = torch.zeros((hidden_dim, num_heads * q_rank), device=q_weight.device, dtype=torch.float32)
-    W_A_k_expanded = torch.zeros((hidden_dim, num_kv_heads * k_rank), device=k_weight.device, dtype=torch.float32)
-    W_A_v_expanded = torch.zeros((hidden_dim, num_kv_heads * v_rank), device=v_weight.device, dtype=torch.float32)
+    # Get the actual ranks from the Tucker decomposition
+    # These might differ from the requested ranks
+    actual_R1 = U1.shape[1]  # Rank for hidden dimension from factor shape
+    actual_R2 = U2.shape[1]  # Rank for head dimension from factor shape
+    
+    print(f"Actual ranks from Tucker decomposition: R1={actual_R1}, R2={actual_R2}")
+    
+    if use_dynamic_ranks:
+        # Use the actual ranks from Tucker decomposition
+        actual_q_rank = actual_R2  # Use head dimension rank for query
+        actual_k_rank = actual_R2  # Use head dimension rank for key
+        actual_v_rank = actual_R2  # Use head dimension rank for value
+        print(f"Using actual ranks from Tucker decomposition: q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+    else:
+        # Use the user-specified ranks but validate against actual ranks
+        actual_q_rank = min(q_rank, actual_R2)  # Use smaller of requested rank and actual rank
+        actual_k_rank = min(k_rank, actual_R2)  # Use smaller of requested rank and actual rank
+        actual_v_rank = min(v_rank, actual_R2)  # Use smaller of requested rank and actual rank
+        print(f"Using requested ranks (capped by actual): q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+    
+    # Expand dimensions for TPA format using actual ranks
+    W_A_q_expanded = torch.zeros((hidden_dim, num_heads * actual_q_rank), device=q_weight.device, dtype=torch.float32)
+    W_A_k_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_k_rank), device=k_weight.device, dtype=torch.float32)
+    W_A_v_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_v_rank), device=v_weight.device, dtype=torch.float32)
     
     # The proper way to create the expanded Wa is to repeat for each head
     for h in range(num_heads):
         W_A_q = U1 @ q_core[:, :, h]
-        W_A_q_expanded[:, h*q_rank:(h+1)*q_rank] = W_A_q
+        W_A_q_expanded[:, h*actual_q_rank:(h+1)*actual_q_rank] = W_A_q
         
     for g in range(num_kv_heads):
         W_A_k = U1 @ k_core[:, :, g]
         W_A_v = U1 @ v_core[:, :, g]
-        W_A_k_expanded[:, g*k_rank:(g+1)*k_rank] = W_A_k
-        W_A_v_expanded[:, g*v_rank:(g+1)*v_rank] = W_A_v
+        W_A_k_expanded[:, g*actual_k_rank:(g+1)*actual_k_rank] = W_A_k
+        W_A_v_expanded[:, g*actual_v_rank:(g+1)*actual_v_rank] = W_A_v
     
     # Create the B matrices which need reshaping for TPA format
     W_B_q = U2.t()  # [R2, head_dim]
@@ -354,6 +375,11 @@ def gqa_to_tpa_conversion(
     W_B_q_reshaped = W_B_q.repeat(num_heads, 1)  # [num_heads*R2, head_dim]
     W_B_k_reshaped = W_B_k.repeat(num_kv_heads, 1)  # [num_kv_heads*R2, head_dim]
     W_B_v_reshaped = W_B_v.repeat(num_kv_heads, 1)  # [num_kv_heads*R2, head_dim]
+    
+    # Update the rank parameters to match what's actually used
+    q_rank = actual_q_rank
+    k_rank = actual_k_rank
+    v_rank = actual_v_rank
     
     # Add expanded matrices to result
     result["W_A_q"] = W_A_q_expanded.to(dtype=dtype, device=device)
@@ -386,6 +412,11 @@ def gqa_to_tpa_conversion(
         v_group_A = W_A_v_expanded[:, g*v_rank:(g+1)*v_rank]
         v_group_B = W_B_v_reshaped[g*v_rank:(g+1)*v_rank, :]
         v_recon[:, g, :] = (v_group_A @ v_group_B).reshape(hidden_dim, head_dim)
+        
+    # Add factorization ranks to results
+    result["q_rank"] = q_rank
+    result["k_rank"] = k_rank
+    result["v_rank"] = v_rank
     
     # Reshape for error calculation
     q_recon = q_recon.reshape(hidden_dim, -1)
@@ -405,7 +436,7 @@ def gqa_to_tpa_conversion(
     return result
 
 
-def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda"):
+def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda", use_dynamic_ranks=True):
     """
     Convert a GQA model to TPA format by applying the conversion to each attention layer.
     
@@ -416,6 +447,8 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
         v_rank: Rank for value factorization
         dtype: Data type for output tensors
         device: Device for computation
+        use_dynamic_ranks: Whether to use ranks determined by Tucker decomposition (True) 
+                          or force specified ranks (False)
         
     Returns:
         Model with converted weights
@@ -684,7 +717,8 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 q_rank, k_rank, v_rank,
                 dtype, device,
                 override_head_dim=head_dim,  # Force the correct head dimension
-                transposed_weights=transposed_weights  # Handle weight format properly
+                transposed_weights=transposed_weights,  # Handle weight format properly
+                use_dynamic_ranks=use_dynamic_ranks  # Whether to use ranks from Tucker decomposition
             )
             
             decomp_end = time.time()
