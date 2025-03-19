@@ -414,10 +414,10 @@ def gqa_to_tpa_conversion(
         v_group_B = W_B_v_reshaped[g*v_rank:(g+1)*v_rank, :]
         v_recon[:, g, :] = (v_group_A @ v_group_B).reshape(hidden_dim, head_dim)
         
-    # Add factorization ranks to results
-    result["q_rank"] = q_rank
-    result["k_rank"] = k_rank
-    result["v_rank"] = v_rank
+    # Add factorization ranks to results - store as tensors for compatibility
+    result["q_rank"] = torch.tensor(q_rank, device=device, dtype=torch.int64)
+    result["k_rank"] = torch.tensor(k_rank, device=device, dtype=torch.int64)
+    result["v_rank"] = torch.tensor(v_rank, device=device, dtype=torch.int64)
     
     # Reshape for error calculation
     q_recon = q_recon.reshape(hidden_dim, -1)
@@ -620,7 +620,12 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 
                 # Store the factorized weights
                 for key, weight in weights_dict.items():
-                    setattr(self, key, nn.Parameter(weight))
+                    # Only convert to Parameter if it's a tensor (handle int/float values separately)
+                    if isinstance(weight, torch.Tensor):
+                        setattr(self, key, nn.Parameter(weight))
+                    else:
+                        # Store non-tensor values directly
+                        setattr(self, key, weight)
                 
                 # Remember original weights were factorized
                 self.original_weights_replaced = True
