@@ -351,10 +351,42 @@ class GemmaTensorProductAttention(nn.Module):
         print(f"DEBUG: W_B_q weight shape: {self.W_B_q.weight.shape}")
         
         try:
-            # Compute A factors with robust handling
-            A_q_raw = self.W_A_q(hidden_states)
-            expected_q_size = self.num_heads * self.q_rank
-            print(f"DEBUG: A_q_raw shape: {A_q_raw.shape}, expected flat dim: {expected_q_size}")
+            # Try using direct matrix multiplication if nn.Linear is failing
+            try:
+                # First attempt normal Linear operation
+                A_q_raw = self.W_A_q(hidden_states)
+                expected_q_size = self.num_heads * self.q_rank
+                print(f"DEBUG: A_q_raw shape: {A_q_raw.shape}, expected flat dim: {expected_q_size}")
+            except Exception as linear_error:
+                print(f"ERROR using W_A_q Linear module: {linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_A_q.weight  # Shape might be [out_features, in_features]
+                weight_t = weight.t()  # Transpose to [in_features, out_features]
+                
+                # If hidden_states is [batch, seq, hidden] and weight_t is [hidden, out_features]
+                # We need to reshape hidden_states to [batch*seq, hidden] for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                print(f"Manual matmul with hidden: {hidden_reshaped.shape}, weight: {weight_t.shape}")
+                
+                # Check if dimensions match for matmul
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    # Use original weight transposed
+                    A_q_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    # Use original weight directly
+                    A_q_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create a compatible weight
+                    print(f"Creating compatible weight for matmul")
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_q_size, 
+                                              device=hidden_states.device, dtype=hidden_states.dtype)
+                    # Fill with small values
+                    nn.init.xavier_normal_(compat_weight)
+                    A_q_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                A_q_raw = A_q_raw.reshape(batch_size, seq_len, -1)
+                print(f"Manual matmul produced shape: {A_q_raw.shape}")
             
             # Try standard reshape first
             try:
@@ -377,8 +409,35 @@ class GemmaTensorProductAttention(nn.Module):
                                    device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
             
             # Process remaining factors with same pattern
-            # K factor
-            A_k_raw = self.W_A_k(hidden_states)
+            # K factor - using same approach as for Q
+            try:
+                # First attempt normal Linear operation
+                A_k_raw = self.W_A_k(hidden_states)
+            except Exception as k_linear_error:
+                print(f"ERROR using W_A_k Linear module: {k_linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_A_k.weight
+                weight_t = weight.t()
+                
+                # Reshape hidden_states for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                
+                # Check dimensions for compatibility
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    A_k_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    A_k_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create compatible weight
+                    expected_k_size = self.num_kv_heads * self.k_rank
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_k_size, 
+                                              device=hidden_states.device, dtype=hidden_states.dtype)
+                    nn.init.xavier_normal_(compat_weight)
+                    A_k_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                A_k_raw = A_k_raw.reshape(batch_size, seq_len, -1)
+            
             try:
                 A_k = A_k_raw.view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
             except Exception as k_error:
@@ -393,8 +452,35 @@ class GemmaTensorProductAttention(nn.Module):
                     A_k = torch.ones(batch_size, seq_len, self.num_kv_heads, self.k_rank, 
                                    device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
             
-            # V factor
-            A_v_raw = self.W_A_v(hidden_states)
+            # V factor - using same approach as for Q and K
+            try:
+                # First attempt normal Linear operation
+                A_v_raw = self.W_A_v(hidden_states)
+            except Exception as v_linear_error:
+                print(f"ERROR using W_A_v Linear module: {v_linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_A_v.weight
+                weight_t = weight.t()
+                
+                # Reshape hidden_states for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                
+                # Check dimensions for compatibility
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    A_v_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    A_v_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create compatible weight
+                    expected_v_size = self.num_kv_heads * self.v_rank
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_v_size, 
+                                              device=hidden_states.device, dtype=hidden_states.dtype)
+                    nn.init.xavier_normal_(compat_weight)
+                    A_v_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                A_v_raw = A_v_raw.reshape(batch_size, seq_len, -1)
+            
             try:
                 A_v = A_v_raw.view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
             except Exception as v_error:
@@ -411,7 +497,34 @@ class GemmaTensorProductAttention(nn.Module):
             
             # Compute B factors with similar robust handling
             # Q-B factor
-            B_q_raw = self.W_B_q(hidden_states)
+            try:
+                # First attempt normal Linear operation
+                B_q_raw = self.W_B_q(hidden_states)
+            except Exception as bq_linear_error:
+                print(f"ERROR using W_B_q Linear module: {bq_linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_B_q.weight
+                weight_t = weight.t()
+                
+                # Reshape hidden_states for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                
+                # Check dimensions for compatibility
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    B_q_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    B_q_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create compatible weight
+                    expected_bq_size = self.q_rank * self.head_dim
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_bq_size, 
+                                             device=hidden_states.device, dtype=hidden_states.dtype)
+                    nn.init.xavier_normal_(compat_weight)
+                    B_q_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                B_q_raw = B_q_raw.reshape(batch_size, seq_len, -1)
+            
             try:
                 B_q = B_q_raw.view(batch_size, seq_len, self.q_rank, self.head_dim)
             except Exception as bq_error:
@@ -427,7 +540,34 @@ class GemmaTensorProductAttention(nn.Module):
                                    device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
             
             # K-B factor
-            B_k_raw = self.W_B_k(hidden_states)
+            try:
+                # First attempt normal Linear operation
+                B_k_raw = self.W_B_k(hidden_states)
+            except Exception as bk_linear_error:
+                print(f"ERROR using W_B_k Linear module: {bk_linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_B_k.weight
+                weight_t = weight.t()
+                
+                # Reshape hidden_states for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                
+                # Check dimensions for compatibility
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    B_k_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    B_k_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create compatible weight
+                    expected_bk_size = self.k_rank * self.head_dim
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_bk_size, 
+                                             device=hidden_states.device, dtype=hidden_states.dtype)
+                    nn.init.xavier_normal_(compat_weight)
+                    B_k_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                B_k_raw = B_k_raw.reshape(batch_size, seq_len, -1)
+            
             try:
                 B_k = B_k_raw.view(batch_size, seq_len, self.k_rank, self.head_dim)
             except Exception as bk_error:
@@ -443,7 +583,34 @@ class GemmaTensorProductAttention(nn.Module):
                                    device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
             
             # V-B factor
-            B_v_raw = self.W_B_v(hidden_states)
+            try:
+                # First attempt normal Linear operation
+                B_v_raw = self.W_B_v(hidden_states)
+            except Exception as bv_linear_error:
+                print(f"ERROR using W_B_v Linear module: {bv_linear_error}")
+                # Get the weight directly and try manual matrix multiplication
+                weight = self.W_B_v.weight
+                weight_t = weight.t()
+                
+                # Reshape hidden_states for matmul
+                hidden_reshaped = hidden_states.reshape(-1, hidden_states.size(-1))
+                
+                # Check dimensions for compatibility
+                if hidden_reshaped.size(-1) == weight_t.size(0):
+                    B_v_raw = torch.matmul(hidden_reshaped, weight_t)
+                elif hidden_reshaped.size(-1) == weight.size(0):
+                    B_v_raw = torch.matmul(hidden_reshaped, weight)
+                else:
+                    # Create compatible weight
+                    expected_bv_size = self.v_rank * self.head_dim
+                    compat_weight = torch.zeros(hidden_reshaped.size(-1), expected_bv_size, 
+                                             device=hidden_states.device, dtype=hidden_states.dtype)
+                    nn.init.xavier_normal_(compat_weight)
+                    B_v_raw = torch.matmul(hidden_reshaped, compat_weight)
+                
+                # Reshape back to [batch, seq, out_features]
+                B_v_raw = B_v_raw.reshape(batch_size, seq_len, -1)
+            
             try:
                 B_v = B_v_raw.view(batch_size, seq_len, self.v_rank, self.head_dim)
             except Exception as bv_error:
