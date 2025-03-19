@@ -59,6 +59,8 @@ _TOP_P = flags.DEFINE_float('top_p', 0.95, 'Top-p sampling parameter.')
 _TOP_K = flags.DEFINE_integer('top_k', 64, 'Top-k sampling parameter.')
 _TOKENIZER_PATH = flags.DEFINE_string('tokenizer_path', 'tokenizer/tokenizer.model',
                                       'Path to the tokenizer model.')
+_EXTRA_CONFIG = flags.DEFINE_string('extra_config', None, 
+                                   'Extra configuration for the model in JSON format. E.g. \'{"use_tensorly": true}\'.')
 
 # Define valid model variants
 _VALID_MODEL_VARIANTS = ['1b', '4b', '12b', '27b']
@@ -288,17 +290,42 @@ def main(_):
           
           # Use shared factors approach with TensorLy
           if HAS_TENSORLY:
-              print("Using shared factors approach for Tucker decomposition")
-              # Set up target ranks with shared factors configuration
-              tpa_model.target_ranks = {
-                  "use_shared_factors": True,
-                  "hidden_rank": 8,
-                  "head_rank": 4,
-                  "dim_rank": 4,
-                  "q_rank": q_rank,
-                  "k_rank": k_rank,
-                  "v_rank": v_rank
-              }
+              # Parse extra configuration if provided
+              extra_config = {}
+              if _EXTRA_CONFIG.value:
+                  try:
+                      import json
+                      extra_config = json.loads(_EXTRA_CONFIG.value)
+                      print(f"Using extra configuration: {extra_config}")
+                  except json.JSONDecodeError as e:
+                      print(f"Error parsing extra_config: {e}, using default configuration")
+              
+              # Determine which factorization method to use
+              use_tensorly = extra_config.get("use_tensorly", False)
+              use_shared_factors = extra_config.get("use_shared_factors", True)
+              
+              if use_tensorly and not use_shared_factors:
+                  print("Using direct TensorLy Tucker decomposition")
+                  # Set up target ranks for direct TensorLy implementation
+                  tpa_model.target_ranks = {
+                      "use_tensorly": True,
+                      "use_shared_factors": False,
+                      "q_rank": q_rank,
+                      "k_rank": k_rank,
+                      "v_rank": v_rank
+                  }
+              else:
+                  print("Using shared factors approach for Tucker decomposition")
+                  # Set up target ranks with shared factors configuration
+                  tpa_model.target_ranks = {
+                      "use_shared_factors": True,
+                      "hidden_rank": extra_config.get("hidden_rank", 8),
+                      "head_rank": extra_config.get("head_rank", 4),
+                      "dim_rank": extra_config.get("dim_rank", 4),
+                      "q_rank": q_rank,
+                      "k_rank": k_rank,
+                      "v_rank": v_rank
+                  }
           
           # Make sure model config has correct ranks
           tpa_model.config.q_rank = q_rank
