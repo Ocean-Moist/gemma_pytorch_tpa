@@ -504,13 +504,31 @@ def main(_):
   try:
       # Use the model's built-in generate method
       prompt = [_PROMPT.value]  # Format compatible with Gemma3 models
-      outputs = model.generate(
-          prompts=prompt,
-          max_tokens=_OUTPUT_LEN.value,
-          temperature=_TEMPERATURE.value,
-          top_p=_TOP_P.value,
-          top_k=_TOP_K.value
-      )
+      
+      # Check which parameters the generate method accepts
+      if hasattr(model, 'generate'):
+          # Try different parameter names based on the model architecture
+          try:
+              # Try with max_length instead of max_tokens
+              outputs = model.generate(
+                  prompts=prompt,
+                  max_length=_OUTPUT_LEN.value,
+                  temperature=_TEMPERATURE.value,
+                  top_p=_TOP_P.value,
+                  top_k=_TOP_K.value
+              )
+          except TypeError as e:
+              print(f"Trying alternative generate method signature: {e}")
+              # Try with max_new_tokens
+              outputs = model.generate(
+                  prompts=prompt,
+                  max_new_tokens=_OUTPUT_LEN.value,
+                  temperature=_TEMPERATURE.value,
+                  top_p=_TOP_P.value,
+                  top_k=_TOP_K.value
+              )
+      else:
+          raise ValueError("Model does not have a generate method")
       
       # Extract the generated text
       generated_text = outputs[0]
