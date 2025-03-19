@@ -338,8 +338,13 @@ def main(_):
                   from gemma.tpa.modules.gqa_to_tpa import convert_gqa_model_to_tpa
                   # Set CUDA device explicitly for this process
                   if torch.cuda.is_available():
-                      torch.cuda.set_device(device)
-                      print(f"Explicitly set CUDA device to {device}")
+                      # Get the CUDA device index
+                      if isinstance(device, torch.device) and device.index is not None:
+                          cuda_device_idx = device.index
+                      else:
+                          cuda_device_idx = 0  # Default to first CUDA device
+                      torch.cuda.set_device(cuda_device_idx)
+                      print(f"Explicitly set CUDA device to cuda:{cuda_device_idx}")
                   
                   # Flag to use this special conversion
                   tpa_model.use_gqa_to_tpa = True
@@ -420,7 +425,9 @@ def main(_):
                   # Ensure device is correct before passing to create_tpa_model_from_standard
                   if torch.cuda.is_available():
                       print(f"Setting device to CUDA before conversion")
-                      device = torch.device('cuda')  # Ensure we're using CUDA
+                      # Get device index for specificity
+                      cuda_device_idx = 0  # Default to first CUDA device
+                      device = torch.device(f'cuda:{cuda_device_idx}')  # Ensure we're using CUDA with specific index
                       # Force standard_model to CUDA
                       standard_model = standard_model.to(device)
                       

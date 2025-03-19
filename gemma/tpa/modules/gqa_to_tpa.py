@@ -505,7 +505,12 @@ def gqa_to_tpa_conversion(
     # Ensure all operations happen on GPU if available
     device = q_weight.device
     if torch.cuda.is_available():
-        device = torch.device('cuda')
+        # Get the CUDA device index (default to 0 if not specified)
+        cuda_device_idx = 0
+        if device.type == 'cuda' and device.index is not None:
+            cuda_device_idx = device.index
+            
+        device = torch.device(f'cuda:{cuda_device_idx}')
         print(f"Using {device} for optimal B projection computation")
     
     # Create B matrix weights for projecting from hidden_dim to rank*head_dim
