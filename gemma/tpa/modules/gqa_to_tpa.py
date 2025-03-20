@@ -34,8 +34,6 @@ def gqa_to_tpa_conversion(
     v_rank: int = 2,
     dtype: torch.dtype = torch.float16,
     device: str = "cuda",
-    override_head_dim: int = None,  # Optional parameter to force a specific head dimension
-    transposed_weights: bool = False,  # Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
     use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
     config = None,  # Model config to ensure consistent dimensions
     fat_ranks: bool = False  # Whether to use very large ranks (240) for higher accuracy
@@ -79,26 +77,11 @@ def gqa_to_tpa_conversion(
     v_weight = v_weight.to(torch.float32)
     
     # Handle weight format - Gemma typically has weights in [output_proj, input_proj] format
-    if transposed_weights:
-        print("Using transposed weight format")
-        o_weight = o_weight.to(torch.float32)
-    else:
-        print("Transposing output weights to match expected format")
-        o_weight = o_weight.to(torch.float32).t()  # Transpose to expected format
-        
+    o_weight = o_weight.to(torch.float32)
+
     # Update transposed_weights if we transpose the q,k,v weights later
-    transposed_weights = transposed_weights or need_transpose
-    
-    # Apply fat_ranks parameter - override ranks if specified
-    if fat_ranks:
-        print("Using energy-based SVD rank selection (98% explained variance) instead of fixed ranks")
-        # We'll determine actual ranks during the Tucker decomposition based on explained variance
-        # These are just initial values that will be overridden
-        q_rank = 24
-        k_rank = 12
-        v_rank = 12
-        print(f"Initial ranks (will be refined based on SVD): q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
-    
+
+
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
     # This ensures consistency with the model's actual hidden state dimensions
     config_hidden_size = getattr(config, 'hidden_size', None) if config is not None else None
@@ -106,115 +89,24 @@ def gqa_to_tpa_conversion(
     # For Gemma models, check if weights need to be transposed
     # In PyTorch Linear layers, weights have shape [out_features, in_features]
     # But for TPA conversion, we need them in [hidden_dim, projection_dim] format
-    need_transpose = False
-    
-    if config_hidden_size is not None:
-        hidden_dim = config_hidden_size
-        print(f"Using config.hidden_size={hidden_dim} instead of inferring from weights")
-        
-        # Check if weights are in the wrong orientation (common in PyTorch Linear layers)
-        if q_weight.shape[0] != hidden_dim and q_weight.shape[1] == hidden_dim:
-            print(f"Detected transposed weight orientation: q_weight shape is {q_weight.shape} but hidden_dim={hidden_dim}")
-            print(f"Weights appear to be in PyTorch Linear format [out_features, in_features]")
-            print(f"Transposing weights for proper TPA conversion")
-            
-            # Transpose the weights for TPA conversion
-            print(f"\nDIMENSION MISMATCH DETECTED: Transposing weights for Gemma-3-1B model")
-            print(f"  Original shapes: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
-            print(f"  Expected hidden_dim from config: {hidden_dim}")
-            print(f"  Actual hidden_dim in weights: {q_weight.shape[1]}")
-            print(f"  This is a known issue with Gemma-3-1B PyTorch weights orientation")
-            
-            q_weight = q_weight.transpose(0, 1)
-            k_weight = k_weight.transpose(0, 1)
-            v_weight = v_weight.transpose(0, 1)
-            need_transpose = True
-            
-            print(f"  After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
-        
-        # After possible transposition, verify again
-        if q_weight.shape[0] != hidden_dim:
-            raise ValueError(f"CRITICAL ERROR: Weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}. Cannot proceed with mismatched dimensions.")
-    else:
-        # No config provided, infer from weights (and possibly transpose)
-        if q_weight.shape[0] > q_weight.shape[1]:
-            # Likely already in the right orientation
-            hidden_dim = q_weight.shape[0]
-        else:
-            # Likely needs transposition
-            print(f"No config.hidden_size provided. Weight shape suggests transposition needed")
-            q_weight = q_weight.transpose(0, 1)
-            k_weight = k_weight.transpose(0, 1)
-            v_weight = v_weight.transpose(0, 1)
-            hidden_dim = q_weight.shape[0]
-            need_transpose = True
-            
-        print(f"Inferred hidden_dim={hidden_dim} from weight shape")
-    
-    # Check if we have a forced head dimension
-    if override_head_dim is not None:
-        print(f"Using override_head_dim={override_head_dim}")
-        head_dim = override_head_dim
-        q_head_dim = override_head_dim
-        kv_head_dim = override_head_dim
-    else:
-        # Carefully calculate head dimensions based on weight shapes and number of heads
-        # For Gemma-3-1B, after transposition q_weight shape is [1152, 1024]
-        # where 1024 = num_heads(4) * head_dim(256)
-        if need_transpose:
-            # If we transposed, the weights are now in [hidden_dim, projections] format
-            # The projection dimension should be divisible by the number of heads
-            q_projection_dim = q_weight.shape[1]
-            k_projection_dim = k_weight.shape[1]
-            
-            if q_projection_dim % num_heads == 0:
-                q_head_dim = q_projection_dim // num_heads
-                print(f"After transposition, calculated q_head_dim = {q_head_dim} (projection dim {q_projection_dim} / {num_heads} heads)")
-            else:
-                # Try to infer a reasonable value that divides exactly
-                q_head_dim = 256  # Default for Gemma models
-                print(f"WARNING: q_projection_dim {q_projection_dim} is not divisible by num_heads {num_heads}")
-                print(f"Using default q_head_dim = {q_head_dim}")
-            
-            if k_projection_dim % num_kv_heads == 0:
-                kv_head_dim = k_projection_dim // num_kv_heads
-                print(f"After transposition, calculated kv_head_dim = {kv_head_dim} (projection dim {k_projection_dim} / {num_kv_heads} kv_heads)")
-            else:
-                # Try to infer a reasonable value
-                kv_head_dim = 256  # Default for Gemma models
-                print(f"WARNING: k_projection_dim {k_projection_dim} is not divisible by num_kv_heads {num_kv_heads}")
-                print(f"Using default kv_head_dim = {kv_head_dim}")
-        else:
-            # Standard calculation when weights are already in expected orientation
-            # The query weight has shape [hidden_dim, num_heads * head_dim]
-            # So head_dim = q_weight.shape[1] / num_heads
-            q_head_dim = q_weight.shape[1] // num_heads
-            
-            # The key/value weights have shape [hidden_dim, num_kv_heads * head_dim]
-            # So kv_head_dim = k_weight.shape[1] / num_kv_heads
-            kv_head_dim = k_weight.shape[1] // num_kv_heads
-        
-        # For backward compatibility
-        head_dim = q_head_dim
-    
+
+    hidden_dim = config_hidden_size
+    q_weight = q_weight.transpose(0, 1)
+    k_weight = k_weight.transpose(0, 1)
+    v_weight = v_weight.transpose(0, 1)
+
+    print(f"  After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
+
+    # After possible transposition, verify again
+    if q_weight.shape[0] != hidden_dim:
+        raise ValueError(f"CRITICAL ERROR: Weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}. Cannot proceed with mismatched dimensions.")
+
+
     print(f"Dimensions: hidden_dim={hidden_dim}")
-    print(f"Query: num_heads={num_heads}, head_dim={q_head_dim}")
-    print(f"Key/Value: num_kv_heads={num_kv_heads}, head_dim={kv_head_dim}")
-    
-    # For GQA models, query heads and key/value heads can have different dimensions
-    # We'll use the appropriate head_dim for each part
-    use_different_dims = q_head_dim != kv_head_dim
-    if use_different_dims:
-        print(f"Using different dimensions for query ({q_head_dim}) and key/value ({kv_head_dim})")
-    else:
-        print(f"Using consistent head dimension of {q_head_dim} for all projections")
-    
     # Verify final dimensions are consistent
-    print(f"Final dimensions: hidden_dim={hidden_dim}, head_dim={head_dim}, num_heads={num_heads}, num_kv_heads={num_kv_heads}")
     print(f"Weight shapes: Q={q_weight.shape}, K={k_weight.shape}, V={v_weight.shape}, O={o_weight.shape}")
     
-    # No assertions - try to handle inconsistent dimensions gracefully
-    
+
     # STEP 1: Multi-head Tensorisation
     # For Gemma-3-1B, we need to recalculate head dimensions based on actual weights
     
@@ -243,13 +135,7 @@ def gqa_to_tpa_conversion(
     print(f"  K weights: {k_weight.shape} → {kv_head_dim} = {k_proj_dim} / {num_kv_heads} kv_heads")
     print(f"  V weights: {v_weight.shape} → {kv_head_dim} = {v_proj_dim} / {num_kv_heads} kv_heads")
     
-    # Override head_dim only if it's different from calculated values
-    if override_head_dim is not None and override_head_dim != q_head_dim:
-        print(f"WARNING: override_head_dim={override_head_dim} doesn't match calculated q_head_dim={q_head_dim}")
-        print(f"Using calculated q_head_dim={q_head_dim} for better accuracy")
-        # Use the calculated value instead of the override to ensure correct dimensions
-        override_head_dim = q_head_dim
-        
+
     # Use consistent head dimension for all
     head_dim = q_head_dim
     
@@ -258,36 +144,10 @@ def gqa_to_tpa_conversion(
     k_weights_reshaped = k_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
     v_weights_reshaped = v_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
     
-    # For output projection, first get it in the right orientation
-    if o_weight.shape[1] == hidden_dim:
-        # If output weight is [out_features, hidden_dim], transpose to [hidden_dim, out_features]
-        o_weight = o_weight.t()
-        print(f"Transposed output weight to shape {o_weight.shape}")
-    
-    # For Gemma-3-1B, the output projection should have shape [hidden_dim, num_heads*head_dim]
-    o_proj_dim = o_weight.shape[1]
-    
     # Ensure output weight can be reshaped properly
     if o_weight.shape[0] != hidden_dim:
         raise ValueError(f"Output weight first dimension {o_weight.shape[0]} != hidden_dim {hidden_dim}")
-    
-    if o_proj_dim != num_heads * q_head_dim:
-        # Try transposing again if dimensions are swapped
-        if o_weight.shape[1] == hidden_dim and o_weight.shape[0] == num_heads * q_head_dim:
-            o_weight = o_weight.t()
-            o_proj_dim = o_weight.shape[1]
-            print(f"Transposed output weight again to shape {o_weight.shape}")
-        else:
-            # For Gemma-3-1B model, the output projection may have dimensions that differ from q_weight
-            # Recalculate the head dimension based on actual weight shape
-            if o_proj_dim % num_heads == 0:
-                o_head_dim = o_proj_dim // num_heads
-                print(f"Output projection has different head dimension: {o_head_dim} (vs q_head_dim={q_head_dim})")
-                # We'll use the output projection's head dimension for reshaping it
-                q_head_dim = o_head_dim
-            else:
-                raise ValueError(f"Output projection dimension {o_proj_dim} isn't divisible by num_heads {num_heads}")
-    
+
     # Now reshape with the correct dimensions
     o_weights_reshaped = o_weight.reshape(hidden_dim, num_heads, q_head_dim)
             
@@ -328,124 +188,59 @@ def gqa_to_tpa_conversion(
     # For TPA, the key parameter is the rank of the decomposition
     # The ranks need to be smaller than the respective dimensions
     
-    # Set the ranks based on the fat_ranks parameter
-    if fat_ranks:
-        # For fat ranks mode, use large initial ranks for decomposition
-        # The energy-based rank selection will refine these later (around line 580)
-        print("Using initial large ranks for Tucker decomposition (will be refined by 98% energy threshold)")
-        R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
-        R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
-        R3 = min(q_rank ,W_all.shape[2])    # Rank for the QKV distinction (usually just 4)
-    else:
-        # Standard ranks based on q_rank
-        R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
-        R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
-        R3 = min(q_rank, W_all.shape[2])  # Rank for the QKV distinction
-    
+
+    # Standard ranks based on q_rank
+    R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
+    R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
+    R3 = min(q_rank, W_all.shape[2])  # Rank for the QKV distinction
+
     print(f"Using ranks: R1={R1}, R2={R2}, R3={R3}")
     print(f"Tensor shape: {W_all.shape}")
     
     print(f"Applying Tucker decomposition with ranks: ({R1}, {R2}, {R3})")
     
-    try:
-        # Apply Tucker decomposition to the full tensor
-        # This enforces shared factor matrices across all heads
-        print(f"Tensor shape before Tucker decomposition: {W_all.shape}")
-        print(f"Target ranks: {[R1, R2, R3, num_heads]}")
-        
-        # Set up timing
-        decomp_start = time.time()
-        print("Starting Tucker decomposition...")
-        
-        # Ensure tensor is on the correct device before decomposition
-        W_all_device = W_all.device
-        print(f"Running Tucker decomposition on device: {W_all_device}")
-        
-        # Add verbose parameter to tucker and ensure we're using GPU
-        tucker_start = time.time()
-        try:
-            print("Using GPU-accelerated Tucker decomposition...")
-            # Ensure tensor is contiguous in memory for best performance
-            W_all = W_all.contiguous()
-            core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
-            tucker_end = time.time()
-            print(f"Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds on {W_all_device}")
-        except Exception as e:
-            print(f"Error during Tucker decomposition: {e}")
-            print("Trying alternative approach with explicit device handling...")
-            
-            # Try again with explicit device management
-            # First ensure tensor is on CUDA if available
-            if torch.cuda.is_available():
-                cuda_device = torch.device('cuda')
-                W_all = W_all.to(cuda_device)
-                print(f"Moved tensor to {cuda_device} for decomposition")
-            
-            # Run decomposition with tensor on appropriate device
-            core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
-            tucker_end = time.time()
-            print(f"Alternative Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds")
-        
-        decomp_end = time.time()
-        print(f"Tucker decomposition took {decomp_end - decomp_start:.2f} seconds")
-        
-        # Extract the factor matrices
-        U1 = factors[0]  # For hidden dimension
-        U2 = factors[1]  # For head dimension
-        U3 = factors[2]  # For QKV distinction
-        # No need for factor 3 since we'll keep each head separate
-        
-        print(f"Tucker decomposition complete. Core shape: {core.shape}")
-        print(f"Factor shapes: {[f.shape for f in factors]}")
-        
-        # Check for NaN or infinite values
-        if torch.isnan(core).any() or torch.isinf(core).any():
-            print("WARNING: Core tensor contains NaN or Inf values!")
-        
-        for i, factor in enumerate(factors):
-            if torch.isnan(factor).any() or torch.isinf(factor).any():
-                print(f"WARNING: Factor {i} contains NaN or Inf values!")
-    
-    except Exception as e:
-        print(f"Tucker decomposition failed: {e}")
-        print("Falling back to separate decompositions for Q, K, V")
-        import traceback
-        traceback.print_exc()
-        
-        # Fallback: Decompose Q, K, V separately
-        q_tensors = W_all[:, :, 0, :]  # Shape: [hidden_dim, head_dim, num_heads]
-        k_tensors = W_all[:, :, 1, :]
-        v_tensors = W_all[:, :, 2, :]
-        o_tensors = W_all[:, :, 3, :]
-        
-        # Apply tucker to each separately
-        q_core, q_factors = tucker(q_tensors, rank=[R1, R2, num_heads])
-        k_core, k_factors = tucker(k_tensors, rank=[k_rank, k_rank, num_kv_heads])
-        v_core, v_factors = tucker(v_tensors, rank=[v_rank, v_rank, num_kv_heads])
-        o_core, o_factors = tucker(o_tensors, rank=[R1, R2, num_heads])
-        
-        # Create result using the separate decompositions
-        result = {}
-        result["Q_core"] = q_core.to(dtype=dtype, device=device)
-        result["Q_hidden_factor"] = q_factors[0].to(dtype=dtype, device=device)
-        result["Q_dim_factor"] = q_factors[1].to(dtype=dtype, device=device)
-        result["Q_head_factor"] = torch.eye(num_heads, device=device).to(dtype=dtype)
-        
-        result["K_core"] = k_core.to(dtype=dtype, device=device)
-        result["K_hidden_factor"] = k_factors[0].to(dtype=dtype, device=device)
-        result["K_dim_factor"] = k_factors[1].to(dtype=dtype, device=device)
-        result["K_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype=dtype)
-        
-        result["V_core"] = v_core.to(dtype=dtype, device=device)
-        result["V_hidden_factor"] = v_factors[0].to(dtype=dtype, device=device)
-        result["V_dim_factor"] = v_factors[1].to(dtype=dtype, device=device)
-        result["V_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype=dtype)
-        
-        toc = time.time()
-        print(f"Fallback conversion complete in {toc - tic:.2f} seconds")
-        
-        return result
-    
+    # Apply Tucker decomposition to the full tensor
+    # This enforces shared factor matrices across all heads
+    print(f"Tensor shape before Tucker decomposition: {W_all.shape}")
+    print(f"Target ranks: {[R1, R2, R3, num_heads]}")
+
+    # Set up timing
+    decomp_start = time.time()
+    print("Starting Tucker decomposition...")
+
+    # Ensure tensor is on the correct device before decomposition
+    W_all_device = W_all.device
+    print(f"Running Tucker decomposition on device: {W_all_device}")
+
+    # Add verbose parameter to tucker and ensure we're using GPU
+    tucker_start = time.time()
+    print("Using GPU-accelerated Tucker decomposition...")
+    # Ensure tensor is contiguous in memory for best performance
+    W_all = W_all.contiguous()
+    core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
+    tucker_end = time.time()
+    print(f"Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds on {W_all_device}")
+
+    decomp_end = time.time()
+    print(f"Tucker decomposition took {decomp_end - decomp_start:.2f} seconds")
+
+    # Extract the factor matrices
+    U1 = factors[0]  # For hidden dimension
+    U2 = factors[1]  # For head dimension
+    U3 = factors[2]  # For QKV distinction
+    # No need for factor 3 since we'll keep each head separate
+
+    print(f"Tucker decomposition complete. Core shape: {core.shape}")
+    print(f"Factor shapes: {[f.shape for f in factors]}")
+
+    # Check for NaN or infinite values
+    if torch.isnan(core).any() or torch.isinf(core).any():
+        print("WARNING: Core tensor contains NaN or Inf values!")
+
+    for i, factor in enumerate(factors):
+        if torch.isnan(factor).any() or torch.isinf(factor).any():
+            print(f"WARNING: Factor {i} contains NaN or Inf values!")
+
     # STEP 3: Map Tucker Factors to TPA Parameters
     result = {}
     
@@ -611,13 +406,7 @@ def gqa_to_tpa_conversion(
         
         print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
         
-    except Exception as e:
-        print(f"Error computing intrinsic ranks: {e}")
-        # Fallback to Tucker decomposition ranks
-        intrinsic_k_rank = actual_R2
-        intrinsic_v_rank = actual_R2
-        print(f"Using fallback ranks: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
-    
+
     if use_dynamic_ranks:
         # Use the dynamic ranks based on intrinsic structure
         actual_q_rank = intrinsic_q_rank
@@ -916,11 +705,6 @@ def gqa_to_tpa_conversion(
     print(f"Note: Initial analysis found high intrinsic ranks for K,V (needed for 95% energy: {k_rank},{v_rank})")
     print(f"      but we're using practical ranks capped by Tucker decomposition: {practical_k_rank},{practical_v_rank}")
     
-    # Store the original uncapped ranks for reference
-    original_q_rank = q_rank
-    original_k_rank = k_rank
-    original_v_rank = v_rank
-    
     # Update the rank parameters to match what's actually used
     q_rank = actual_q_rank
     k_rank = actual_k_rank
@@ -1162,57 +946,20 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
     print(f"Model type: {type(model).__name__}")
     print("Searching for attention modules...")
     
-    # GemmaAttention modules are found in different structures based on the model architecture
-    # We'll handle both GemmaForCausalLM and Gemma3ForMultimodalLM structures
     attention_modules = []
     
     # Check if using standard GemmaForCausalLM structure
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        print("Detected standard GemmaForCausalLM structure")
-        for i, layer in enumerate(model.model.layers):
-            if hasattr(layer, "self_attn"):
-                attention_module = layer.self_attn
-                if hasattr(attention_module, "qkv_proj"):
-                    # Standard Gemma attention with combined QKV projection
-                    print(f"  Found QKV-combined attention module in layer {i}")
-                    # For standard Gemma attention, we need to split the QKV projection
-                    # This requires additional handling for the weights
-                    attention_modules.append((f"model.layers.{i}.self_attn", attention_module, "combined_qkv"))
-                    attention_modules_found += 1
-                elif hasattr(attention_module, "q_proj") and hasattr(attention_module, "k_proj") and hasattr(attention_module, "v_proj"):
-                    # Already split Q,K,V projections
-                    print(f"  Found split-QKV attention module in layer {i}")
-                    attention_modules.append((f"model.layers.{i}.self_attn", attention_module, "split_qkv"))
-                    attention_modules_found += 1
-    
-    # Check if using Gemma TPA model structure
-    elif hasattr(model, "model") and hasattr(model.model, "layers") and hasattr(model.model.layers[0], "self_attn"):
-        print("Detected Gemma TPA model structure")
-        for i, layer in enumerate(model.model.layers):
+    for i, layer in enumerate(model.model.layers):
+        if hasattr(layer, "self_attn"):
             attention_module = layer.self_attn
-            if hasattr(attention_module, "W_A_q") and hasattr(attention_module, "W_B_q"):
-                # Already a TPA module
-                print(f"  Layer {i} already using TPA attention - skipping")
-            elif hasattr(attention_module, "q_proj") and hasattr(attention_module, "k_proj") and hasattr(attention_module, "v_proj"):
-                print(f"  Found split-QKV attention module in layer {i}")
-                attention_modules.append((f"model.model.layers.{i}.self_attn", attention_module, "split_qkv"))
-                attention_modules_found += 1
-    
-    # If no attention modules found yet, try to find them in named_modules
-    if attention_modules_found == 0:
-        print("No attention modules found in standard structure, searching all modules...")
-        for name, module in model.named_modules():
-            if hasattr(module, "qkv_proj") and hasattr(module, "o_proj"):
+            if hasattr(attention_module, "qkv_proj"):
                 # Standard Gemma attention with combined QKV projection
-                print(f"  Found combined-QKV attention module: {name}")
-                attention_modules.append((name, module, "combined_qkv"))
+                print(f"  Found QKV-combined attention module in layer {i}")
+                # For standard Gemma attention, we need to split the QKV projection
+                # This requires additional handling for the weights
+                attention_modules.append((f"model.layers.{i}.self_attn", attention_module, "combined_qkv"))
                 attention_modules_found += 1
-            elif hasattr(module, "q_proj") and hasattr(module, "k_proj") and hasattr(module, "v_proj"):
-                # Split Q,K,V projections
-                print(f"  Found split-QKV attention module: {name}")
-                attention_modules.append((name, module, "split_qkv"))
-                attention_modules_found += 1
-    
+
     if attention_modules_found == 0:
         print("ERROR: No attention modules found in the model!")
         print("Model structure may not be compatible with this conversion method")
@@ -1237,55 +984,42 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
         print(f"Converting attention layer: {name} (type: {module_type})")
         layer_start = time.time()
         
-        # Get or derive the number of heads and kv heads
-        if hasattr(module, "num_heads") and hasattr(module, "num_key_value_heads"):
-            num_heads = module.num_heads
-            num_kv_heads = module.num_key_value_heads
-            print(f"  GQA structure verified: {num_heads} heads, {num_kv_heads} KV heads")
-        else:
-            # Try to infer from model config
-            if hasattr(model, "config"):
-                num_heads = getattr(model.config, "num_attention_heads", None)
-                num_kv_heads = getattr(model.config, "num_key_value_heads", num_heads)
-                if num_heads is not None:
-                    print(f"  Inferred from config: {num_heads} heads, {num_kv_heads} KV heads")
-                else:
-                    print(f"  ERROR: Could not determine num_heads from config")
-                    continue
+        # Try to infer from model config
+        if hasattr(model, "config"):
+            num_heads = getattr(model.config, "num_attention_heads", None)
+            num_kv_heads = getattr(model.config, "num_key_value_heads", num_heads)
+            if num_heads is not None:
+                print(f"  Inferred from config: {num_heads} heads, {num_kv_heads} KV heads")
             else:
-                print(f"  ERROR: Module {name} does not have GQA structure and no config found")
+                print(f"  ERROR: Could not determine num_heads from config")
                 continue
-        
-        # Check if apply_factorized_weights exists
-        if hasattr(module, "apply_factorized_weights"):
-            print(f"  Module supports factorized weights")
         else:
-            print(f"  WARNING: Module does not support applying factorized weights")
-            print(f"  Adding apply_factorized_weights method dynamically")
-            
-            # Dynamically add method to apply_factorized_weights if it doesn't exist
-            def apply_factorized_weights_fn(self, weights_dict):
-                """Dynamically added method to apply factorized weights to attention module"""
-                # Set factorized flag
-                self.use_factorized_weights = True
-                
-                # Store the factorized weights
-                for key, weight in weights_dict.items():
-                    # Only convert to Parameter if it's a tensor with floating point dtype
-                    if isinstance(weight, torch.Tensor) and weight.is_floating_point():
-                        # Convert to Parameter for gradient tracking
-                        setattr(self, key, nn.Parameter(weight))
-                    else:
-                        # Store non-tensor values or integer tensors directly
-                        setattr(self, key, weight)
-                
-                # Remember original weights were factorized
-                self.original_weights_replaced = True
-            
-            # Bind the method to the module
-            import types
-            module.apply_factorized_weights = types.MethodType(apply_factorized_weights_fn, module)
-            module.use_factorized_weights = False
+            print(f"  ERROR: Module {name} does not have GQA structure and no config found")
+            continue
+
+        # Dynamically add method to apply_factorized_weights if it doesn't exist
+        def apply_factorized_weights_fn(self, weights_dict):
+            """Dynamically added method to apply factorized weights to attention module"""
+            # Set factorized flag
+            self.use_factorized_weights = True
+
+            # Store the factorized weights
+            for key, weight in weights_dict.items():
+                # Only convert to Parameter if it's a tensor with floating point dtype
+                if isinstance(weight, torch.Tensor) and weight.is_floating_point():
+                    # Convert to Parameter for gradient tracking
+                    setattr(self, key, nn.Parameter(weight))
+                else:
+                    # Store non-tensor values or integer tensors directly
+                    setattr(self, key, weight)
+
+            # Remember original weights were factorized
+            self.original_weights_replaced = True
+
+        # Bind the method to the module
+        import types
+        module.apply_factorized_weights = types.MethodType(apply_factorized_weights_fn, module)
+        module.use_factorized_weights = False
             
         try:
             # Handle different module types
@@ -1293,82 +1027,22 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 # For combined QKV projection, we need to extract the separate weights
                 qkv_weight = module.qkv_proj.weight
                 
-                # First identify if we have a standard Gemma architecture
-                hidden_size = qkv_weight.shape[1]  # Input dimension
-                
-                # Get head_dim from various sources
-                head_dim = None
-                
-                # First check module.head_dim
-                if hasattr(module, "head_dim"):
-                    head_dim = module.head_dim
-                    print(f"  Using head_dim={head_dim} from module attribute")
-                # Then check model config
-                elif hasattr(model, "config") and hasattr(model.config, "head_dim"):
-                    head_dim = model.config.head_dim
-                    print(f"  Using head_dim={head_dim} from model config")
-                # Calculate from hidden_size if available in config
-                elif hasattr(model, "config") and hasattr(model.config, "hidden_size"):
-                    config_hidden = model.config.hidden_size
-                    if config_hidden == hidden_size:
-                        head_dim = hidden_size // num_heads
-                        print(f"  Calculated head_dim={head_dim} from config hidden_size={config_hidden}")
-                # Last resort - infer from shape
-                else:
-                    # Default calculation
-                    head_dim = hidden_size // num_heads
-                    print(f"  Inferred head_dim={head_dim} from weight dimensions")
-                
+                head_dim = module.head_dim
+                print(f"  Using head_dim={head_dim} from module attribute")
+
                 # Calculate sizes for splitting
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
                 
                 # Check if the dimensions match what we expect
                 total_size = q_size + kv_size * 2
-                if total_size != qkv_weight.shape[0]:
-                    print(f"  WARNING: QKV weight dimension {qkv_weight.shape[0]} doesn't match expected {total_size}")
-                    print(f"  Attempting to determine split based on observed shape...")
-                    
-                    # The QKV is in (out_dim, hidden_dim) format
-                    # Try to detect a fixed ratio for q:k:v sizes 
-                    if num_heads >= num_kv_heads and num_heads % num_kv_heads == 0:
-                        # Standard GQA setup
-                        ratio = num_heads / num_kv_heads  # How many q heads per kv head
-                        
-                        # Calculate sizes keeping the ratio
-                        total = qkv_weight.shape[0]  
-                        base_unit = total / (ratio + 2)  # denominator is ratio*k + k + v
-                        
-                        # Split into q, k, v proportionally
-                        k_part = int(base_unit + 0.5)  # round to nearest int
-                        q_part = int(ratio * k_part + 0.5)
-                        v_part = total - q_part - k_part
-                        
-                        print(f"  Using inferred split sizes - Q: {q_part}, K: {k_part}, V: {v_part}")
-                        q_weight, k_weight, v_weight = qkv_weight.split([q_part, k_part, v_part], dim=0)
-                    else:
-                        # Can't determine - try an equal split (fallback)
-                        split_size = qkv_weight.shape[0] // 3
-                        print(f"  Using equal split size of {split_size}")
-                        splits = [split_size, split_size, qkv_weight.shape[0] - 2*split_size]  # Ensure all adds up
-                        q_weight, k_weight, v_weight = qkv_weight.split(splits, dim=0)
-                else:
-                    # Normal case - dimensions match expectations
-                    q_weight, k_weight, v_weight = qkv_weight.split([q_size, kv_size, kv_size], dim=0)
+
+                # Normal case - dimensions match expectations
+                q_weight, k_weight, v_weight = qkv_weight.split([q_size, kv_size, kv_size], dim=0)
                 
                 o_weight = module.o_proj.weight
                 
                 print(f"  Split combined QKV projection: Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}")
-            
-            elif module_type == "split_qkv":
-                # Already has separate Q, K, V projections
-                q_weight = module.q_proj.weight
-                k_weight = module.k_proj.weight
-                v_weight = module.v_proj.weight
-                o_weight = module.o_proj.weight
-                
-                print(f"  Weight dimensions - Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}, O: {o_weight.shape}")
-            
             else:
                 print(f"  ERROR: Unknown module type: {module_type}")
                 continue
@@ -1377,27 +1051,19 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
             print(f"  Starting tensor decomposition for layer {name}...")
             decomp_start = time.time()
             
-                # For GemmaForCausalLM, the correct head dimension needs to be calculated
-            # The QKV projection for regular Gemma has a specific shape
-            if module_type == "combined_qkv":
-                # Combined QKV models have specific dimensions
-                # The query projection is typically [num_heads*head_dim, hidden_dim]
-                # But in GQA models, there are num_heads query heads and num_kv_heads KV heads
-                q_head_dim = q_weight.shape[1] // num_heads
-                kv_head_dim = k_weight.shape[1] // num_kv_heads
-                
-                print(f"  Calculated dimensions: q_head_dim={q_head_dim}, kv_head_dim={kv_head_dim}")
-                print(f"  Heads: q={num_heads}, kv={num_kv_heads}")
-                
-                if q_head_dim != kv_head_dim:
-                    print(f"  WARNING: Different head dimensions for Q ({q_head_dim}) and KV ({kv_head_dim})")
-                    # For combined QKV with GQA, we'll use the query head dimension
-                    head_dim = q_head_dim
-                else:
-                    head_dim = q_head_dim
+            q_head_dim = q_weight.shape[1] // num_heads
+            kv_head_dim = k_weight.shape[1] // num_kv_heads
+
+            print(f"  Calculated dimensions: q_head_dim={q_head_dim}, kv_head_dim={kv_head_dim}")
+            print(f"  Heads: q={num_heads}, kv={num_kv_heads}")
+
+            if q_head_dim != kv_head_dim:
+                print(f"  WARNING: Different head dimensions for Q ({q_head_dim}) and KV ({kv_head_dim})")
+                # For combined QKV with GQA, we'll use the query head dimension
+                head_dim = q_head_dim
             else:
-                # For split QKV, just use the dimensions as they are
-                head_dim = q_weight.shape[1] // num_heads
+                head_dim = q_head_dim
+
                 
             print(f"  Using head_dim={head_dim} for tensor decomposition")
             
