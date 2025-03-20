@@ -203,11 +203,10 @@ def create_tpa_kv_caches(config: gemma_config.GemmaConfig, batch_size: int, max_
             # Use a safe max sequence length to prevent OOM errors
             safe_seq_len = min(max_seq_len, 8192)  # Cap at 8K tokens to avoid excessive memory usage
             
-            # Validate dimensions
-            safe_kv_heads = max(1, num_kv_heads)  # Ensure at least 1 head
-            safe_head_dim = max(1, head_dim)      # Ensure at least dimension 1
-            safe_k_rank = max(1, min(k_rank, 16))  # Limit rank to reasonable values
-            safe_v_rank = max(1, min(v_rank, 16))  # Limit rank to reasonable values
+            safe_k_rank = k_rank
+            safe_v_rank = v_rank
+            safe_kv_heads = num_kv_heads
+            safe_head_dim = head_dim
             
             print(f"Layer {i} KV cache using ranks: k_rank={safe_k_rank}, v_rank={safe_v_rank}")
             
