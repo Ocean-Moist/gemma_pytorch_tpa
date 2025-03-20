@@ -889,7 +889,7 @@ def gqa_to_tpa_conversion(
     return result
 
 
-def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda", use_dynamic_ranks=True, fat_ranks=False):
+def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=torch.float16, device="cuda", use_dynamic_ranks=True, fat_ranks=False):
     """
     Convert a GQA model to TPA format by applying the conversion to each attention layer.
     This modifies the input model in-place and then returns it.
