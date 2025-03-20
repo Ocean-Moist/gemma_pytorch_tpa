@@ -29,9 +29,9 @@ def gqa_to_tpa_conversion(
     o_weight: torch.Tensor,
     num_heads: int,
     num_kv_heads: int,
-    q_rank: int = 6,
-    k_rank: int = 2,
-    v_rank: int = 2,
+    q_rank: int = 240,
+    k_rank: int = 240,
+    v_rank: int = 240,
     dtype: torch.dtype = torch.float16,
     device: str = "cuda",
     use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
@@ -368,7 +368,7 @@ def gqa_to_tpa_conversion(
 
 
     # Use 95% energy threshold as default with normal cap
-    max_practical_rank = 8  # Standard cap to avoid excessive computation
+    max_practical_rank = 320  # Standard cap to avoid excessive computation
 
     # Choose rank based on 95% explained variance (middle of our thresholds)
     intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
