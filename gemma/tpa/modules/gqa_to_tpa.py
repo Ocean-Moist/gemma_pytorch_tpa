@@ -43,12 +43,41 @@ if HAS_TENSORLY:
                 Vh = Vh[:n_eigenvecs, :]
                 
             return U, S, Vh
+        
+        # Let's create our own direct implementation of partial_svd
+        def gpu_partial_svd(matrix, n_eigenvecs=None):
+            """GPU-accelerated partial SVD implementation"""
+            # Ensure matrix stays on the GPU
+            if not isinstance(matrix, torch.Tensor):
+                matrix = torch.tensor(matrix, device='cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Compute SVD directly using PyTorch on the GPU
+            U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
+            
+            # Truncate to requested number of eigenvectors
+            if n_eigenvecs is not None:
+                U = U[:, :n_eigenvecs]
+                S = S[:n_eigenvecs]
+                Vh = Vh[:n_eigenvecs, :]
+            
+            return U, S, Vh
             
         # Override TensorLy's SVD function to use our GPU implementation
         tl.SVD_FUNS = tl.SVD_FUNS.copy()  # Make a copy to avoid modifying the original
         tl.SVD_FUNS['pytorch'] = torch_svd
         
-        print("Successfully configured TensorLy to use GPU-accelerated SVD!")
+        # Directly patch the partial_svd function
+        import types
+        from tensorly import backend
+        
+        # Create a monkey-patched version of partial_svd
+        def patched_partial_svd(matrix, n_eigenvecs=None):
+            return gpu_partial_svd(matrix, n_eigenvecs)
+        
+        # Apply the monkey patch
+        backend.partial_svd = patched_partial_svd
+        
+        print("Successfully PATCHED tensorly's partial_svd for GPU acceleration!")
     except Exception as e:
         print(f"Warning: Could not configure GPU-accelerated SVD: {e}")
         print("TensorLy will fall back to NumPy for SVD, which will be slower")
