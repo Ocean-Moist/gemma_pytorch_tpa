@@ -619,14 +619,13 @@ def gqa_to_tpa_conversion(
                 W_B_r_slice = W_B[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
                 
                 # Correctly apply TPA reconstruction formula with proper outer product
-                # For each element [i,j], compute W_A[i,r] * W_B[j,r]
-                for h in range(hidden_dim):
-                    # Get the W_A value for this dimension and rank
-                    a_val = W_A_r[h, 0]
-                    # Get the W_B slice for this rank (should be the same for all h)
-                    b_slice = W_B_r_slice[0, :]  # Use first row since all rows are identical
-                    # Add the outer product contribution
-                    W_recon_tpa[h, :] += a_val * b_slice / rank
+                # For each dimension, compute the outer product of W_A[:,r] and the first row of W_B_r_slice
+                # Since all rows of W_B_r_slice are identical (by construction)
+                a_vec = W_A_r[:, 0]  # [hidden_dim]
+                b_vec = W_B_r_slice[0, :]  # [head_dim]
+                
+                # Use torch.outer for a clean implementation of the outer product
+                W_recon_tpa += torch.outer(a_vec, b_vec) / rank
                     
             # Compute TPA reconstruction error
             tpa_error = torch.norm(weight_matrix - W_recon_tpa) / torch.norm(weight_matrix)
@@ -773,9 +772,9 @@ def gqa_to_tpa_conversion(
             # Add to the running sum, following the TPA formula
             # Each rank contributes 1/rank of the total reconstruction
             # For correct reconstruction, we need to apply the formula: (1/R) * (W_A_r ⊗ W_B_r)
-            # The proper way is to compute the outer product between a_r and b_r directly
-            # Use unsqueeze to enable broadcasting for the outer product
-            head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_q_rank
+            # Since b_r has identical rows (all equal to the scaled v_r vector),
+            # we only need to use the first row for the outer product
+            head_reconstruction += torch.outer(a_r, b_r[0]) / effective_q_rank
         
         # Store this head's reconstruction in the appropriate slice - using 3D indexing
         q_recon[:, h, :] = head_reconstruction
@@ -798,7 +797,8 @@ def gqa_to_tpa_conversion(
             a_r = k_head_A[:, r]  # [hidden_dim]
             b_r = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             # Apply correct reconstruction using the TPA formula with proper outer product
-            k_head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_k_rank
+            # Only use the first row of b_r since all rows are identical
+            k_head_reconstruction += torch.outer(a_r, b_r[0]) / effective_k_rank
         
         # Store this head's reconstruction - using 3D indexing
         k_recon[:, g, :] = k_head_reconstruction
@@ -815,7 +815,8 @@ def gqa_to_tpa_conversion(
             a_r = v_head_A[:, r]  # [hidden_dim]
             b_r = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             # Apply correct reconstruction using the TPA formula with proper outer product
-            v_head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_v_rank
+            # Only use the first row of b_r since all rows are identical
+            v_head_reconstruction += torch.outer(a_r, b_r[0]) / effective_v_rank
         
         # Store this head's reconstruction - using 3D indexing
         v_recon[:, g, :] = v_head_reconstruction
