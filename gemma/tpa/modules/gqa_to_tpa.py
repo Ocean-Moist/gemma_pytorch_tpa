@@ -595,10 +595,12 @@ def gqa_to_tpa_conversion(
         intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
         intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
         
-        # IMPORTANT: Also ensure component ranks don't exceed Tucker decomposition rank
-        # This prevents dimension mismatches in the subsequent tensor operations
-        intrinsic_k_rank = min(actual_R2, intrinsic_k_rank)
-        intrinsic_v_rank = min(actual_R2, intrinsic_v_rank)
+        # IMPORTANT: Also ensure component ranks match the Tucker decomposition rank EXACTLY
+        # The actual_R2 from Tucker decomposition must be used for all components to prevent dimension mismatches
+        # The ranks we calculate here are just for analysis/logging, but we need to use actual_R2 for the actual operations
+        intrinsic_k_rank = actual_R2  # Force exact match with Tucker rank
+        intrinsic_v_rank = actual_R2  # Force exact match with Tucker rank
+        print(f"  Forcing ranks to match Tucker decomposition rank: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
         
         # Ensure at least rank 2 for stability
         intrinsic_k_rank = max(2, intrinsic_k_rank)
