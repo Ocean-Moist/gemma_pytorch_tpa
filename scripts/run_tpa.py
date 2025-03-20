@@ -27,8 +27,7 @@ import tqdm
 from gemma import config as gemma_config
 from gemma import model as gemma_model
 from gemma import tokenizer as gemma_tokenizer
-from gemma.tpa.tpa_model import GemmaTPAModel, create_tpa_kv_caches
-from gemma.tpa.gemma3_tpa_model_modular import Gemma3ForMultimodalLMwithTPA
+from gemma.tpa.gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -282,18 +281,16 @@ def main(_):
               except Exception as e:
                   print(f"Error copying parameter {name}: {e}")
           
-          # Import the factorization functions
-          from gemma.tpa.modules.contextual_factorization import tucker_tensor_decomposition, HAS_TENSORLY
-          
+          # Import the factorization
+
           # Use the built-in convert_from_standard_weights method which now supports Tucker factorization
           q_rank = _Q_RANK.value
           k_rank = _K_RANK.value
           v_rank = _V_RANK.value
-          print(f"Converting model using {'Tucker' if HAS_TENSORLY else 'contextual'} factorization")
           print(f"Ranks: Q={q_rank}, K={k_rank}, V={v_rank}")
           
           # Use shared factors approach with TensorLy
-          if HAS_TENSORLY:
+          if True:
               # Parse extra configuration if provided
               extra_config = {}
               if _EXTRA_CONFIG.value:

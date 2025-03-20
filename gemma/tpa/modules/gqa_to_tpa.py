@@ -7,20 +7,14 @@ to Tensor Product Attention (TPA) format using TensorLLM-style Tucker decomposit
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 import time
-import numpy as np
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import Dict
 
-from .svd_utils import HAS_TENSORLY
-
-# Import TensorLy if available
-if HAS_TENSORLY:
-    import tensorly as tl
-    from tensorly.decomposition import tucker
-    # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
-    tl.set_backend('pytorch')
+import tensorly as tl
+from tensorly.decomposition import tucker
+# Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
+tl.set_backend('pytorch')
     
 def gqa_to_tpa_conversion(
     q_weight: torch.Tensor,
@@ -63,9 +57,7 @@ def gqa_to_tpa_conversion(
     Returns:
         Dictionary of factorized weights for TPA implementation
     """
-    if not HAS_TENSORLY:
-        raise ImportError("TensorLy is required for gqa_to_tpa_conversion")
-    
+
     # Start timing
     tic = time.time()
     print("Starting GQA to TPA conversion using Tucker decomposition...")
@@ -908,9 +900,7 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
     Returns:
         The modified input model with TPA weights (still a GemmaForCausalLM)
     """
-    if not HAS_TENSORLY:
-        raise ImportError("TensorLy is required for convert_gqa_model_to_tpa")
-    
+
     print("Converting GQA model to TPA format...")
     
     # Add timing and layer counting
@@ -1128,7 +1118,7 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
     Returns:
         A new Gemma3ForMultimodalLMwithTPA model with TPA weights
     """
-    from ..gemma3_tpa_model_modular import Gemma3ForMultimodalLMwithTPA
+    from ..gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
     
     # Start timing
     start_time = time.time()
