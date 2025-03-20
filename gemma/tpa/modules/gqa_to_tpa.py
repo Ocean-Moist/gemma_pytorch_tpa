@@ -37,7 +37,8 @@ def gqa_to_tpa_conversion(
     override_head_dim: int = None,  # Optional parameter to force a specific head dimension
     transposed_weights: bool = False,  # Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
     use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
-    config = None  # Model config to ensure consistent dimensions
+    config = None,  # Model config to ensure consistent dimensions
+    fat_ranks: bool = False  # Whether to use very large ranks (240) for higher accuracy
 ) -> Dict[str, torch.Tensor]:
     """
     Convert GQA attention weights to TPA format using Tucker decomposition.
@@ -87,6 +88,15 @@ def gqa_to_tpa_conversion(
         
     # Update transposed_weights if we transpose the q,k,v weights later
     transposed_weights = transposed_weights or need_transpose
+    
+    # Apply fat_ranks parameter - override ranks if specified
+    if fat_ranks:
+        print("Using FAT RANKS mode with much larger rank values for higher reconstruction accuracy")
+        # Use large ranks of 240 (or a value that makes sense for memory and computation)
+        q_rank = 240
+        k_rank = 240
+        v_rank = 240
+        print(f"Set fat ranks: q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
     
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
     # This ensures consistency with the model's actual hidden state dimensions
@@ -1058,7 +1068,7 @@ def gqa_to_tpa_conversion(
     return result
 
 
-def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda", use_dynamic_ranks=True):
+def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.float16, device="cuda", use_dynamic_ranks=True, fat_ranks=False):
     """
     Convert a GQA model to TPA format by applying the conversion to each attention layer.
     This modifies the input model in-place and then returns it.
@@ -1072,6 +1082,7 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
         device: Device for computation
         use_dynamic_ranks: Whether to use ranks determined by Tucker decomposition (True) 
                           or force specified ranks (False)
+        fat_ranks: Whether to use much larger ranks (240) for higher accuracy but more memory usage
         
     Returns:
         The modified input model with TPA weights (still a GemmaForCausalLM)
@@ -1349,7 +1360,8 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 override_head_dim=head_dim,  # Force the correct head dimension
                 transposed_weights=transposed_weights,  # Handle weight format properly
                 use_dynamic_ranks=use_dynamic_ranks,  # Whether to use ranks from Tucker decomposition
-                config=model.config if hasattr(model, 'config') else None  # Pass model config for hidden_size
+                config=model.config if hasattr(model, 'config') else None,  # Pass model config for hidden_size
+                fat_ranks=fat_ranks  # Whether to use much larger ranks (240) for higher accuracy
             )
             
             decomp_end = time.time()
@@ -1385,7 +1397,8 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
 
 
 def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2, 
-                                 dtype=torch.float16, device="cuda", use_dynamic_ranks=True):
+                                 dtype=torch.float16, device="cuda", use_dynamic_ranks=True,
+                                 fat_ranks=False):
     """
     Create a Gemma3ForMultimodalLMwithTPA model from a standard GemmaForCausalLM model.
     This function:
@@ -1399,6 +1412,7 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
         dtype: Data type for model parameters
         device: Device to use for computation
         use_dynamic_ranks: Whether to use dynamic ranks based on SVD
+        fat_ranks: Whether to use much larger ranks (240) for higher accuracy but more memory
     """
     # Print device info
     print(f"Creating TPA model from standard model using device: {device}")
@@ -1496,7 +1510,8 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
         v_rank=v_rank,
         dtype=dtype,
         device=device,
-        use_dynamic_ranks=use_dynamic_ranks
+        use_dynamic_ranks=use_dynamic_ranks,
+        fat_ranks=fat_ranks  # Pass fat_ranks parameter for higher accuracy mode
     )
     
     # Initialize structure to record layer-specific ranks

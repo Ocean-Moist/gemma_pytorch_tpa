@@ -61,6 +61,8 @@ _TOKENIZER_PATH = flags.DEFINE_string('tokenizer_path', 'tokenizer/tokenizer.mod
                                       'Path to the tokenizer model.')
 _EXTRA_CONFIG = flags.DEFINE_string('extra_config', None, 
                                    'Extra configuration for the model in JSON format. E.g. \'{"use_tensorly": true}\'.')
+_FAT_RANKS = flags.DEFINE_boolean('fat_ranks', False, 
+                                 'Whether to use much larger ranks (240) for higher accuracy.')
 
 # Define valid model variants
 _VALID_MODEL_VARIANTS = ['1b', '4b', '12b', '27b']
@@ -431,6 +433,11 @@ def main(_):
                       # Force standard_model to CUDA
                       standard_model = standard_model.to(device)
                       
+                  # Check if fat_ranks mode is enabled
+                  if _FAT_RANKS.value:
+                      print("Using FAT RANKS MODE with ranks of 240 for higher accuracy but more memory usage")
+                      print("Warning: This will consume significantly more memory and computation time")
+                  
                   # Convert model with explicit parameters
                   new_tpa_model = create_tpa_model_from_standard(
                       standard_model, 
@@ -439,7 +446,8 @@ def main(_):
                       v_rank=v_rank,
                       dtype=tpa_model.dtype,
                       device=device,
-                      use_dynamic_ranks=use_dynamic_ranks
+                      use_dynamic_ranks=use_dynamic_ranks,
+                      fat_ranks=_FAT_RANKS.value  # Pass the fat_ranks parameter
                   )
                   
                   # Replace the original TPA model with our properly created one
