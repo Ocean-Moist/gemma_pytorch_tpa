@@ -1459,7 +1459,14 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
             for key in dir(module):
                 if key.startswith(('W_A_', 'W_B_')):
                     weight = getattr(module, key)
-                    print(f"  {key} weight distribution: {weight.abs().mean().item():.4f} mean, {weight.abs().std().item():.4f} std")
+                    if hasattr(weight, 'data'):
+                        weight_data = weight.data
+                    elif hasattr(weight, 'weight'):
+                        weight_data = weight.weight
+                    else:
+                        print(f"  Warning: Could not get tensor data for {key}")
+                        continue
+                    print(f"  {key} weight distribution: {weight_data.abs().mean().item():.4f} mean, {weight_data.abs().std().item():.4f} std")
 
     end_time = time.time()
     print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
