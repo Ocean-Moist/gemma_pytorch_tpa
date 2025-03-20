@@ -94,9 +94,9 @@ def gqa_to_tpa_conversion(
         print("Using energy-based SVD rank selection (98% explained variance) instead of fixed ranks")
         # We'll determine actual ranks during the Tucker decomposition based on explained variance
         # These are just initial values that will be overridden
-        q_rank = 240
-        k_rank = 240
-        v_rank = 240
+        q_rank = 24
+        k_rank = 12
+        v_rank = 12
         print(f"Initial ranks (will be refined based on SVD): q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
     
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
