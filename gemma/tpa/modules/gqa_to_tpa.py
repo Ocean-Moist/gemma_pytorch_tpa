@@ -724,14 +724,23 @@ def gqa_to_tpa_conversion(
             print(f"Error during SVD computation: {e}")
             raise
     
-    # Initialize output matrices
-    W_A_q = torch.zeros((hidden_dim, num_heads * q_rank), device=device, dtype=torch.float32)
-    W_A_k = torch.zeros((hidden_dim, num_kv_heads * k_rank), device=device, dtype=torch.float32)
-    W_A_v = torch.zeros((hidden_dim, num_kv_heads * v_rank), device=device, dtype=torch.float32)
+    # Update the rank parameters to match what's actually used for computation
+    # This ensures B projections are created with correct dimensions from the start
+    practical_q_rank = min(q_rank, actual_R2)
+    practical_k_rank = min(k_rank, actual_R2)
+    practical_v_rank = min(v_rank, actual_R2)
     
-    W_B_q_optimal = torch.zeros((hidden_dim, q_rank * head_dim), device=device, dtype=torch.float32)
-    W_B_k_optimal = torch.zeros((hidden_dim, k_rank * head_dim), device=device, dtype=torch.float32)
-    W_B_v_optimal = torch.zeros((hidden_dim, v_rank * head_dim), device=device, dtype=torch.float32)
+    print(f"Using practical computation ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
+    print(f"These ranks balance the intrinsic structure with Tucker decomposition constraints")
+    
+    # Initialize output matrices with the practical ranks
+    W_A_q = torch.zeros((hidden_dim, num_heads * practical_q_rank), device=device, dtype=torch.float32)
+    W_A_k = torch.zeros((hidden_dim, num_kv_heads * practical_k_rank), device=device, dtype=torch.float32)
+    W_A_v = torch.zeros((hidden_dim, num_kv_heads * practical_v_rank), device=device, dtype=torch.float32)
+    
+    W_B_q_optimal = torch.zeros((hidden_dim, practical_q_rank * head_dim), device=device, dtype=torch.float32)
+    W_B_k_optimal = torch.zeros((hidden_dim, practical_k_rank * head_dim), device=device, dtype=torch.float32)
+    W_B_v_optimal = torch.zeros((hidden_dim, practical_v_rank * head_dim), device=device, dtype=torch.float32)
     
     # Process query heads
     print(f"Computing SVD-based factorization for {num_heads} query heads...")
@@ -739,11 +748,11 @@ def gqa_to_tpa_conversion(
         # Get the weight matrix for this head
         head_weight = q_weight[:, h * head_dim:(h + 1) * head_dim]  # [hidden_dim, head_dim]
         
-        # Compute TPA factors
-        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, q_rank, hidden_dim, head_dim)
+        # Compute TPA factors using practical ranks
+        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, practical_q_rank, hidden_dim, head_dim)
         
-        # Store in output matrices
-        W_A_q[:, h * q_rank:(h + 1) * q_rank] = W_A_head
+        # Store in output matrices using practical ranks
+        W_A_q[:, h * practical_q_rank:(h + 1) * practical_q_rank] = W_A_head
         
         # For the first head, we store W_B directly
         # For subsequent heads, we average with existing values
@@ -759,11 +768,11 @@ def gqa_to_tpa_conversion(
         # Get the weight matrix for this head
         head_weight = k_weight[:, g * head_dim:(g + 1) * head_dim]  # [hidden_dim, head_dim]
         
-        # Compute TPA factors
-        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, k_rank, hidden_dim, head_dim)
+        # Compute TPA factors using practical ranks
+        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, practical_k_rank, hidden_dim, head_dim)
         
-        # Store in output matrices
-        W_A_k[:, g * k_rank:(g + 1) * k_rank] = W_A_head
+        # Store in output matrices using practical ranks
+        W_A_k[:, g * practical_k_rank:(g + 1) * practical_k_rank] = W_A_head
         
         # For the first head, we store W_B directly
         # For subsequent heads, we average with existing values
@@ -779,11 +788,11 @@ def gqa_to_tpa_conversion(
         # Get the weight matrix for this head
         head_weight = v_weight[:, g * head_dim:(g + 1) * head_dim]  # [hidden_dim, head_dim]
         
-        # Compute TPA factors
-        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, v_rank, hidden_dim, head_dim)
+        # Compute TPA factors using practical ranks
+        W_A_head, W_B_head = compute_svd_tpa_factors(head_weight, practical_v_rank, hidden_dim, head_dim)
         
-        # Store in output matrices
-        W_A_v[:, g * v_rank:(g + 1) * v_rank] = W_A_head
+        # Store in output matrices using practical ranks
+        W_A_v[:, g * practical_v_rank:(g + 1) * practical_v_rank] = W_A_head
         
         # For the first head, we store W_B directly
         # For subsequent heads, we average with existing values
@@ -798,8 +807,15 @@ def gqa_to_tpa_conversion(
     W_B_k_reshaped = W_B_k_optimal  # [hidden_dim, k_rank*head_dim]
     W_B_v_reshaped = W_B_v_optimal  # [hidden_dim, v_rank*head_dim]
     
-    print(f"Created optimal B projections with component-specific ranks - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
+    print(f"Final TPA projection matrices with practical ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
     print(f"B projection shapes: W_B_q={W_B_q_reshaped.shape}, W_B_k={W_B_k_reshaped.shape}, W_B_v={W_B_v_reshaped.shape}")
+    print(f"Note: Initial analysis found high intrinsic ranks for K,V (needed for 95% energy: {k_rank},{v_rank})")
+    print(f"      but we're using practical ranks capped by Tucker decomposition: {practical_k_rank},{practical_v_rank}")
+    
+    # Store the original uncapped ranks for reference
+    original_q_rank = q_rank
+    original_k_rank = k_rank
+    original_v_rank = v_rank
     
     # Update the rank parameters to match what's actually used
     q_rank = actual_q_rank
