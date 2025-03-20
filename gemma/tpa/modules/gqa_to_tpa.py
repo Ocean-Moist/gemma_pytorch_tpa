@@ -1033,9 +1033,6 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
                 
-                # Check if the dimensions match what we expect
-                total_size = q_size + kv_size * 2
-
                 # Normal case - dimensions match expectations
                 q_weight, k_weight, v_weight = qkv_weight.split([q_size, kv_size, kv_size], dim=0)
                 
@@ -1082,8 +1079,6 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 num_heads, num_kv_heads,
                 q_rank, k_rank, v_rank,
                 dtype, device,
-                override_head_dim=head_dim,  # Force the correct head dimension
-                transposed_weights=transposed_weights,  # Handle weight format properly
                 use_dynamic_ranks=use_dynamic_ranks,  # Whether to use ranks from Tucker decomposition
                 config=model.config if hasattr(model, 'config') else None,  # Pass model config for hidden_size
                 fat_ranks=fat_ranks  # Whether to use much larger ranks (240) for higher accuracy
