@@ -333,9 +333,9 @@ def gqa_to_tpa_conversion(
         # For fat ranks mode, use large initial ranks for decomposition
         # The energy-based rank selection will refine these later (around line 580)
         print("Using initial large ranks for Tucker decomposition (will be refined by 98% energy threshold)")
-        R1 = min(240, W_all.shape[0])  # Rank for the model dimension
-        R2 = min(240, W_all.shape[1])  # Rank for the head dimension
-        R3 = min(W_all.shape[2], 4)    # Rank for the QKV distinction (usually just 4)
+        R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
+        R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
+        R3 = min(q_rank ,W_all.shape[2])    # Rank for the QKV distinction (usually just 4)
     else:
         # Standard ranks based on q_rank
         R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
@@ -824,9 +824,9 @@ def gqa_to_tpa_conversion(
     if fat_ranks:
         # For fat ranks mode, use the maximum ranks possible with the current factorization
         # but capped by the actual Tucker decomposition ranks (actual_R2)
-        practical_q_rank = min(240, actual_R2)
-        practical_k_rank = min(240, actual_R2)
-        practical_v_rank = min(240, actual_R2)
+        practical_q_rank = min(24, actual_R2)
+        practical_k_rank = min(12, actual_R2)
+        practical_v_rank = min(12, actual_R2)
         print(f"Using FAT RANKS for computation - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
         print(f"These ranks provide higher accuracy but use more memory and computation")
     else:
