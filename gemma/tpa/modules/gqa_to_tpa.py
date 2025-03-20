@@ -330,61 +330,60 @@ def gqa_to_tpa_conversion(
     v_matrix_2d = v_weight.reshape(hidden_dim, -1)
     
     # Compute SVD to analyze singular value distributions
-    try:
-        _, k_singular_values, _ = torch.linalg.svd(k_matrix_2d, full_matrices=False)
-        _, v_singular_values, _ = torch.linalg.svd(v_matrix_2d, full_matrices=False)
-        
-        # Better approach: use energy-based threshold (cumulative explained variance)
-        # This is more adaptive to different singular value distributions
-        
-        # Square singular values to get eigenvalues (energy)
-        k_energy = k_singular_values ** 2
-        v_energy = v_singular_values ** 2
-        
-        # Normalize by total energy
-        k_energy_norm = k_energy / torch.sum(k_energy)
-        v_energy_norm = v_energy / torch.sum(v_energy)
-        
-        # Compute cumulative explained variance
-        k_cumulative = torch.cumsum(k_energy_norm, dim=0)
-        v_cumulative = torch.cumsum(v_energy_norm, dim=0)
-        
-        # Find ranks that explain 90%, 95%, 98% of variance
-        energy_thresholds = [0.9, 0.95, 0.98]
-        k_ranks = []
-        v_ranks = []
-        
-        print("  K singular value analysis:")
-        for thresh in energy_thresholds:
-            k_rank = torch.sum(k_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
-            k_rank = min(k_rank, len(k_cumulative))  # Handle case where we might not reach threshold
-            k_ranks.append(int(k_rank))
-            print(f"    {thresh*100:.0f}% energy: rank {int(k_rank)}")
-            
-        print("  V singular value analysis:")
-        for thresh in energy_thresholds:
-            v_rank = torch.sum(v_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
-            v_rank = min(v_rank, len(v_cumulative))  # Handle case where we might not reach threshold
-            v_ranks.append(int(v_rank))
-            print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
-            
-        # Set maximum practical rank based on fat_ranks setting
-        if fat_ranks:
-            # For fat ranks mode, allow much higher ranks
-            max_practical_rank = 240  # Very high rank for better approximation
-            print("  Using FAT RANKS mode with max_practical_rank=240")
-            
-            # For fat_ranks, use 98% energy threshold (highest of our thresholds)
-            intrinsic_k_rank = k_ranks[2] if len(k_ranks) > 2 else k_ranks[-1]
-            intrinsic_v_rank = v_ranks[2] if len(v_ranks) > 2 else v_ranks[-1]
-            print(f"  Using 98% energy threshold for rank selection")
-        else:
-            # Use 95% energy threshold as default with normal cap
-            max_practical_rank = 8  # Standard cap to avoid excessive computation
-            
-            # Choose rank based on 95% explained variance (middle of our thresholds)
-            intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
-            intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
+    _, k_singular_values, _ = torch.linalg.svd(k_matrix_2d, full_matrices=False)
+    _, v_singular_values, _ = torch.linalg.svd(v_matrix_2d, full_matrices=False)
+
+    # Better approach: use energy-based threshold (cumulative explained variance)
+    # This is more adaptive to different singular value distributions
+
+    # Square singular values to get eigenvalues (energy)
+    k_energy = k_singular_values ** 2
+    v_energy = v_singular_values ** 2
+
+    # Normalize by total energy
+    k_energy_norm = k_energy / torch.sum(k_energy)
+    v_energy_norm = v_energy / torch.sum(v_energy)
+
+    # Compute cumulative explained variance
+    k_cumulative = torch.cumsum(k_energy_norm, dim=0)
+    v_cumulative = torch.cumsum(v_energy_norm, dim=0)
+
+    # Find ranks that explain 90%, 95%, 98% of variance
+    energy_thresholds = [0.9, 0.95, 0.98]
+    k_ranks = []
+    v_ranks = []
+
+    print("  K singular value analysis:")
+    for thresh in energy_thresholds:
+        k_rank = torch.sum(k_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
+        k_rank = min(k_rank, len(k_cumulative))  # Handle case where we might not reach threshold
+        k_ranks.append(int(k_rank))
+        print(f"    {thresh*100:.0f}% energy: rank {int(k_rank)}")
+
+    print("  V singular value analysis:")
+    for thresh in energy_thresholds:
+        v_rank = torch.sum(v_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
+        v_rank = min(v_rank, len(v_cumulative))  # Handle case where we might not reach threshold
+        v_ranks.append(int(v_rank))
+        print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
+
+    # Set maximum practical rank based on fat_ranks setting
+    if fat_ranks:
+        # For fat ranks mode, allow much higher ranks
+        max_practical_rank = 240  # Very high rank for better approximation
+        print("  Using FAT RANKS mode with max_practical_rank=240")
+
+        # For fat_ranks, use 98% energy threshold (highest of our thresholds)
+        intrinsic_k_rank = k_ranks[2] if len(k_ranks) > 2 else k_ranks[-1]
+        intrinsic_v_rank = v_ranks[2] if len(v_ranks) > 2 else v_ranks[-1]
+        print(f"  Using 98% energy threshold for rank selection")
+    else:
+        # Use 95% energy threshold as default with normal cap
+        max_practical_rank = 8  # Standard cap to avoid excessive computation
+
+        # Choose rank based on 95% explained variance (middle of our thresholds)
+        intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
+        intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
         
         # Apply practical rank cap (higher for fat_ranks mode)
         intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
