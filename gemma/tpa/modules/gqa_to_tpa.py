@@ -1301,17 +1301,7 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                             print(f"  ERROR: Weight hidden dim {actual_hidden_dim} differs from model config {hidden_dim}")
                             raise ValueError(f"CRITICAL ERROR: Weight hidden dim {actual_hidden_dim} differs from model config hidden_dim {hidden_dim}. Cannot proceed with mismatched dimensions.")
                         
-                        if std_key == 'W_A_q':
-                            out_features = num_heads * q_rank
-                        elif std_key == 'W_A_k':
-                            out_features = num_kv_heads * k_rank
-                        elif std_key == 'W_A_v':
-                            out_features = num_kv_heads * v_rank
-                        else:
-                            out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                        
-                        # Use the actual hidden dimension from the weight
-                        in_features = actual_hidden_dim
+
                     else:
                         # CORRECTION: In contextual factorization (CF) form of TPA:
                         # W_B_q projects from hidden_dim to q_rank*head_dim, then reshapes to [batch, seq, q_rank, head_dim]
@@ -1462,7 +1452,15 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
     # Set the tokenizer if available
     if hasattr(standard_model, 'tokenizer'):
         tpa_model.tokenizer = standard_model.tokenizer
-        
+    # print out distro of weights in each layer
+    for name, module in tpa_model.named_modules():
+        if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
+            print(f"  Found factorized module: {name}")
+            for key in dir(module):
+                if key.startswith(('W_A_', 'W_B_')):
+                    weight = getattr(module, key)
+                    print(f"  {key} weight distribution: {weight.abs().mean().item():.4f} mean, {weight.abs().std().item():.4f} std")
+
     end_time = time.time()
     print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
     
