@@ -474,9 +474,9 @@ def gqa_to_tpa_conversion(
     print(f"Actual ranks from Tucker decomposition: R1={actual_R1}, R2={actual_R2}")
     
     # We'll determine the optimal ranks for each component separately
-    # First, analyze the intrinsic ranks of Q, K, V matrices using SVD
+    # First, analyze the intrinsic ranks of Q, K, V matrices using SVD and energy analysis
     # This helps us respect the actual rank structure of each component
-    print("Analyzing intrinsic ranks of each component...")
+    print("\nANALYZING INTRINSIC RANKS using energy-based approach (cumulative explained variance)")
     
     # For queries
     intrinsic_q_rank = actual_R2  # Start with Tucker decomposition rank
@@ -491,18 +491,57 @@ def gqa_to_tpa_conversion(
         _, k_singular_values, _ = torch.linalg.svd(k_matrix_2d, full_matrices=False)
         _, v_singular_values, _ = torch.linalg.svd(v_matrix_2d, full_matrices=False)
         
-        # Normalize singular values
-        k_norm_sv = k_singular_values / k_singular_values[0]
-        v_norm_sv = v_singular_values / v_singular_values[0]
+        # Better approach: use energy-based threshold (cumulative explained variance)
+        # This is more adaptive to different singular value distributions
         
-        # Find effective rank based on singular value threshold (e.g., 0.1 or 10%)
-        threshold = 0.1
-        intrinsic_k_rank = torch.sum(k_norm_sv > threshold).item()
-        intrinsic_v_rank = torch.sum(v_norm_sv > threshold).item()
+        # Square singular values to get eigenvalues (energy)
+        k_energy = k_singular_values ** 2
+        v_energy = v_singular_values ** 2
+        
+        # Normalize by total energy
+        k_energy_norm = k_energy / torch.sum(k_energy)
+        v_energy_norm = v_energy / torch.sum(v_energy)
+        
+        # Compute cumulative explained variance
+        k_cumulative = torch.cumsum(k_energy_norm, dim=0)
+        v_cumulative = torch.cumsum(v_energy_norm, dim=0)
+        
+        # Find ranks that explain 90%, 95%, 98% of variance
+        energy_thresholds = [0.9, 0.95, 0.98]
+        k_ranks = []
+        v_ranks = []
+        
+        print("  K singular value analysis:")
+        for thresh in energy_thresholds:
+            k_rank = torch.sum(k_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
+            k_rank = min(k_rank, len(k_cumulative))  # Handle case where we might not reach threshold
+            k_ranks.append(int(k_rank))
+            print(f"    {thresh*100:.0f}% energy: rank {int(k_rank)}")
+            
+        print("  V singular value analysis:")
+        for thresh in energy_thresholds:
+            v_rank = torch.sum(v_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
+            v_rank = min(v_rank, len(v_cumulative))  # Handle case where we might not reach threshold
+            v_ranks.append(int(v_rank))
+            print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
+            
+        # Use 95% energy threshold as default, but cap at maximum practical rank
+        max_practical_rank = 8  # Cap to avoid excessive computation
+        
+        # Choose rank based on 95% explained variance (middle of our thresholds)
+        intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
+        intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
+        
+        # Apply maximum practical rank cap
+        intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
+        intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
         
         # Ensure at least rank 2 for stability
         intrinsic_k_rank = max(2, intrinsic_k_rank)
         intrinsic_v_rank = max(2, intrinsic_v_rank)
+        
+        # Print final selected ranks
+        print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped at {max_practical_rank})")
         
         print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
         
@@ -518,13 +557,15 @@ def gqa_to_tpa_conversion(
         actual_q_rank = intrinsic_q_rank
         actual_k_rank = intrinsic_k_rank
         actual_v_rank = intrinsic_v_rank
-        print(f"Using intrinsic component-specific ranks: q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+        print(f"\nUSING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+        print(f"These ranks are determined by energy-based analysis to balance accuracy and efficiency")
     else:
         # Use the user-specified ranks but cap by the actual ranks
         actual_q_rank = min(q_rank, actual_R2)
         actual_k_rank = min(k_rank, intrinsic_k_rank)
         actual_v_rank = min(v_rank, intrinsic_v_rank)
-        print(f"Using requested ranks (capped by intrinsic ranks): q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+        print(f"\nUSING USER-SPECIFIED RANKS (capped by intrinsic ranks): Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+        print(f"Original requested ranks were: Q={q_rank}, K={k_rank}, V={v_rank}")
     
     # Expand dimensions for TPA format using actual ranks
     # Make sure to use the correct hidden_dim for these matrices - it might be different from q_weight.shape[0]
