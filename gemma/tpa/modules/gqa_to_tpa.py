@@ -22,66 +22,6 @@ if HAS_TENSORLY:
     # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
     tl.set_backend('pytorch')
     
-    # Configure TensorLy to use GPU-accelerated SVD implementation
-    # This prevents falling back to NumPy which runs on CPU
-    try:
-        # Try to import torch-native SVD implementation
-        import torch
-        
-        # Define custom SVD function that uses PyTorch's SVD directly
-        def torch_svd(matrix, n_eigenvecs=None):
-            """GPU-accelerated SVD function using PyTorch"""
-            # Force computation on the same device as the input
-            device = matrix.device
-            # Compute full SVD on the device
-            U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
-            
-            # If n_eigenvecs is specified, truncate the results
-            if n_eigenvecs is not None:
-                U = U[:, :n_eigenvecs]
-                S = S[:n_eigenvecs]
-                Vh = Vh[:n_eigenvecs, :]
-                
-            return U, S, Vh
-        
-        # Let's create our own direct implementation of partial_svd
-        def gpu_partial_svd(matrix, n_eigenvecs=None):
-            """GPU-accelerated partial SVD implementation"""
-            # Ensure matrix stays on the GPU
-            if not isinstance(matrix, torch.Tensor):
-                matrix = torch.tensor(matrix, device='cuda' if torch.cuda.is_available() else 'cpu')
-            
-            # Compute SVD directly using PyTorch on the GPU
-            U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
-            
-            # Truncate to requested number of eigenvectors
-            if n_eigenvecs is not None:
-                U = U[:, :n_eigenvecs]
-                S = S[:n_eigenvecs]
-                Vh = Vh[:n_eigenvecs, :]
-            
-            return U, S, Vh
-            
-        # Override TensorLy's SVD function to use our GPU implementation
-        tl.SVD_FUNS = tl.SVD_FUNS.copy()  # Make a copy to avoid modifying the original
-        tl.SVD_FUNS['pytorch'] = torch_svd
-        
-        # Directly patch the partial_svd function
-        import types
-        from tensorly import backend
-        
-        # Create a monkey-patched version of partial_svd
-        def patched_partial_svd(matrix, n_eigenvecs=None):
-            return gpu_partial_svd(matrix, n_eigenvecs)
-        
-        # Apply the monkey patch
-        backend.partial_svd = patched_partial_svd
-        
-        print("Successfully PATCHED tensorly's partial_svd for GPU acceleration!")
-    except Exception as e:
-        print(f"Warning: Could not configure GPU-accelerated SVD: {e}")
-        print("TensorLy will fall back to NumPy for SVD, which will be slower")
-
 def gqa_to_tpa_conversion(
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
@@ -151,12 +91,13 @@ def gqa_to_tpa_conversion(
     
     # Apply fat_ranks parameter - override ranks if specified
     if fat_ranks:
-        print("Using FAT RANKS mode with much larger rank values for higher reconstruction accuracy")
-        # Use large ranks of 240 (or a value that makes sense for memory and computation)
+        print("Using energy-based SVD rank selection (98% explained variance) instead of fixed ranks")
+        # We'll determine actual ranks during the Tucker decomposition based on explained variance
+        # These are just initial values that will be overridden
         q_rank = 240
         k_rank = 240
         v_rank = 240
-        print(f"Set fat ranks: q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
+        print(f"Initial ranks (will be refined based on SVD): q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
     
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
     # This ensures consistency with the model's actual hidden state dimensions
@@ -389,9 +330,9 @@ def gqa_to_tpa_conversion(
     
     # Set the ranks based on the fat_ranks parameter
     if fat_ranks:
-        # For fat ranks mode, use large ranks for better approximation
-        # but cap at the actual tensor dimensions to avoid errors
-        print("Using FAT RANKS (240) for Tucker decomposition")
+        # For fat ranks mode, use large initial ranks for decomposition
+        # The energy-based rank selection will refine these later (around line 580)
+        print("Using initial large ranks for Tucker decomposition (will be refined by 98% energy threshold)")
         R1 = min(240, W_all.shape[0])  # Rank for the model dimension
         R2 = min(240, W_all.shape[1])  # Rank for the head dimension
         R3 = min(W_all.shape[2], 4)    # Rank for the QKV distinction (usually just 4)
@@ -637,13 +578,18 @@ def gqa_to_tpa_conversion(
             # For fat ranks mode, allow much higher ranks
             max_practical_rank = 240  # Very high rank for better approximation
             print("  Using FAT RANKS mode with max_practical_rank=240")
+            
+            # For fat_ranks, use 98% energy threshold (highest of our thresholds)
+            intrinsic_k_rank = k_ranks[2] if len(k_ranks) > 2 else k_ranks[-1]
+            intrinsic_v_rank = v_ranks[2] if len(v_ranks) > 2 else v_ranks[-1]
+            print(f"  Using 98% energy threshold for rank selection")
         else:
             # Use 95% energy threshold as default with normal cap
             max_practical_rank = 8  # Standard cap to avoid excessive computation
-        
-        # Choose rank based on 95% explained variance (middle of our thresholds)
-        intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
-        intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
+            
+            # Choose rank based on 95% explained variance (middle of our thresholds)
+            intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
+            intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
         
         # Apply practical rank cap (higher for fat_ranks mode)
         intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
