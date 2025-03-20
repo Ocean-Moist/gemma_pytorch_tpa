@@ -21,6 +21,37 @@ if HAS_TENSORLY:
     from tensorly.decomposition import tucker
     # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
     tl.set_backend('pytorch')
+    
+    # Configure TensorLy to use GPU-accelerated SVD implementation
+    # This prevents falling back to NumPy which runs on CPU
+    try:
+        # Try to import torch-native SVD implementation
+        import torch
+        
+        # Define custom SVD function that uses PyTorch's SVD directly
+        def torch_svd(matrix, n_eigenvecs=None):
+            """GPU-accelerated SVD function using PyTorch"""
+            # Force computation on the same device as the input
+            device = matrix.device
+            # Compute full SVD on the device
+            U, S, Vh = torch.linalg.svd(matrix, full_matrices=False)
+            
+            # If n_eigenvecs is specified, truncate the results
+            if n_eigenvecs is not None:
+                U = U[:, :n_eigenvecs]
+                S = S[:n_eigenvecs]
+                Vh = Vh[:n_eigenvecs, :]
+                
+            return U, S, Vh
+            
+        # Override TensorLy's SVD function to use our GPU implementation
+        tl.SVD_FUNS = tl.SVD_FUNS.copy()  # Make a copy to avoid modifying the original
+        tl.SVD_FUNS['pytorch'] = torch_svd
+        
+        print("Successfully configured TensorLy to use GPU-accelerated SVD!")
+    except Exception as e:
+        print(f"Warning: Could not configure GPU-accelerated SVD: {e}")
+        print("TensorLy will fall back to NumPy for SVD, which will be slower")
 
 def gqa_to_tpa_conversion(
     q_weight: torch.Tensor,
@@ -326,9 +357,20 @@ def gqa_to_tpa_conversion(
     # STEP 2: Tucker Decomposition with Shared Factor Matrices
     # For TPA, the key parameter is the rank of the decomposition
     # The ranks need to be smaller than the respective dimensions
-    R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
-    R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
-    R3 = min(q_rank, W_all.shape[2])  # Rank for the QKV distinction
+    
+    # Set the ranks based on the fat_ranks parameter
+    if fat_ranks:
+        # For fat ranks mode, use large ranks for better approximation
+        # but cap at the actual tensor dimensions to avoid errors
+        print("Using FAT RANKS (240) for Tucker decomposition")
+        R1 = min(240, W_all.shape[0])  # Rank for the model dimension
+        R2 = min(240, W_all.shape[1])  # Rank for the head dimension
+        R3 = min(W_all.shape[2], 4)    # Rank for the QKV distinction (usually just 4)
+    else:
+        # Standard ranks based on q_rank
+        R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
+        R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
+        R3 = min(q_rank, W_all.shape[2])  # Rank for the QKV distinction
     
     print(f"Using ranks: R1={R1}, R2={R2}, R3={R3}")
     print(f"Tensor shape: {W_all.shape}")
@@ -345,8 +387,34 @@ def gqa_to_tpa_conversion(
         decomp_start = time.time()
         print("Starting Tucker decomposition...")
         
-        # Add verbose parameter to tucker
-        core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
+        # Ensure tensor is on the correct device before decomposition
+        W_all_device = W_all.device
+        print(f"Running Tucker decomposition on device: {W_all_device}")
+        
+        # Add verbose parameter to tucker and ensure we're using GPU
+        tucker_start = time.time()
+        try:
+            print("Using GPU-accelerated Tucker decomposition...")
+            # Ensure tensor is contiguous in memory for best performance
+            W_all = W_all.contiguous()
+            core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
+            tucker_end = time.time()
+            print(f"Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds on {W_all_device}")
+        except Exception as e:
+            print(f"Error during Tucker decomposition: {e}")
+            print("Trying alternative approach with explicit device handling...")
+            
+            # Try again with explicit device management
+            # First ensure tensor is on CUDA if available
+            if torch.cuda.is_available():
+                cuda_device = torch.device('cuda')
+                W_all = W_all.to(cuda_device)
+                print(f"Moved tensor to {cuda_device} for decomposition")
+            
+            # Run decomposition with tensor on appropriate device
+            core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
+            tucker_end = time.time()
+            print(f"Alternative Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds")
         
         decomp_end = time.time()
         print(f"Tucker decomposition took {decomp_end - decomp_start:.2f} seconds")
@@ -535,14 +603,20 @@ def gqa_to_tpa_conversion(
             v_ranks.append(int(v_rank))
             print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
             
-        # Use 95% energy threshold as default, but cap at maximum practical rank
-        max_practical_rank = 8  # Cap to avoid excessive computation
+        # Set maximum practical rank based on fat_ranks setting
+        if fat_ranks:
+            # For fat ranks mode, allow much higher ranks
+            max_practical_rank = 240  # Very high rank for better approximation
+            print("  Using FAT RANKS mode with max_practical_rank=240")
+        else:
+            # Use 95% energy threshold as default with normal cap
+            max_practical_rank = 8  # Standard cap to avoid excessive computation
         
         # Choose rank based on 95% explained variance (middle of our thresholds)
         intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
         intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
         
-        # Apply maximum practical rank cap
+        # Apply practical rank cap (higher for fat_ranks mode)
         intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
         intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
         
@@ -770,12 +844,21 @@ def gqa_to_tpa_conversion(
     
     # Update the rank parameters to match what's actually used for computation
     # This ensures B projections are created with correct dimensions from the start
-    practical_q_rank = min(q_rank, actual_R2)
-    practical_k_rank = min(k_rank, actual_R2)
-    practical_v_rank = min(v_rank, actual_R2)
-    
-    print(f"Using practical computation ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
-    print(f"These ranks balance the intrinsic structure with Tucker decomposition constraints")
+    if fat_ranks:
+        # For fat ranks mode, use the maximum ranks possible with the current factorization
+        # but capped by the actual Tucker decomposition ranks (actual_R2)
+        practical_q_rank = min(240, actual_R2)
+        practical_k_rank = min(240, actual_R2)
+        practical_v_rank = min(240, actual_R2)
+        print(f"Using FAT RANKS for computation - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
+        print(f"These ranks provide higher accuracy but use more memory and computation")
+    else:
+        # Standard approach - use the requested ranks capped by the Tucker decomposition ranks
+        practical_q_rank = min(q_rank, actual_R2)
+        practical_k_rank = min(k_rank, actual_R2)
+        practical_v_rank = min(v_rank, actual_R2)
+        print(f"Using practical computation ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
+        print(f"These ranks balance the intrinsic structure with Tucker decomposition constraints")
     
     # Initialize output matrices with the practical ranks
     W_A_q = torch.zeros((hidden_dim, num_heads * practical_q_rank), device=device, dtype=torch.float32)
