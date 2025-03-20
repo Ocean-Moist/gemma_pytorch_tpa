@@ -702,8 +702,15 @@ def gqa_to_tpa_conversion(
     
     print("Verifying reconstruction quality of SVD-based TPA factors...")
     
-    # Reconstruct query weights directly from the SVD factors
-    q_recon = torch.zeros_like(q_weights_reshaped)
+    # Make sure to create 3D tensors for proper reconstruction verification
+    # q_weights_reshaped is [hidden_dim, num_heads, head_dim]
+    print(f"Debug - q_weights_reshaped shape: {q_weights_reshaped.shape}")
+    print(f"Debug - k_weights_reshaped shape: {k_weights_reshaped.shape}")
+    
+    # Reconstruct query weights directly from the SVD factors as 3D tensor
+    q_recon = torch.zeros((hidden_dim, num_heads, head_dim), device=device, dtype=torch.float32)
+    k_recon = torch.zeros((hidden_dim, num_kv_heads, head_dim), device=device, dtype=torch.float32)
+    v_recon = torch.zeros((hidden_dim, num_kv_heads, head_dim), device=device, dtype=torch.float32)
     
     # For SVD-based TPA, the reconstruction formula is:
     # W_r = 1/R * sum_r [ W_A_r * W_B_r ]
@@ -729,13 +736,10 @@ def gqa_to_tpa_conversion(
             # Each rank contributes 1/rank of the total reconstruction
             head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / q_rank
         
-        # Store this head's reconstruction in the appropriate slice
-        q_recon[:, h*head_dim:(h+1)*head_dim] = head_reconstruction
+        # Store this head's reconstruction in the appropriate slice - using 3D indexing
+        q_recon[:, h, :] = head_reconstruction
     
     # Reconstruct key and value weights with the same approach
-    k_recon = torch.zeros_like(k_weights_reshaped)
-    v_recon = torch.zeros_like(v_weights_reshaped)
-    
     for g in range(num_kv_heads):
         # Get A factors for this group
         k_head_A = W_A_k[:, g*k_rank:(g+1)*k_rank]  # [hidden_dim, k_rank] 
@@ -748,8 +752,8 @@ def gqa_to_tpa_conversion(
             b_r = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             k_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / k_rank
         
-        # Store this head's reconstruction
-        k_recon[:, g*head_dim:(g+1)*head_dim] = k_head_reconstruction
+        # Store this head's reconstruction - using 3D indexing
+        k_recon[:, g, :] = k_head_reconstruction
         
         # Reconstruct value weights
         v_head_reconstruction = torch.zeros((hidden_dim, head_dim), device=device, dtype=torch.float32)
@@ -758,8 +762,8 @@ def gqa_to_tpa_conversion(
             b_r = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             v_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / v_rank
         
-        # Store this head's reconstruction
-        v_recon[:, g*head_dim:(g+1)*head_dim] = v_head_reconstruction
+        # Store this head's reconstruction - using 3D indexing
+        v_recon[:, g, :] = v_head_reconstruction
         
     # Add factorization ranks to results - store as simple integers, not tensors
     # This is critical for proper KV cache creation
@@ -770,28 +774,32 @@ def gqa_to_tpa_conversion(
     print(f"Using ACTUAL ranks for factorized weights - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
     print(f"Important: These might differ from the requested ranks")
     
-    # Reshape for error calculation
-    q_recon = q_recon.reshape(hidden_dim, -1)
-    k_recon = k_recon.reshape(hidden_dim, -1)
-    v_recon = v_recon.reshape(hidden_dim, -1)
+    # Reshape for error calculation - must match original weight shape
+    # Convert from 3D [hidden_dim, num_heads, head_dim] back to 2D [hidden_dim, num_heads*head_dim]
+    q_recon_2d = q_recon.reshape(hidden_dim, num_heads * head_dim)
+    k_recon_2d = k_recon.reshape(hidden_dim, num_kv_heads * head_dim)
+    v_recon_2d = v_recon.reshape(hidden_dim, num_kv_heads * head_dim)
+    
+    print(f"Debug - After reshape: q_recon shape: {q_recon_2d.shape}, q_weight shape: {q_weight.shape}")
     
     # Calculate relative errors, handling potential shape differences
     # This addresses the case when q, k, v have different shapes in GQA
     try:
-        q_err = torch.norm(q_recon - q_weight) / torch.norm(q_weight)
+        # Use the 2D versions for error calculation
+        q_err = torch.norm(q_recon_2d - q_weight) / torch.norm(q_weight)
     except RuntimeError as e:
         print(f"Warning: Cannot calculate Q reconstruction error due to shape mismatch: {e}")
-        print(f"  q_recon shape: {q_recon.shape}, q_weight shape: {q_weight.shape}")
+        print(f"  q_recon_2d shape: {q_recon_2d.shape}, q_weight shape: {q_weight.shape}")
         q_err = torch.tensor(float('nan'))
         
     try:
         # Original key weights could have different dimensions in GQA
         # For Gemma 1B with 4 query heads, 1 KV head: k_weight is [256, 1152] but k_recon is [1024, 288]
         # We'll evaluate error on the common dimension only
-        if k_recon.shape != k_weight.shape:
-            print(f"Warning: K shape mismatch: k_recon={k_recon.shape}, k_weight={k_weight.shape}")
+        if k_recon_2d.shape != k_weight.shape:
+            print(f"Warning: K shape mismatch: k_recon_2d={k_recon_2d.shape}, k_weight={k_weight.shape}")
             # Only using the first num_kv_heads rows for comparison
-            k_recon_common = k_recon[:k_weight.shape[0], :k_weight.shape[1]]
+            k_recon_common = k_recon_2d[:k_weight.shape[0], :k_weight.shape[1]]
             # Or pad k_recon to match k_weight shape
             if k_recon_common.shape == k_weight.shape:
                 k_err = torch.norm(k_recon_common - k_weight) / torch.norm(k_weight)
@@ -799,17 +807,17 @@ def gqa_to_tpa_conversion(
                 print("  Cannot calculate K error - shapes too different")
                 k_err = torch.tensor(float('nan'))
         else:
-            k_err = torch.norm(k_recon - k_weight) / torch.norm(k_weight)
+            k_err = torch.norm(k_recon_2d - k_weight) / torch.norm(k_weight)
     except RuntimeError as e:
         print(f"Warning: Cannot calculate K reconstruction error: {e}")
         k_err = torch.tensor(float('nan'))
         
     try:
         # Original value weights could have different dimensions in GQA
-        if v_recon.shape != v_weight.shape:
-            print(f"Warning: V shape mismatch: v_recon={v_recon.shape}, v_weight={v_weight.shape}")
+        if v_recon_2d.shape != v_weight.shape:
+            print(f"Warning: V shape mismatch: v_recon_2d={v_recon_2d.shape}, v_weight={v_weight.shape}")
             # Only using the first num_kv_heads rows for comparison
-            v_recon_common = v_recon[:v_weight.shape[0], :v_weight.shape[1]]
+            v_recon_common = v_recon_2d[:v_weight.shape[0], :v_weight.shape[1]]
             # Or pad v_recon to match v_weight shape
             if v_recon_common.shape == v_weight.shape:
                 v_err = torch.norm(v_recon_common - v_weight) / torch.norm(v_weight)
@@ -817,7 +825,7 @@ def gqa_to_tpa_conversion(
                 print("  Cannot calculate V error - shapes too different")
                 v_err = torch.tensor(float('nan'))
         else:
-            v_err = torch.norm(v_recon - v_weight) / torch.norm(v_weight)
+            v_err = torch.norm(v_recon_2d - v_weight) / torch.norm(v_weight)
     except RuntimeError as e:
         print(f"Warning: Cannot calculate V reconstruction error: {e}")
         v_err = torch.tensor(float('nan'))
