@@ -652,10 +652,29 @@ def gqa_to_tpa_conversion(
             # W_B_r = sqrt(rank) * sqrt(sigma_r) * v_r^T
             
             # Scale U and Vh by sqrt(sigma) and sqrt(rank)
+            # Log singular values for debugging
+            print(f"Singular values min: {S_r.min().item():.10e}, max: {S_r.max().item():.10e}")
+            if (S_r <= 0).any():
+                print(f"WARNING: Zero or negative singular values detected: {S_r[S_r <= 0]}")
+            
             sqrt_S_r = torch.sqrt(S_r)
+            
+            # Log if we get NaN in sqrt
+            if torch.isnan(sqrt_S_r).any():
+                nan_indices = torch.where(torch.isnan(sqrt_S_r))[0]
+                print(f"NaN values detected in sqrt_S_r at indices: {nan_indices.tolist()}")
+                print(f"Corresponding S_r values: {S_r[nan_indices].tolist()}")
             
             # Create W_A matrix [hidden_dim, rank]
             W_A = sqrt_rank * U_r * sqrt_S_r.unsqueeze(0)
+            
+            # Log NaN or infinity values in W_A
+            if torch.isnan(W_A).any() or torch.isinf(W_A).any():
+                nan_count = torch.isnan(W_A).sum().item()
+                inf_count = torch.isinf(W_A).sum().item()
+                print(f"WARNING: NaN or Inf detected in W_A - {nan_count} NaNs, {inf_count} Infs")
+                print(f"U_r min/max: {U_r.min().item():.10e}/{U_r.max().item():.10e}")
+                print(f"sqrt_S_r min/max: {sqrt_S_r.min().item():.10e}/{sqrt_S_r.max().item():.10e}")
             
             # For W_B, we need to reshape to match the TPA format
             # Original formula gives W_B_r with shape [rank, head_dim]
@@ -663,6 +682,13 @@ def gqa_to_tpa_conversion(
             
             # First, scale Vh by sqrt(S) and sqrt(rank)
             scaled_Vh = sqrt_rank * Vh_r * sqrt_S_r.unsqueeze(1)  # [rank, head_dim]
+            
+            # Log NaN or infinity values in scaled_Vh
+            if torch.isnan(scaled_Vh).any() or torch.isinf(scaled_Vh).any():
+                nan_count = torch.isnan(scaled_Vh).sum().item()
+                inf_count = torch.isinf(scaled_Vh).sum().item()
+                print(f"WARNING: NaN or Inf detected in scaled_Vh - {nan_count} NaNs, {inf_count} Infs")
+                print(f"Vh_r min/max: {Vh_r.min().item():.10e}/{Vh_r.max().item():.10e}")
             
             # Create W_B vectorized approach
             # Create a rank*head_dim tensor with proper scaling
@@ -681,6 +707,14 @@ def gqa_to_tpa_conversion(
             for r in range(rank):
                 # Get the scaled v_r^T vector according to the formula W_B_r = sqrt(R) * sqrt(σ_r) * v_r^T
                 scaled_v_r = sqrt_rank * sqrt_S_r[r] * Vh_r[r]  # [head_dim]
+                
+                # Check for NaN/Inf in scaled_v_r
+                if torch.isnan(scaled_v_r).any() or torch.isinf(scaled_v_r).any():
+                    nan_count = torch.isnan(scaled_v_r).sum().item()
+                    inf_count = torch.isinf(scaled_v_r).sum().item()
+                    print(f"WARNING: NaN/Inf in scaled_v_r for r={r} - {nan_count} NaNs, {inf_count} Infs")
+                    print(f"sqrt_S_r[{r}] = {sqrt_S_r[r].item():.10e}")
+                    print(f"Vh_r[{r}] min/max: {Vh_r[r].min().item():.10e}/{Vh_r[r].max().item():.10e}")
                 
                 # For TPA, each row of W_B should be the same scaled_v_r
                 # This creates a rank-separable structure where each dimension uses the same 
@@ -878,6 +912,15 @@ def gqa_to_tpa_conversion(
             # For correct reconstruction, we need to apply the formula: (1/R) * (W_A_r ⊗ W_B_r)
             # Since b_r has identical rows (all equal to the scaled v_r vector),
             # we only need to use the first row for the outer product
+            
+            # Check for NaN/Inf in the vectors before outer product
+            if torch.isnan(a_r).any() or torch.isinf(a_r).any() or torch.isnan(b_r[0]).any() or torch.isinf(b_r[0]).any():
+                nan_a = torch.isnan(a_r).sum().item()
+                inf_a = torch.isinf(a_r).sum().item()
+                nan_b = torch.isnan(b_r[0]).sum().item()
+                inf_b = torch.isinf(b_r[0]).sum().item()
+                print(f"WARNING: NaN/Inf in Q reconstruction vectors for head {h}, rank {r} - a_r: {nan_a} NaNs, {inf_a} Infs; b_r: {nan_b} NaNs, {inf_b} Infs")
+                
             head_reconstruction += torch.outer(a_r, b_r[0]) / effective_q_rank
         
         # Store this head's reconstruction in the appropriate slice - using 3D indexing
@@ -901,6 +944,14 @@ def gqa_to_tpa_conversion(
             a_r = k_head_A[:, r]  # [hidden_dim]
             b_r = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             # Apply correct reconstruction using the TPA formula with proper outer product
+            # Check for NaN/Inf in the vectors before outer product
+            if torch.isnan(a_r).any() or torch.isinf(a_r).any() or torch.isnan(b_r[0]).any() or torch.isinf(b_r[0]).any():
+                nan_a = torch.isnan(a_r).sum().item()
+                inf_a = torch.isinf(a_r).sum().item()
+                nan_b = torch.isnan(b_r[0]).sum().item()
+                inf_b = torch.isinf(b_r[0]).sum().item()
+                print(f"WARNING: NaN/Inf in K reconstruction vectors - a_r: {nan_a} NaNs, {inf_a} Infs; b_r: {nan_b} NaNs, {inf_b} Infs")
+                
             # Only use the first row of b_r since all rows are identical
             k_head_reconstruction += torch.outer(a_r, b_r[0]) / effective_k_rank
         
@@ -919,6 +970,14 @@ def gqa_to_tpa_conversion(
             a_r = v_head_A[:, r]  # [hidden_dim]
             b_r = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
             # Apply correct reconstruction using the TPA formula with proper outer product
+            # Check for NaN/Inf in the vectors before outer product
+            if torch.isnan(a_r).any() or torch.isinf(a_r).any() or torch.isnan(b_r[0]).any() or torch.isinf(b_r[0]).any():
+                nan_a = torch.isnan(a_r).sum().item()
+                inf_a = torch.isinf(a_r).sum().item()
+                nan_b = torch.isnan(b_r[0]).sum().item()
+                inf_b = torch.isinf(b_r[0]).sum().item()
+                print(f"WARNING: NaN/Inf in V reconstruction vectors - a_r: {nan_a} NaNs, {inf_a} Infs; b_r: {nan_b} NaNs, {inf_b} Infs")
+                
             # Only use the first row of b_r since all rows are identical
             v_head_reconstruction += torch.outer(a_r, b_r[0]) / effective_v_rank
         
