@@ -232,6 +232,13 @@ def gqa_to_tpa_conversion(
     print(f"  K weights: {k_weight.shape} → {kv_head_dim} = {k_proj_dim} / {num_kv_heads} kv_heads")
     print(f"  V weights: {v_weight.shape} → {kv_head_dim} = {v_proj_dim} / {num_kv_heads} kv_heads")
     
+    # Override head_dim only if it's different from calculated values
+    if override_head_dim is not None and override_head_dim != q_head_dim:
+        print(f"WARNING: override_head_dim={override_head_dim} doesn't match calculated q_head_dim={q_head_dim}")
+        print(f"Using calculated q_head_dim={q_head_dim} for better accuracy")
+        # Use the calculated value instead of the override to ensure correct dimensions
+        override_head_dim = q_head_dim
+        
     # Use consistent head dimension for all
     head_dim = q_head_dim
     
@@ -580,26 +587,50 @@ def gqa_to_tpa_conversion(
             # Vectorized implementation using einsum for clarity and efficiency
             # This directly computes all the required outer products and places them in the right positions
             
-            # For each rank r, compute scaled_u_r ⊗ scaled_v_r and place it in the right position
-            # This is equivalent to the formula W_B_r = sqrt(R) * sqrt(σ_r) * u_r ⊗ v_r^T
+            # For each rank r, we need to construct the correct W_B according to the formula:
+            # W_B_r = sqrt(R) * sqrt(σ_r) * v_r^T  
+            # The TPA formula factorizes as: W x ≈ (1/R) * sum_{r=1}^{R} (W_A_r x) ⊗ (W_B_r x)
+            # Where W_A_r = sqrt(R) * sqrt(σ_r) * u_r and W_B_r = sqrt(R) * sqrt(σ_r) * v_r^T
             for r in range(rank):
-                # Get the scaled u_r vector
-                scaled_u_r = U_r[:, r] * sqrt_rank * sqrt_S_r[r]  # [hidden_dim]
+                # Get the scaled v_r^T vector according to the formula W_B_r = sqrt(R) * sqrt(σ_r) * v_r^T
+                scaled_v_r = sqrt_rank * sqrt_S_r[r] * Vh_r[r]  # [head_dim]
                 
-                # Get the scaled v_r^T vector 
-                scaled_v_r = Vh_r[r]  # [head_dim]
-                
-                # Use torch.outer for more efficient outer product
-                # This computes the outer product without needing manual loops
-                W_B[:, r*head_dim:(r+1)*head_dim] = torch.outer(scaled_u_r, scaled_v_r)
+                # For TPA, each row of W_B should be the same scaled_v_r
+                # This creates a rank-separable structure where each dimension uses the same 
+                # scaled vector, which is critical for the TPA factorization to work correctly
+                W_B[:, r*head_dim:(r+1)*head_dim] = scaled_v_r.unsqueeze(0).expand(hidden_dim, -1)
             
             end_time = time.time()
             print(f"SVD-based factorization completed in {end_time - start_time:.4f} seconds")
             
-            # Compute reconstruction error to verify quality
+            # Compute reconstruction error to verify quality of the SVD factorization
             reconstructed = U_r @ torch.diag(S_r) @ Vh_r
             error = torch.norm(weight_matrix - reconstructed) / torch.norm(weight_matrix)
+            # This error is for the SVD approximation, NOT the TPA factorization
+            # For SVD, this should be very small (<0.01) for small ranks
             print(f"SVD reconstruction relative error: {error.item():.6f}")
+            
+            # Also compute TPA reconstruction based on W_A and W_B to verify
+            # TPA formula: W ≈ (1/R) * sum_{r=1}^{R} (W_A_r ⊗ W_B_r)
+            W_recon_tpa = torch.zeros_like(weight_matrix)
+            for r in range(rank):
+                # Get the appropriate slices for this rank
+                W_A_r = W_A[:, r:r+1]  # [hidden_dim, 1]
+                W_B_r_slice = W_B[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
+                
+                # Correctly apply TPA reconstruction formula with proper outer product
+                # For each element [i,j], compute W_A[i,r] * W_B[j,r]
+                for h in range(hidden_dim):
+                    # Get the W_A value for this dimension and rank
+                    a_val = W_A_r[h, 0]
+                    # Get the W_B slice for this rank (should be the same for all h)
+                    b_slice = W_B_r_slice[0, :]  # Use first row since all rows are identical
+                    # Add the outer product contribution
+                    W_recon_tpa[h, :] += a_val * b_slice / rank
+                    
+            # Compute TPA reconstruction error
+            tpa_error = torch.norm(weight_matrix - W_recon_tpa) / torch.norm(weight_matrix)
+            print(f"TPA reconstruction relative error: {tpa_error.item():.6f}")
             
             return W_A, W_B
             
@@ -741,7 +772,10 @@ def gqa_to_tpa_conversion(
             
             # Add to the running sum, following the TPA formula
             # Each rank contributes 1/rank of the total reconstruction
-            head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_q_rank
+            # For correct reconstruction, we need to apply the formula: (1/R) * (W_A_r ⊗ W_B_r)
+            # The proper way is to compute the outer product between a_r and b_r directly
+            # Use unsqueeze to enable broadcasting for the outer product
+            head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_q_rank
         
         # Store this head's reconstruction in the appropriate slice - using 3D indexing
         q_recon[:, h, :] = head_reconstruction
@@ -763,7 +797,8 @@ def gqa_to_tpa_conversion(
         for r in range(effective_k_rank):
             a_r = k_head_A[:, r]  # [hidden_dim]
             b_r = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
-            k_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_k_rank
+            # Apply correct reconstruction using the TPA formula with proper outer product
+            k_head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_k_rank
         
         # Store this head's reconstruction - using 3D indexing
         k_recon[:, g, :] = k_head_reconstruction
@@ -779,7 +814,8 @@ def gqa_to_tpa_conversion(
         for r in range(effective_v_rank):
             a_r = v_head_A[:, r]  # [hidden_dim]
             b_r = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
-            v_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_v_rank
+            # Apply correct reconstruction using the TPA formula with proper outer product
+            v_head_reconstruction += (a_r.unsqueeze(1) * b_r.unsqueeze(0)) / effective_v_rank
         
         # Store this head's reconstruction - using 3D indexing
         v_recon[:, g, :] = v_head_reconstruction
