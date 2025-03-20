@@ -536,12 +536,17 @@ def gqa_to_tpa_conversion(
         intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
         intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
         
+        # IMPORTANT: Also ensure component ranks don't exceed Tucker decomposition rank
+        # This prevents dimension mismatches in the subsequent tensor operations
+        intrinsic_k_rank = min(actual_R2, intrinsic_k_rank)
+        intrinsic_v_rank = min(actual_R2, intrinsic_v_rank)
+        
         # Ensure at least rank 2 for stability
         intrinsic_k_rank = max(2, intrinsic_k_rank)
         intrinsic_v_rank = max(2, intrinsic_v_rank)
         
         # Print final selected ranks
-        print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped at {max_practical_rank})")
+        print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped by max_practical_rank={max_practical_rank} and Tucker rank={actual_R2})")
         
         print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
         
@@ -588,7 +593,8 @@ def gqa_to_tpa_conversion(
     # In contextual factorization, both W_A_q and W_B_q project directly from hidden_states
     # We need to derive these projection matrices from the Tucker decomposition
     
-    print("Using efficient SVD-based factorization for TPA weights")
+    print(f"Using efficient SVD-based factorization for TPA weights with component-specific ranks")
+    print(f"Component-specific ranks: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
     
     # Ensure all operations happen on GPU if available
     device = q_weight.device
@@ -909,8 +915,9 @@ def gqa_to_tpa_conversion(
     result["k_rank"] = int(k_rank)
     result["v_rank"] = int(v_rank)
     
-    print(f"Using ACTUAL ranks for factorized weights - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
-    print(f"Important: These might differ from the requested ranks")
+    print(f"Using OPTIMIZED COMPONENT-SPECIFIC ranks for factorized weights - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
+    print(f"These ranks were carefully selected based on the intrinsic structure of each component")
+    print(f"K & V ranks reflect their true rank structure and are within Tucker decomposition constraints")
     
     # Reshape for error calculation - must match original weight shape
     # Convert from 3D [hidden_dim, num_heads, head_dim] back to 2D [hidden_dim, num_heads*head_dim]
