@@ -1318,31 +1318,35 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                         # B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
                         
                         print(f"  Creating Linear layer for B matrix in TPA contextual factorization")
-                        
-                        # For W_B_q, the correct dimensions for Linear are:
-                        # in_features = hidden_dim (same as input hidden states)
-                        # out_features = q_rank*head_dim (to be reshaped after projection)
-                        if std_key == 'W_B_q':
-                            in_features = hidden_dim
-                            out_features = q_rank * head_dim
-                            print(f"  W_B_q Linear should project from hidden_dim={hidden_dim} to q_rank*head_dim={out_features}")
-                            
-                        elif std_key == 'W_B_k':
-                            in_features = hidden_dim
-                            out_features = k_rank * head_dim
-                            print(f"  W_B_k Linear should project from hidden_dim={hidden_dim} to k_rank*head_dim={out_features}")
-                            
-                        elif std_key == 'W_B_v':
-                            in_features = hidden_dim
-                            out_features = v_rank * head_dim
-                            print(f"  W_B_v Linear should project from hidden_dim={hidden_dim} to v_rank*head_dim={out_features}")
-                            
-                        else:
-                            # Fallback for unknown keys - use dimensions from weight
-                            in_features = hidden_dim
-                            out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                            print(f"  Unknown B matrix with dimensions [out={out_features}, in={in_features}]")
-                    
+
+                    # Rewrite for W_B_q, W_B_k, and W_B_v in the create_tpa_model_from_standard function
+
+                    if std_key == 'W_B_q':
+                        in_features = hidden_dim
+                        # Use actual dimensions from weight tensor instead of q_rank
+                        actual_q_dim = weight.shape[1]  # Get actual dimension from tensor
+                        out_features = actual_q_dim  # Use this instead of q_rank*head_dim
+                        print(f"  W_B_q Linear using actual tensor dimensions: {out_features}")
+
+                    elif std_key == 'W_B_k':
+                        in_features = hidden_dim
+                        # Use actual dimensions from weight tensor instead of k_rank
+                        actual_k_dim = weight.shape[1]  # Get actual dimension from tensor
+                        out_features = actual_k_dim  # Use this instead of k_rank*head_dim
+                        print(f"  W_B_k Linear using actual tensor dimensions: {out_features}")
+
+                    elif std_key == 'W_B_v':
+                        in_features = hidden_dim
+                        # Use actual dimensions from weight tensor instead of v_rank
+                        actual_v_dim = weight.shape[1]  # Get actual dimension from tensor
+                        out_features = actual_v_dim  # Use this instead of v_rank*head_dim
+                        print(f"  W_B_v Linear using actual tensor dimensions: {out_features}")
+                    else:
+                        # Fallback for unknown keys - use dimensions from weight
+                        in_features = hidden_dim
+                        out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
+                        print(f"  Unknown B matrix with dimensions [out={out_features}, in={in_features}]")
+
                     print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
                     
                     # Create new Linear module with correct dimensions
