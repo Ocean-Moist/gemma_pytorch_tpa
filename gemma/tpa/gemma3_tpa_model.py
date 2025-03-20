@@ -662,7 +662,7 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
 
     def generate(
         self,
-        prompts: Sequence[Sequence[Union[str, Image.Image]]],
+        prompts: Sequence[Union[str, Sequence[Union[str, Image.Image]]]],
         device: Any = None,
         max_tokens: int = 100,
         temperature: Union[float, None] = 1.0,
@@ -673,10 +673,52 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         if device is None:
             device = next(self.parameters()).device
             
-        # Process input through tokenizer
-        processing_result = gemma3_preprocessor.tokenize_raw_input(
-            self.tokenizer, prompts, self.config, max_tokens, device
-        )
+        # Check if we have text-only or multimodal input
+        is_text_only = all(isinstance(p, str) for p in prompts)
+        
+        # For text-only models without vision config, use a simpler approach
+        if is_text_only or not hasattr(self.config, 'vision_config') or self.config.vision_config is None:
+            # Convert string prompts to token IDs
+            if isinstance(prompts[0], str):
+                # Handle text-only case
+                batch_size = len(prompts)
+                token_ids_list = [self.tokenizer.encode(p) for p in prompts]
+                max_len = max(len(ids) for ids in token_ids_list)
+                
+                # Create padded tensor
+                token_ids_tensor = torch.full(
+                    (batch_size, max_len + max_tokens),
+                    self.tokenizer.pad_id,
+                    dtype=torch.int64,
+                    device=device
+                )
+                
+                # Fill in token IDs
+                for i, ids in enumerate(token_ids_list):
+                    token_ids_tensor[i, :len(ids)] = torch.tensor(ids, dtype=torch.int64, device=device)
+                
+                # Create mask for actual tokens
+                prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
+                
+                processing_result = {
+                    "user_input_token_ids": token_ids_tensor,
+                    "image_batch": None,
+                    "batch_size": batch_size,
+                    "min_prompt_len": min(len(ids) for ids in token_ids_list),
+                    "max_prompt_len": max_len,
+                    "max_seq_len": max_len + max_tokens,
+                    "image_presence_mask": None
+                }
+            else:
+                # For potentially multimodal input but without vision config, convert to text-only
+                text_prompts = [[p if isinstance(p, str) else "[IMAGE]" for p in seq] for seq in prompts]
+                text_only_prompts = ["".join(p) for p in text_prompts]
+                return self.generate(text_only_prompts, device, max_tokens, temperature, top_p, top_k)
+        else:
+            # For multimodal models with vision config, use the full preprocessor
+            processing_result = gemma3_preprocessor.tokenize_raw_input(
+                self.tokenizer, prompts, self.config, max_tokens, device
+            )
         
         batch_size = processing_result["batch_size"]
         user_input_token_ids = processing_result["user_input_token_ids"]
