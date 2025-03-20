@@ -720,12 +720,19 @@ def gqa_to_tpa_conversion(
         # Get the A factors for this head
         q_head_A = W_A_q[:, h*q_rank:(h+1)*q_rank]  # [hidden_dim, q_rank]
         
+        # Check the actual available rank
+        actual_q_rank = q_head_A.shape[1]  # Get the actual available rank
+        print(f"Debug - actual_q_rank for head {h}: {actual_q_rank}, q_rank: {q_rank}")
+        
         # SVD reconstruction is simpler and more direct
         # For this head, compute the reconstructed weights directly
         head_reconstruction = torch.zeros((hidden_dim, head_dim), device=device, dtype=torch.float32)
         
+        # Use the minimum of q_rank and actual available rank
+        effective_q_rank = min(q_rank, actual_q_rank)
+        
         # Use the TPA formula: 1/R * sum_r (W_A_r * W_B_r)
-        for r in range(q_rank):
+        for r in range(effective_q_rank):
             # Get the rth column of q_head_A
             a_r = q_head_A[:, r]  # [hidden_dim]
             
@@ -734,7 +741,7 @@ def gqa_to_tpa_conversion(
             
             # Add to the running sum, following the TPA formula
             # Each rank contributes 1/rank of the total reconstruction
-            head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / q_rank
+            head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_q_rank
         
         # Store this head's reconstruction in the appropriate slice - using 3D indexing
         q_recon[:, h, :] = head_reconstruction
@@ -747,20 +754,32 @@ def gqa_to_tpa_conversion(
         
         # Reconstruct key weights
         k_head_reconstruction = torch.zeros((hidden_dim, head_dim), device=device, dtype=torch.float32)
-        for r in range(k_rank):
+        # Get actual available rank from k_head_A's shape
+        actual_k_rank = k_head_A.shape[1]  # Get the actual available rank
+        print(f"Debug - actual_k_rank for head {g}: {actual_k_rank}, k_rank: {k_rank}")
+        
+        # Use the minimum of k_rank and actual available rank
+        effective_k_rank = min(k_rank, actual_k_rank)
+        for r in range(effective_k_rank):
             a_r = k_head_A[:, r]  # [hidden_dim]
             b_r = W_B_k_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
-            k_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / k_rank
+            k_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_k_rank
         
         # Store this head's reconstruction - using 3D indexing
         k_recon[:, g, :] = k_head_reconstruction
         
         # Reconstruct value weights
         v_head_reconstruction = torch.zeros((hidden_dim, head_dim), device=device, dtype=torch.float32)
-        for r in range(v_rank):
+        # Get actual available rank from v_head_A's shape
+        actual_v_rank = v_head_A.shape[1]  # Get the actual available rank
+        print(f"Debug - actual_v_rank for head {g}: {actual_v_rank}, v_rank: {v_rank}")
+        
+        # Use the minimum of v_rank and actual available rank
+        effective_v_rank = min(v_rank, actual_v_rank)
+        for r in range(effective_v_rank):
             a_r = v_head_A[:, r]  # [hidden_dim]
             b_r = W_B_v_optimal[:, r*head_dim:(r+1)*head_dim]  # [hidden_dim, head_dim]
-            v_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / v_rank
+            v_head_reconstruction += torch.outer(a_r, torch.ones(head_dim, device=device)) * b_r / effective_v_rank
         
         # Store this head's reconstruction - using 3D indexing
         v_recon[:, g, :] = v_head_reconstruction
