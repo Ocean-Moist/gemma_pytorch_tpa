@@ -473,18 +473,58 @@ def gqa_to_tpa_conversion(
     
     print(f"Actual ranks from Tucker decomposition: R1={actual_R1}, R2={actual_R2}")
     
+    # We'll determine the optimal ranks for each component separately
+    # First, analyze the intrinsic ranks of Q, K, V matrices using SVD
+    # This helps us respect the actual rank structure of each component
+    print("Analyzing intrinsic ranks of each component...")
+    
+    # For queries
+    intrinsic_q_rank = actual_R2  # Start with Tucker decomposition rank
+    
+    # For keys and values, analyze their intrinsic ranks using SVD
+    # First reshape to 2D matrices for analysis
+    k_matrix_2d = k_weight.reshape(hidden_dim, -1)
+    v_matrix_2d = v_weight.reshape(hidden_dim, -1)
+    
+    # Compute SVD to analyze singular value distributions
+    try:
+        _, k_singular_values, _ = torch.linalg.svd(k_matrix_2d, full_matrices=False)
+        _, v_singular_values, _ = torch.linalg.svd(v_matrix_2d, full_matrices=False)
+        
+        # Normalize singular values
+        k_norm_sv = k_singular_values / k_singular_values[0]
+        v_norm_sv = v_singular_values / v_singular_values[0]
+        
+        # Find effective rank based on singular value threshold (e.g., 0.1 or 10%)
+        threshold = 0.1
+        intrinsic_k_rank = torch.sum(k_norm_sv > threshold).item()
+        intrinsic_v_rank = torch.sum(v_norm_sv > threshold).item()
+        
+        # Ensure at least rank 2 for stability
+        intrinsic_k_rank = max(2, intrinsic_k_rank)
+        intrinsic_v_rank = max(2, intrinsic_v_rank)
+        
+        print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
+        
+    except Exception as e:
+        print(f"Error computing intrinsic ranks: {e}")
+        # Fallback to Tucker decomposition ranks
+        intrinsic_k_rank = actual_R2
+        intrinsic_v_rank = actual_R2
+        print(f"Using fallback ranks: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
+    
     if use_dynamic_ranks:
-        # Use the actual ranks from Tucker decomposition
-        actual_q_rank = actual_R2  # Use head dimension rank for query
-        actual_k_rank = actual_R2  # Use head dimension rank for key
-        actual_v_rank = actual_R2  # Use head dimension rank for value
-        print(f"Using actual ranks from Tucker decomposition: q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+        # Use the dynamic ranks based on intrinsic structure
+        actual_q_rank = intrinsic_q_rank
+        actual_k_rank = intrinsic_k_rank
+        actual_v_rank = intrinsic_v_rank
+        print(f"Using intrinsic component-specific ranks: q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
     else:
-        # Use the user-specified ranks but validate against actual ranks
-        actual_q_rank = min(q_rank, actual_R2)  # Use smaller of requested rank and actual rank
-        actual_k_rank = min(k_rank, actual_R2)  # Use smaller of requested rank and actual rank
-        actual_v_rank = min(v_rank, actual_R2)  # Use smaller of requested rank and actual rank
-        print(f"Using requested ranks (capped by actual): q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
+        # Use the user-specified ranks but cap by the actual ranks
+        actual_q_rank = min(q_rank, actual_R2)
+        actual_k_rank = min(k_rank, intrinsic_k_rank)
+        actual_v_rank = min(v_rank, intrinsic_v_rank)
+        print(f"Using requested ranks (capped by intrinsic ranks): q={actual_q_rank}, k={actual_k_rank}, v={actual_v_rank}")
     
     # Expand dimensions for TPA format using actual ranks
     # Make sure to use the correct hidden_dim for these matrices - it might be different from q_weight.shape[0]
@@ -711,7 +751,8 @@ def gqa_to_tpa_conversion(
     W_B_k_reshaped = W_B_k_optimal  # [hidden_dim, k_rank*head_dim]
     W_B_v_reshaped = W_B_v_optimal  # [hidden_dim, v_rank*head_dim]
     
-    print(f"Created optimal B projections with shapes: W_B_q={W_B_q_reshaped.shape}, W_B_k={W_B_k_reshaped.shape}, W_B_v={W_B_v_reshaped.shape}")
+    print(f"Created optimal B projections with component-specific ranks - Q: {q_rank}, K: {k_rank}, V: {v_rank}")
+    print(f"B projection shapes: W_B_q={W_B_q_reshaped.shape}, W_B_k={W_B_k_reshaped.shape}, W_B_v={W_B_v_reshaped.shape}")
     
     # Update the rank parameters to match what's actually used
     q_rank = actual_q_rank
@@ -1344,6 +1385,13 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
         if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
             print(f"  Found factorized module: {name}")
             
+            # Create a dictionary to hold the factorized weights for this module
+            # This replaces the missing 'result' variable referenced later
+            factorized_weights = {}
+            for key in dir(module):
+                if key.startswith(('W_A_', 'W_B_')):
+                    factorized_weights[key] = getattr(module, key)
+            
             # Determine the corresponding name in the TPA model
             tpa_module_name = name
             
@@ -1501,11 +1549,11 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                                 if std_key == 'W_B_q':
                                     print(f"  Using optimally derived W_B_q projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
-                                    if "W_B_q" in result:
-                                        resized_weight = result["W_B_q"].t()
-                                        print(f"  Using derived W_B_q from result with shape {resized_weight.shape}")
+                                    if "W_B_q" in factorized_weights:
+                                        resized_weight = factorized_weights["W_B_q"].t()
+                                        print(f"  Using derived W_B_q from factorized_weights with shape {resized_weight.shape}")
                                     else:
-                                        print(f"  ERROR: W_B_q not found in result, creating appropriate projection matrix")
+                                        print(f"  ERROR: W_B_q not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
                                         resized_weight = torch.randn((out_features, in_features), 
                                                                 dtype=weight.dtype, device=weight.device) * 0.02
@@ -1513,11 +1561,11 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                                 elif std_key == 'W_B_k':
                                     print(f"  Using optimally derived W_B_k projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
-                                    if "W_B_k" in result:
-                                        resized_weight = result["W_B_k"].t()
-                                        print(f"  Using derived W_B_k from result with shape {resized_weight.shape}")
+                                    if "W_B_k" in factorized_weights:
+                                        resized_weight = factorized_weights["W_B_k"].t()
+                                        print(f"  Using derived W_B_k from factorized_weights with shape {resized_weight.shape}")
                                     else:
-                                        print(f"  ERROR: W_B_k not found in result, creating appropriate projection matrix")
+                                        print(f"  ERROR: W_B_k not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
                                         resized_weight = torch.randn((out_features, in_features), 
                                                                 dtype=weight.dtype, device=weight.device) * 0.02
@@ -1525,11 +1573,11 @@ def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2,
                                 elif std_key == 'W_B_v':
                                     print(f"  Using optimally derived W_B_v projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
-                                    if "W_B_v" in result:
-                                        resized_weight = result["W_B_v"].t()
-                                        print(f"  Using derived W_B_v from result with shape {resized_weight.shape}")
+                                    if "W_B_v" in factorized_weights:
+                                        resized_weight = factorized_weights["W_B_v"].t()
+                                        print(f"  Using derived W_B_v from factorized_weights with shape {resized_weight.shape}")
                                     else:
-                                        print(f"  ERROR: W_B_v not found in result, creating appropriate projection matrix")
+                                        print(f"  ERROR: W_B_v not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
                                         resized_weight = torch.randn((out_features, in_features), 
                                                                 dtype=weight.dtype, device=weight.device) * 0.02

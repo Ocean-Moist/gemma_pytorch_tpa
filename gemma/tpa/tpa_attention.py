@@ -362,8 +362,8 @@ class GemmaTensorProductAttention(nn.Module):
             return torch.zeros(batch_size, seq_len, self.hidden_size, device=hidden_states.device, dtype=hidden_states.dtype)
         
         # Debug weight shapes
-        print(f"DEBUG: W_A_q weight shape: {self.W_A_q.weight.shape}")
-        print(f"DEBUG: W_B_q weight shape: {self.W_B_q.weight.shape}")
+        # print(f"DEBUG: W_A_q weight shape: {self.W_A_q.weight.shape}")
+        # print(f"DEBUG: W_B_q weight shape: {self.W_B_q.weight.shape}")
         
         try:
             # Try using direct matrix multiplication if nn.Linear is failing
