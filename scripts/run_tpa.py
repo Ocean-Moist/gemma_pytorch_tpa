@@ -441,9 +441,9 @@ def main(_):
                   # Convert model with explicit parameters
                   new_tpa_model = create_tpa_model_from_standard(
                       standard_model, 
-                      q_rank=q_rank,
-                      k_rank=k_rank,
-                      v_rank=v_rank,
+                      # q_rank=q_rank,
+                      # k_rank=k_rank,
+                      # v_rank=v_rank,
                       dtype=tpa_model.dtype,
                       device=device,
                       use_dynamic_ranks=use_dynamic_ranks,
