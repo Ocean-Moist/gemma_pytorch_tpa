@@ -36,7 +36,6 @@ def gqa_to_tpa_conversion(
     device: str = "cuda",
     use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
     config = None,  # Model config to ensure consistent dimensions
-    fat_ranks: bool = False  # Whether to use very large ranks (240) for higher accuracy
 ) -> Dict[str, torch.Tensor]:
     """
     Convert GQA attention weights to TPA format using Tucker decomposition.
@@ -367,44 +366,34 @@ def gqa_to_tpa_conversion(
         v_ranks.append(int(v_rank))
         print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
 
-    # Set maximum practical rank based on fat_ranks setting
-    if fat_ranks:
-        # For fat ranks mode, allow much higher ranks
-        max_practical_rank = 240  # Very high rank for better approximation
-        print("  Using FAT RANKS mode with max_practical_rank=240")
 
-        # For fat_ranks, use 98% energy threshold (highest of our thresholds)
-        intrinsic_k_rank = k_ranks[2] if len(k_ranks) > 2 else k_ranks[-1]
-        intrinsic_v_rank = v_ranks[2] if len(v_ranks) > 2 else v_ranks[-1]
-        print(f"  Using 98% energy threshold for rank selection")
-    else:
-        # Use 95% energy threshold as default with normal cap
-        max_practical_rank = 8  # Standard cap to avoid excessive computation
+    # Use 95% energy threshold as default with normal cap
+    max_practical_rank = 8  # Standard cap to avoid excessive computation
 
-        # Choose rank based on 95% explained variance (middle of our thresholds)
-        intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
-        intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
-        
-        # Apply practical rank cap (higher for fat_ranks mode)
-        intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
-        intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
-        
-        # IMPORTANT: Also ensure component ranks match the Tucker decomposition rank EXACTLY
-        # The actual_R2 from Tucker decomposition must be used for all components to prevent dimension mismatches
-        # The ranks we calculate here are just for analysis/logging, but we need to use actual_R2 for the actual operations
-        intrinsic_k_rank = actual_R2  # Force exact match with Tucker rank
-        intrinsic_v_rank = actual_R2  # Force exact match with Tucker rank
-        print(f"  Forcing ranks to match Tucker decomposition rank: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
-        
-        # Ensure at least rank 2 for stability
-        intrinsic_k_rank = max(2, intrinsic_k_rank)
-        intrinsic_v_rank = max(2, intrinsic_v_rank)
-        
-        # Print final selected ranks
-        print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped by max_practical_rank={max_practical_rank} and Tucker rank={actual_R2})")
-        
-        print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
-        
+    # Choose rank based on 95% explained variance (middle of our thresholds)
+    intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
+    intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
+
+    # Apply practical rank cap (higher for fat_ranks mode)
+    intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
+    intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
+
+    # IMPORTANT: Also ensure component ranks match the Tucker decomposition rank EXACTLY
+    # The actual_R2 from Tucker decomposition must be used for all components to prevent dimension mismatches
+    # The ranks we calculate here are just for analysis/logging, but we need to use actual_R2 for the actual operations
+    intrinsic_k_rank = actual_R2  # Force exact match with Tucker rank
+    intrinsic_v_rank = actual_R2  # Force exact match with Tucker rank
+    print(f"  Forcing ranks to match Tucker decomposition rank: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
+
+    # Ensure at least rank 2 for stability
+    intrinsic_k_rank = max(2, intrinsic_k_rank)
+    intrinsic_v_rank = max(2, intrinsic_v_rank)
+
+    # Print final selected ranks
+    print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped by max_practical_rank={max_practical_rank} and Tucker rank={actual_R2})")
+
+    print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
+
 
     if use_dynamic_ranks:
         # Use the dynamic ranks based on intrinsic structure
@@ -607,24 +596,13 @@ def gqa_to_tpa_conversion(
             print(f"Error during SVD computation: {e}")
             raise
     
-    # Update the rank parameters to match what's actually used for computation
-    # This ensures B projections are created with correct dimensions from the start
-    if fat_ranks:
-        # For fat ranks mode, use the maximum ranks possible with the current factorization
-        # but capped by the actual Tucker decomposition ranks (actual_R2)
-        practical_q_rank = min(24, actual_R2)
-        practical_k_rank = min(12, actual_R2)
-        practical_v_rank = min(12, actual_R2)
-        print(f"Using FAT RANKS for computation - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
-        print(f"These ranks provide higher accuracy but use more memory and computation")
-    else:
-        # Standard approach - use the requested ranks capped by the Tucker decomposition ranks
-        practical_q_rank = min(q_rank, actual_R2)
-        practical_k_rank = min(k_rank, actual_R2)
-        practical_v_rank = min(v_rank, actual_R2)
-        print(f"Using practical computation ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
-        print(f"These ranks balance the intrinsic structure with Tucker decomposition constraints")
-    
+    # Standard approach - use the requested ranks capped by the Tucker decomposition ranks
+    practical_q_rank = min(q_rank, actual_R2)
+    practical_k_rank = min(k_rank, actual_R2)
+    practical_v_rank = min(v_rank, actual_R2)
+    print(f"Using practical computation ranks - Q: {practical_q_rank}, K: {practical_k_rank}, V: {practical_v_rank}")
+    print(f"These ranks balance the intrinsic structure with Tucker decomposition constraints")
+
     # Initialize output matrices with the practical ranks
     W_A_q = torch.zeros((hidden_dim, num_heads * practical_q_rank), device=device, dtype=torch.float32)
     W_A_k = torch.zeros((hidden_dim, num_kv_heads * practical_k_rank), device=device, dtype=torch.float32)
@@ -1081,7 +1059,7 @@ def convert_gqa_model_to_tpa(model, q_rank=6, k_rank=2, v_rank=2, dtype=torch.fl
                 dtype, device,
                 use_dynamic_ranks=use_dynamic_ranks,  # Whether to use ranks from Tucker decomposition
                 config=model.config if hasattr(model, 'config') else None,  # Pass model config for hidden_size
-                fat_ranks=fat_ranks  # Whether to use much larger ranks (240) for higher accuracy
+                # fat_ranks=fat_ranks  # Whether to use much larger ranks (240) for higher accuracy
             )
             
             decomp_end = time.time()
