@@ -371,7 +371,7 @@ class GemmaTensorProductAttention(nn.Module):
                 # First attempt normal Linear operation
                 A_q_raw = self.W_A_q(hidden_states)
                 expected_q_size = self.num_heads * self.q_rank
-                print(f"DEBUG: A_q_raw shape: {A_q_raw.shape}, expected flat dim: {expected_q_size}")
+                # print(f"DEBUG: A_q_raw shape: {A_q_raw.shape}, expected flat dim: {expected_q_size}")
             except Exception as linear_error:
                 print(f"ERROR using W_A_q Linear module: {linear_error}")
                 # Get the weight directly and try manual matrix multiplication
@@ -664,7 +664,7 @@ class GemmaTensorProductAttention(nn.Module):
                                    device=hidden_states.device, dtype=hidden_states.dtype) * 0.01
                                    
             # Print shapes for debugging
-            print(f"DEBUG: Final shapes - A_q: {A_q.shape}, B_q: {B_q.shape}")
+            # print(f"DEBUG: Final shapes - A_q: {A_q.shape}, B_q: {B_q.shape}")
             
         except Exception as main_e:
             print(f"Critical error in TPA shape handling: {main_e}")
@@ -939,8 +939,8 @@ class GemmaTensorProductAttention(nn.Module):
         K = K.transpose(1, 2)
         
         # DEBUG: Check Q and K tensors for issues
-        print(f"DEBUG Q tensor stats: min={Q.min().item():.6f}, max={Q.max().item():.6f}, mean={Q.mean().item():.6f}, std={Q.std().item():.6f}, has_nan={torch.isnan(Q).any().item()}, has_inf={torch.isinf(Q).any().item()}")
-        print(f"DEBUG K tensor stats: min={K.min().item():.6f}, max={K.max().item():.6f}, mean={K.mean().item():.6f}, std={K.std().item():.6f}, has_nan={torch.isnan(K).any().item()}, has_inf={torch.isinf(K).any().item()}")
+        # print(f"DEBUG Q tensor stats: min={Q.min().item():.6f}, max={Q.max().item():.6f}, mean={Q.mean().item():.6f}, std={Q.std().item():.6f}, has_nan={torch.isnan(Q).any().item()}, has_inf={torch.isinf(Q).any().item()}")
+        # print(f"DEBUG K tensor stats: min={K.min().item():.6f}, max={K.max().item():.6f}, mean={K.mean().item():.6f}, std={K.std().item():.6f}, has_nan={torch.isnan(K).any().item()}, has_inf={torch.isinf(K).any().item()}")
         
         # Calculate attention scores
         # [batch_size, num_heads, seq_len, ctx_len]
@@ -973,7 +973,7 @@ class GemmaTensorProductAttention(nn.Module):
                                         scores[b, h, i, j] = 0.8
             
             # DEBUG: Check attention scores
-            print(f"DEBUG Attention scores stats: min={scores.min().item():.6f}, max={scores.max().item():.6f}, mean={scores.mean().item():.6f}, std={scores.std().item():.6f}, has_nan={torch.isnan(scores).any().item()}, has_inf={torch.isinf(scores).any().item()}")
+            # print(f"DEBUG Attention scores stats: min={scores.min().item():.6f}, max={scores.max().item():.6f}, mean={scores.mean().item():.6f}, std={scores.std().item():.6f}, has_nan={torch.isnan(scores).any().item()}, has_inf={torch.isinf(scores).any().item()}")
             
             # Apply softcapping if specified
             if self.attn_logit_softcapping is not None:
