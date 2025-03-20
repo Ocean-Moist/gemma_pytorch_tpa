@@ -1038,19 +1038,8 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
             else:
                 head_dim = q_head_dim
 
-                
             print(f"  Using head_dim={head_dim} for tensor decomposition")
             
-            # For Gemma, the weights are in a specific format
-            # Weight format depends on the model architecture
-            # Calculate the expected hidden dim by looking at the output weight matrix
-            # For GemmaForCausalLM, hidden_dim is typically 1152 for 1B model
-            expected_hidden_dim = q_weight.shape[0]  # Input dimension for weights
-            
-            # Check if weights are already transposed
-            transposed_weights = (o_weight.shape[0] == num_heads * head_dim and 
-                                o_weight.shape[1] == expected_hidden_dim)
-                
             # Pass the model config to ensure consistent dimensions
             factorized_weights = gqa_to_tpa_conversion(
                 q_weight, k_weight, v_weight, o_weight,
@@ -1059,7 +1048,6 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
                 dtype, device,
                 use_dynamic_ranks=use_dynamic_ranks,  # Whether to use ranks from Tucker decomposition
                 config=model.config if hasattr(model, 'config') else None,  # Pass model config for hidden_size
-                # fat_ranks=fat_ranks  # Whether to use much larger ranks (240) for higher accuracy
             )
             
             decomp_end = time.time()
@@ -1094,7 +1082,7 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
     return model
 
 
-def create_tpa_model_from_standard(standard_model, q_rank=6, k_rank=2, v_rank=2, 
+def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_rank=240,
                                  dtype=torch.float16, device="cuda", use_dynamic_ranks=True,
                                  fat_ranks=False):
     """
