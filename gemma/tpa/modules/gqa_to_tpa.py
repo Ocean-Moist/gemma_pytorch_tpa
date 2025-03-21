@@ -400,8 +400,8 @@ def gqa_to_tpa_conversion(
         # Compute reconstruction error for this head using proper TPA reconstruction
         # Vectorized TPA reconstruction using einsum
         # Reshape tensors for efficient computation
-        A_reshaped = W_A_head.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
-        B_reshaped = W_B_head.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+        A_reshaped = W_A_head.reshape(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+        B_reshaped = W_B_head.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
         
         # Einstein summation computes the TPA reconstruction all at once
         # For each position i: sum_r (A[i,r] * B[i,r]) / rank
@@ -486,8 +486,8 @@ def gqa_to_tpa_conversion(
                 head_W_B = W_B[:, head_offset:head_offset+head_rank*head_dim]
                 
                 # Reshape for efficient computation
-                A_reshaped = head_W_A.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
-                B_reshaped = head_W_B.view(hidden_dim, head_rank, head_dim)  # [hidden_dim, head_rank, head_dim]
+                A_reshaped = head_W_A.reshape(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+                B_reshaped = head_W_B.reshape(hidden_dim, head_rank, head_dim)  # [hidden_dim, head_rank, head_dim]
                 
                 # Compute reconstruction for this head
                 head_recon = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
@@ -530,7 +530,7 @@ def gqa_to_tpa_conversion(
             # We assume num_heads=1 in this case
             
             # Reshape for efficient computation
-            A_reshaped = W_A.view(hidden_dim, 1, rank)  # [hidden_dim, 1, rank]
+            A_reshaped = W_A.reshape(hidden_dim, 1, rank)  # [hidden_dim, 1, rank]
             B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)  # [hidden_dim, rank, head_dim]
             
             # Use einsum for fast vectorized computation
@@ -577,21 +577,21 @@ def gqa_to_tpa_conversion(
         # Special handling for the common case where head_rank is a power of 2
         if (head_rank & (head_rank-1) == 0) and head_rank > 0:  # Check if power of 2
             # Use specialized reshape + bmm for maximum GPU efficiency
-            A_flat = head_W_A.view(-1, head_rank)  # [hidden_dim, head_rank]
-            B_flat = head_W_B.view(hidden_dim*head_rank, q_head_dim)  # [hidden_dim*head_rank, q_head_dim]
+            A_flat = head_W_A.reshape(-1, head_rank)  # [hidden_dim, head_rank]
+            B_flat = head_W_B.reshape(hidden_dim*head_rank, q_head_dim)  # [hidden_dim*head_rank, q_head_dim]
             
             # Reshape A for batch matrix multiplication
             A_bmm = A_flat.unsqueeze(2)  # [hidden_dim, head_rank, 1]
             
             # Reshape B to group by position
-            B_bmm = B_flat.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            B_bmm = B_flat.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
             
             # Batch matrix multiply and sum - this utilizes optimized GEMM kernels
             head_recon = torch.bmm(A_bmm.transpose(1,2), B_bmm).squeeze(1) / head_rank
         else:
             # Standard case - use einsum which is highly optimized for GPU
-            A_reshaped = head_W_A.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
-            B_reshaped = head_W_B.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            A_reshaped = head_W_A.reshape(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+            B_reshaped = head_W_B.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
             head_recon = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
         
         # Compute error using direct norm
