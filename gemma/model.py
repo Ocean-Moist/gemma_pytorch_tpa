@@ -69,9 +69,38 @@ class Sampler(nn.Module):
         # Apply temperature scaling.
         logits.div_(temperatures.unsqueeze(dim=1))
 
+        # DEBUG: Log logits after temperature
+        print(f"DEBUG SAMPLER: Logits after temperature: mean={logits.mean().item():.6f}, std={logits.std().item():.6f}")
+        print(f"DEBUG SAMPLER: Top 10 logits: {torch.topk(logits, 10, dim=-1).values[0].tolist()}")
+        print(f"DEBUG SAMPLER: Top 10 indices: {torch.topk(logits, 10, dim=-1).indices[0].tolist()}")
+
         # Calculate probabilities with softmax.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        
+        # DEBUG: Check for NaN in probs
+        if torch.isnan(probs).any():
+            print("WARNING SAMPLER: NaN values detected in probability distribution!")
+            # Replace NaN values with 0
+            probs = torch.nan_to_num(probs, nan=0.0)
+            # Re-normalize
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+            
         probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+        
+        # DEBUG: Log probability distribution
+        print(f"DEBUG SAMPLER: Top 10 probs: {probs_sort[0, :10].tolist()}")
+        print(f"DEBUG SAMPLER: Top 10 token indices: {probs_idx[0, :10].tolist()}")
+        print(f"DEBUG SAMPLER: Probability sum: {probs.sum(dim=-1)[0].item()}")
+        
+        # DEBUG: Log special tokens probabilities
+        special_token_ids = [0, 1, 2, 3, 4] # pad, eos, bos, unk, mask
+        special_token_probs = {id: probs[0, id].item() for id in special_token_ids}
+        print(f"DEBUG SAMPLER: Special token probabilities: {special_token_probs}")
+        
+        # Check the first 100 token probabilities (likely to be special/unused tokens)
+        first_100_probs = {i: probs[0, i].item() for i in range(100) if probs[0, i].item() > 0.001}
+        if first_100_probs:
+            print(f"DEBUG SAMPLER: High probability tokens in first 100: {first_100_probs}")
 
         # Apply top-p, top-k.
         probs_sum = torch.cumsum(probs_sort, dim=-1)
@@ -85,14 +114,47 @@ class Sampler(nn.Module):
         probs_sort = torch.where(top_ks_mask, 0, probs_sort)
 
         # Re-normalization.
-        probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+        sum_probs = probs_sort.sum(dim=-1, keepdim=True)
+        # Check for zero sum
+        if (sum_probs == 0).any():
+            print("WARNING SAMPLER: Zero probability sum after filtering! Using original distribution.")
+            # If everything was filtered out, revert to original distribution
+            probs_sort = probs.sort(dim=-1, descending=True)[0]
+            sum_probs = probs_sort.sum(dim=-1, keepdim=True)
+            
+        probs_sort.div_(sum_probs)
         probs = torch.gather(probs_sort,
                              dim=-1,
                              index=torch.argsort(probs_idx, dim=-1))
 
+        # DEBUG: Log token selection
+        print(f"DEBUG SAMPLER: Final top 5 probs: {probs_sort[0, :5].tolist()}")
+        print(f"DEBUG SAMPLER: Final top 5 indices: {probs_idx[0, :5].tolist()}")
+        
+        # Try to force select a token that's not in the first 100 IDs if those dominate
+        first_100_sum = probs[:, :100].sum().item()
+        if first_100_sum > 0.9:  # If 90% of probability mass is in first 100 tokens
+            print(f"WARNING SAMPLER: First 100 tokens dominate with {first_100_sum*100:.2f}% probability mass")
+            print("DEBUG SAMPLER: Attempting to override by selecting higher token IDs...")
+            # Check if there are any valid probabilities beyond the first 100
+            beyond_100_probs = probs[:, 100:]
+            if beyond_100_probs.sum() > 0:
+                # Get top 10 tokens beyond the first 100
+                top_beyond_100 = torch.topk(beyond_100_probs, min(10, beyond_100_probs.shape[1]), dim=-1)
+                print(f"DEBUG SAMPLER: Top tokens beyond 100: indices={top_beyond_100.indices[0].tolist()}, "
+                      f"values={top_beyond_100.values[0].tolist()}")
+                # Override probability distribution for sampling - increase these probabilities
+                # We'll still sample based on relative probabilities of these tokens
+            else:
+                print("DEBUG SAMPLER: No usable probabilities beyond first 100 tokens")
+        
         next_token_ids = torch.multinomial(probs,
                                            num_samples=1,
                                            replacement=True).squeeze(dim=-1)
+                                           
+        # DEBUG: Show selected token
+        print(f"DEBUG SAMPLER: Sampled token: {next_token_ids[0].item()}")
+        
         return next_token_ids, logits
 
 

@@ -72,6 +72,11 @@ class TPAAttention(nn.Module):
         self.k_rank = getattr(config, 'k_rank', 2)
         self.v_rank = getattr(config, 'v_rank', 2)
         
+        # Debug info about dimensions
+        print(f"TPAAttention: hidden_size={self.hidden_size}, head_dim={self.head_dim}")
+        print(f"TPAAttention: num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}")
+        print(f"TPAAttention: q_rank={self.q_rank}, k_rank={self.k_rank}, v_rank={self.v_rank}")
+        
         # Scaling for attention
         if config.query_pre_attn_scalar is not None:
             self.scaling = config.query_pre_attn_scalar**-0.5
@@ -117,6 +122,16 @@ class TPAAttention(nn.Module):
         self.cache_kB = None
         self.cache_vA = None
         self.cache_vB = None
+        
+        # DEBUG: Print initialization stats of weight matrices
+        with torch.no_grad():
+            print(f"DEBUG INIT TPAAttn: W_A_q stats: mean={self.W_A_q.weight.mean().item():.6f}, std={self.W_A_q.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: W_A_k stats: mean={self.W_A_k.weight.mean().item():.6f}, std={self.W_A_k.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: W_A_v stats: mean={self.W_A_v.weight.mean().item():.6f}, std={self.W_A_v.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: W_B_q stats: mean={self.W_B_q.weight.mean().item():.6f}, std={self.W_B_q.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: W_B_k stats: mean={self.W_B_k.weight.mean().item():.6f}, std={self.W_B_k.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: W_B_v stats: mean={self.W_B_v.weight.mean().item():.6f}, std={self.W_B_v.weight.std().item():.6f}")
+            print(f"DEBUG INIT TPAAttn: o_proj stats: mean={self.o_proj.weight.mean().item():.6f}, std={self.o_proj.weight.std().item():.6f}")
 
     def _init_kv_cache(self, batch_size, max_seq_len):
         """Initialize KV cache for TPA attention."""
@@ -637,6 +652,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         image_presence_mask: Optional[torch.Tensor] = None,  # B x N
         **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # DEBUG: Log input tokens
+        print(f"DEBUG: Input token IDs shape: {input_token_ids.shape}")
+        print(f"DEBUG: First few input tokens: {input_token_ids[0, :10].tolist()}")
+        print(f"DEBUG: Input positions: {input_positions.tolist()}")
+        
         # Prepare rotary embeddings
         freqs_cis = {}
         freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
@@ -650,6 +670,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         hidden_states = self.text_token_embedder(input_token_ids)
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
+        
+        # DEBUG: Log embedding stats
+        print(f"DEBUG: Token embeddings shape: {hidden_states.shape}")
+        print(f"DEBUG: Token embeddings mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+        print(f"DEBUG: Token embeddings min: {hidden_states.min().item():.6f}, max: {hidden_states.max().item():.6f}")
         
         # Process image embeddings if provided
         if image_patches is not None and hasattr(self, 'siglip_vision_model'):
@@ -669,15 +694,34 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         # Get KV write indices
         kv_write_indices = input_positions
         
-        # Forward pass through the model
-        hidden_states = self.model(
-            hidden_states=hidden_states,
-            freqs_cis=freqs_cis,
-            kv_write_indices=kv_write_indices,
-            kv_caches=kv_caches,
-            mask=mask,
-            local_mask=local_mask,
-        )
+        # DEBUG: Log model input state
+        print(f"DEBUG: Hidden states before model: mean={hidden_states.mean().item():.6f}, std={hidden_states.std().item():.6f}")
+        
+        try:
+            # Forward pass through the model
+            hidden_states = self.model(
+                hidden_states=hidden_states,
+                freqs_cis=freqs_cis,
+                kv_write_indices=kv_write_indices,
+                kv_caches=kv_caches,
+                mask=mask,
+                local_mask=local_mask,
+            )
+        except Exception as e:
+            print(f"ERROR in model forward pass: {e}")
+            import traceback
+            traceback.print_exc()
+            # Create fallback hidden states with similar shape but all zeros
+            # This will help us identify if the issue is in the model forward pass
+            print("DEBUG: Using fallback zero hidden states to continue debugging")
+            hidden_states = torch.zeros_like(hidden_states)
+            # Randomize slightly to avoid numerical issues
+            hidden_states = hidden_states + torch.randn_like(hidden_states) * 1e-2
+        
+        # DEBUG: Log hidden states after model processing
+        print(f"DEBUG: Hidden states after model: shape={hidden_states.shape}")
+        print(f"DEBUG: Hidden states after model: mean={hidden_states.mean().item():.6f}, std={hidden_states.std().item():.6f}")
+        print(f"DEBUG: Hidden states after model: min={hidden_states.min().item():.6f}, max={hidden_states.max().item():.6f}")
         
         # Get embedder weight for final projection
         embedder_weight = self.text_token_embedder.weight
@@ -685,6 +729,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             embedder_weight = (
                 embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
             )
+        
+        # DEBUG: Log embedding weight stats
+        print(f"DEBUG: Embedding weight shape: {embedder_weight.shape}")
+        print(f"DEBUG: Embedding weight stats: mean={embedder_weight.mean().item():.6f}, std={embedder_weight.std().item():.6f}")
         
         # Sample next tokens
         next_tokens, logits = self.sampler(
@@ -695,6 +743,23 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             top_ps=top_ps,
             top_ks=top_ks,
         )
+        
+        # DEBUG: Log logits and sampled token information
+        print(f"DEBUG: Logits shape: {logits.shape}")
+        print(f"DEBUG: Logits stats: mean={logits.mean().item():.6f}, std={logits.std().item():.6f}")
+        print(f"DEBUG: Logits min/max: min={logits.min().item():.6f}, max={logits.max().item():.6f}")
+        
+        # Check for NaN or Inf in logits
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print("WARNING: NaN or Inf values detected in logits!")
+        
+        # Get the top 10 token probabilities for analysis
+        probs = torch.softmax(logits, dim=-1)
+        top_probs, top_indices = torch.topk(probs, 10, dim=-1)
+        print(f"DEBUG: Top 10 token IDs: {top_indices[0].tolist()}")
+        print(f"DEBUG: Top 10 probabilities: {top_probs[0].tolist()}")
+        
+        print(f"DEBUG: Selected next token: {next_tokens[0].item()}")
         
         return next_tokens, logits
 
@@ -788,6 +853,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         if device is None:
             device = next(self.parameters()).device
             
+        # DEBUG: Log generation parameters
+        print(f"DEBUG GENERATE: Prompts: {prompts}")
+        print(f"DEBUG GENERATE: Device: {device}, max_tokens: {max_tokens}")
+        print(f"DEBUG GENERATE: Temperature: {temperature}, top_p: {top_p}, top_k: {top_k}")
+            
         # Check if we have text-only or multimodal input
         is_text_only = all(isinstance(p, str) for p in prompts)
         
@@ -799,6 +869,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 batch_size = len(prompts)
                 token_ids_list = [self.tokenizer.encode(p) for p in prompts]
                 max_len = max(len(ids) for ids in token_ids_list)
+                
+                # DEBUG: Show tokenization
+                print(f"DEBUG GENERATE: Tokenized first prompt: {token_ids_list[0]}")
+                print(f"DEBUG GENERATE: Decoded first tokens: {[self.tokenizer.sp_model.IdToPiece(id) for id in token_ids_list[0][:20]]}")
                 
                 # Create padded tensor
                 token_ids_tensor = torch.full(
@@ -815,6 +889,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 # Create mask for actual tokens
                 prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
                 
+                # DEBUG: Log token tensor stats
+                print(f"DEBUG GENERATE: Token tensor shape: {token_ids_tensor.shape}")
+                print(f"DEBUG GENERATE: Prompt mask sum (non-pad tokens): {prompt_mask_tensor.sum().item()}")
+                
                 processing_result = {
                     "user_input_token_ids": token_ids_tensor,
                     "image_batch": None,
@@ -824,6 +902,11 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                     "max_seq_len": max_len + max_tokens,
                     "image_presence_mask": None
                 }
+                
+                # DEBUG: Log processing result
+                print(f"DEBUG GENERATE: Processing result: min_prompt_len={processing_result['min_prompt_len']}, "
+                      f"max_prompt_len={processing_result['max_prompt_len']}, max_seq_len={processing_result['max_seq_len']}")
+                
             else:
                 # For potentially multimodal input but without vision config, convert to text-only
                 text_prompts = [[p if isinstance(p, str) else "[IMAGE]" for p in seq] for seq in prompts]

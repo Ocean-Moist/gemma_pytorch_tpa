@@ -562,7 +562,12 @@ def main(_):
       # Use the model's built-in generate method with the correct parameters
       # Format prompt for chat/instruction model using proper chat format
       formatted_prompt = f"<start_of_turn>user {_PROMPT.value}<end_of_turn>\n<start_of_turn>model"
-      prompt = [formatted_prompt]  # Format compatible with Gemma3 models
+      # Alternative simple prompt for debugging
+      simple_prompt = _PROMPT.value
+      
+      # Choose the simpler prompt format for debugging
+      print("Using simple prompt format for debugging")
+      prompt = [simple_prompt]  # More likely to work with possibly broken tokenizer
       
       if hasattr(model, 'generate'):
           # Check which class the model is and use appropriate parameter names
