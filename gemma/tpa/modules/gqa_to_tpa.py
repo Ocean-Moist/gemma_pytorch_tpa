@@ -383,8 +383,23 @@ def gqa_to_tpa_conversion(
             # Store this rank component in the global W_B
             W_B_q[:, start_idx:end_idx] = head_factor
             
-        # Compute reconstruction error for this head using the actual rank
-        reconstructed = torch.matmul(W_A_head, W_B_head.reshape(-1, head_rank * q_head_dim)).div(head_rank)
+        # Compute reconstruction error for this head using proper TPA reconstruction
+        # TPA reconstruction requires special handling - can't use simple matrix multiply
+        reconstructed = torch.zeros_like(head_weight)
+        
+        # TPA reconstruction formula: for each position, compute sum(A_pos[r] * B_pos[r]) / rank
+        for pos in range(hidden_dim):
+            # Get the A and B factors for this position
+            A_pos = W_A_head[pos]  # [head_rank]
+            B_pos = W_B_head[pos].reshape(head_rank, q_head_dim)  # [head_rank, q_head_dim]
+            
+            # Compute the outer product sum for TPA reconstruction
+            for r in range(head_rank):
+                a_r = A_pos[r]  # scalar
+                b_r = B_pos[r]  # [q_head_dim]
+                reconstructed[pos] += (a_r * b_r) / head_rank
+        
+        # Compute error
         head_error = torch.norm(head_weight - reconstructed) / torch.norm(head_weight)
         q_factorization_errors.append(head_error.item())
         print(f"  Query head {h} factorization error: {head_error.item():.6f}")
@@ -439,13 +454,45 @@ def gqa_to_tpa_conversion(
         else:
             orig_3d = orig_weight
             
-        # Reshape factorized weights for vectorized computation
-        W_A_reshaped = W_A.reshape(W_A.shape[0], num_heads, rank)
-        W_B_reshaped = W_B.reshape(W_B.shape[0], rank, head_dim)
+        # For TPA reconstruction, we need to do it position by position
+        # Initialize reconstruction tensor
+        recon = torch.zeros_like(orig_3d)
+        hidden_dim = orig_3d.shape[0]
         
-        # Use einsum for fully vectorized computation across all dimensions
-        # This single operation replaces all three nested loops
-        recon = torch.einsum('ihr,ird->ihd', W_A_reshaped, W_B_reshaped) / rank
+        # TPA factorization uses position-wise outer products
+        # First reshape W_A and W_B properly
+        if W_A.shape[1] == num_heads * rank:
+            # Standard case where W_A has shape [hidden_dim, num_heads * rank]
+            W_A_reshaped = W_A.reshape(hidden_dim, num_heads, rank)
+        else:
+            # Variable rank case where head ranks are different (only for Q in GQA)
+            # Here we assume the offsets are calculated properly
+            W_A_reshaped = None  # We'll handle this differently
+        
+        W_B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)
+        
+        # For each head
+        for h in range(num_heads):
+            # For each position in the hidden dimension
+            for pos in range(hidden_dim):
+                # Get A factors for this head and position
+                if W_A_reshaped is not None:
+                    # Standard case
+                    A_pos = W_A_reshaped[pos, h]  # [rank]
+                else:
+                    # Variable rank case - handle directly from W_A
+                    # Here we assume W_A is already sliced correctly for this head
+                    A_pos = W_A[pos]  # [rank]
+                
+                # Get B factors for this position
+                B_pos = W_B_reshaped[pos]  # [rank, head_dim]
+                
+                # TPA reconstruction: 1/rank * ∑(A_r ⊗ B_r)
+                for r in range(rank):
+                    # Outer product of A_r and B_r vectors
+                    a_r = A_pos[r]  # scalar
+                    b_r = B_pos[r]  # [head_dim]
+                    recon[pos, h] += (a_r * b_r) / rank
         
         # Compute overall reconstruction error
         error = torch.norm(orig_3d.reshape(-1) - recon.reshape(-1)) / torch.norm(orig_3d.reshape(-1))
@@ -484,10 +531,28 @@ def gqa_to_tpa_conversion(
         head_rank = per_head_max_ranks[h]
         head_W_A = W_A_q[:, start_idx:end_idx]
         
-        # Use the same W_B factors across all heads (TPA format requirement)
-        head_error, head_recon = verify_tpa_reconstruction(
-            head_W_A, W_B_q, head_orig, head_rank, f"Q-head-{h}", q_head_dim, 1)
+        # Create a sliced W_B for this head's rank
+        head_W_B = W_B_q[:, :head_rank*q_head_dim]
+        
+        # Use a modified verification function that knows we're working with a single head
+        print(f"  Verifying head {h} with rank {head_rank}...")
+        
+        # Initialize reconstruction tensor
+        head_recon = torch.zeros_like(head_orig)
+        
+        # Manual TPA reconstruction for this head
+        for pos in range(hidden_dim):
+            A_pos = head_W_A[pos]  # [head_rank]
+            B_pos = head_W_B[pos].reshape(head_rank, q_head_dim)  # [head_rank, q_head_dim]
             
+            # Compute outer product sum
+            for r in range(head_rank):
+                head_recon[pos] += (A_pos[r] * B_pos[r]) / head_rank
+        
+        # Compute error
+        head_error = torch.norm(head_orig - head_recon) / torch.norm(head_orig)
+        print(f"  Head {h} reconstruction error: {head_error.item():.6f} ({head_error.item()*100:.2f}%)")
+        
         q_head_errors.append(head_error.item())
         q_head_recons.append(head_recon)
     
