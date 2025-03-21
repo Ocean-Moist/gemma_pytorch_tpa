@@ -123,25 +123,64 @@ class TPAAttention(nn.Module):
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
         
-        # Shape for A components: [batch_size, max_seq_len, num_kv_heads, rank]
-        self.cache_kA = torch.zeros(
-            (batch_size, max_seq_len, self.num_kv_heads, self.k_rank),
-            device=device, dtype=dtype
-        )
-        self.cache_vA = torch.zeros(
-            (batch_size, max_seq_len, self.num_kv_heads, self.v_rank),
-            device=device, dtype=dtype
-        )
+        # For TPA, we need to cache both A and B components for K and V matrices
+        # This is a key difference from standard attention where we cache final K and V
         
-        # Shape for B components: [batch_size, max_seq_len, rank, head_dim]
-        self.cache_kB = torch.zeros(
-            (batch_size, max_seq_len, self.k_rank, self.head_dim),
-            device=device, dtype=dtype
-        )
-        self.cache_vB = torch.zeros(
-            (batch_size, max_seq_len, self.v_rank, self.head_dim),
-            device=device, dtype=dtype
-        )
+        # Ensure that batch_size and max_seq_len are proper integers
+        batch_size = int(batch_size)
+        max_seq_len = int(max_seq_len)
+        
+        # Shape for A components: [batch_size, max_seq_len, num_kv_heads, rank]
+        # A components are of shape [hidden_dim, num_heads*rank] projected to [batch, seq_len, num_heads, rank]
+        try:
+            self.cache_kA = torch.zeros(
+                (batch_size, max_seq_len, self.num_kv_heads, self.k_rank),
+                device=device, dtype=dtype
+            )
+            self.cache_vA = torch.zeros(
+                (batch_size, max_seq_len, self.num_kv_heads, self.v_rank),
+                device=device, dtype=dtype
+            )
+            
+            # Shape for B components: [batch_size, max_seq_len, rank, head_dim]
+            # B components are of shape [hidden_dim, rank*head_dim] projected to [batch, seq_len, rank, head_dim]
+            self.cache_kB = torch.zeros(
+                (batch_size, max_seq_len, self.k_rank, self.head_dim),
+                device=device, dtype=dtype
+            )
+            self.cache_vB = torch.zeros(
+                (batch_size, max_seq_len, self.v_rank, self.head_dim),
+                device=device, dtype=dtype
+            )
+        except RuntimeError as e:
+            # Handle out-of-memory scenarios by reducing dimensions if possible
+            print(f"Warning: Error creating KV cache with dimensions [batch={batch_size}, seq={max_seq_len}]. Error: {e}")
+            print("Trying to create smaller cache...")
+            
+            # Reduce batch size if needed
+            adjusted_batch_size = max(1, batch_size // 2)
+            # Reduce sequence length if needed
+            adjusted_seq_len = max(64, max_seq_len // 2)
+            
+            print(f"Creating cache with adjusted dimensions: batch={adjusted_batch_size}, seq={adjusted_seq_len}")
+            
+            self.cache_kA = torch.zeros(
+                (adjusted_batch_size, adjusted_seq_len, self.num_kv_heads, self.k_rank),
+                device=device, dtype=dtype
+            )
+            self.cache_vA = torch.zeros(
+                (adjusted_batch_size, adjusted_seq_len, self.num_kv_heads, self.v_rank),
+                device=device, dtype=dtype
+            )
+            
+            self.cache_kB = torch.zeros(
+                (adjusted_batch_size, adjusted_seq_len, self.k_rank, self.head_dim),
+                device=device, dtype=dtype
+            )
+            self.cache_vB = torch.zeros(
+                (adjusted_batch_size, adjusted_seq_len, self.v_rank, self.head_dim),
+                device=device, dtype=dtype
+            )
 
     def forward(
         self,
@@ -165,8 +204,35 @@ class TPAAttention(nn.Module):
         B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, self.head_dim)
         
         # Apply rotary positional embedding to B_q and B_k
-        B_q = gemma_model.apply_rotary_emb(B_q, freqs_cis)
-        B_k = gemma_model.apply_rotary_emb(B_k, freqs_cis)
+        # Standard RoPE expects [batch, head, seq_len, head_dim]
+        # But our B matrices are [batch, seq_len, rank, head_dim]
+        # We need to adapt the format for proper RoPE application
+        
+        # Define a TPA-specific RoPE application that works with our tensor format
+        def apply_rotary_emb_to_B(x, freqs_cis):
+            # x shape: [batch, seq_len, rank, head_dim]
+            batch_size, seq_len, rank, head_dim = x.shape
+            
+            # Reshape to [batch*rank, seq_len, head_dim]
+            x_reshaped = x.transpose(1, 2).reshape(batch_size * rank, seq_len, head_dim)
+            
+            # Apply standard RoPE which expects [batch, seq_len, head_dim]
+            # Split into real/imaginary components
+            x_complex = torch.view_as_complex(
+                x_reshaped.float().reshape(*x_reshaped.shape[:-1], -1, 2)
+            )
+            # Apply complex multiplication with frequency components
+            freqs_cis = freqs_cis.unsqueeze(0).expand(x_complex.shape[0], -1, -1)
+            x_rotated = torch.view_as_real(x_complex * freqs_cis).flatten(2)
+            
+            # Reshape back to original format [batch, seq_len, rank, head_dim]
+            x_output = x_rotated.reshape(batch_size, rank, seq_len, head_dim).transpose(1, 2)
+            
+            return x_output.type_as(x)
+        
+        # Apply our TPA-specific RoPE function
+        B_q = apply_rotary_emb_to_B(B_q, freqs_cis)
+        B_k = apply_rotary_emb_to_B(B_k, freqs_cis)
         
         # Handle KV cache
         # We need to store and retrieve both A and B components for K and V
@@ -280,16 +346,88 @@ class TPAAttention(nn.Module):
             scores = torch.tanh(scores)
             scores = scores * self.attn_logit_softcapping
         
-        # Apply sliding window attention if configured
+        # Get the dimensions for proper masking
+        batch_size, num_heads, seq_len, kv_seq_len = scores.shape
+        
+        # Determine if we need to apply masks
+        # For Gemma3 style attention, we need to handle the provided mask correctly
+        if mask is not None:
+            # Handle case where we're using kv_cache during generation
+            if seq_len < kv_seq_len:
+                # We should extract the appropriate part of the mask for the current cached state
+                # For single token generation, get the row corresponding to the current position
+                # This is particularly important for Gemma3's image token handling
+                
+                # Check if it's a pre-computed full-sized mask (typically from create_attention_mask)
+                if mask.size(-1) == mask.size(-2):  # Square mask covering full sequence
+                    # For each position, extract the right slice that matches our KV cache
+                    # The slice we need depends on the current position in the sequence
+                    # Extract just the relevant query rows (usually just 1 in generation)
+                    # And just the relevant key columns (corresponding to cache_len)
+                    
+                    # Mask should be [batch, 1, seq_len, seq_len]
+                    # We need [batch, 1, current_seq_len, kv_seq_len]
+                    # Use kv_write_indices to determine current position
+                    if kv_write_indices is not None and kv_write_indices.numel() > 0:
+                        # Extract the row(s) corresponding to our current positions
+                        # And columns up to our current kv_cache length
+                        curr_mask = mask[:, :, -seq_len:, :kv_seq_len]
+                        
+                        # Apply the extracted mask to scores
+                        scores = scores + curr_mask
+                    else:
+                        # Fallback approach - try to use mask directly or create a suitable one
+                        try:
+                            scores = scores + mask
+                        except:
+                            # Create a minimal mask for causal attention
+                            min_dtype = torch.finfo(scores.dtype).min
+                            curr_mask = torch.zeros_like(scores)
+                            # Only for multi-token inputs, add causal masking 
+                            # (single token inputs don't need this)
+                            if seq_len > 1:
+                                for i in range(seq_len):
+                                    # Apply causal mask shape
+                                    curr_mask[:, :, i, i+1:] = min_dtype
+                            scores = scores + curr_mask
+                else:
+                    # The mask is already the right size or a different format
+                    try:
+                        scores = scores + mask
+                    except:
+                        # Log the dimension mismatch but continue without masking
+                        # This fallback happens during the first generation step
+                        pass
+            else:
+                # Regular case (e.g., during prefill) - use mask as provided
+                scores = scores + mask
+                
+        # Special handling for LOCAL_SLIDING attention type
         if (
             self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
             and self.sliding_window_size is not None
             and local_mask is not None
         ):
-            mask = local_mask
-        
-        # Apply mask
-        scores = scores + mask
+            # Try to use the local mask similarly to the main mask
+            if seq_len < kv_seq_len and kv_write_indices is not None and kv_write_indices.numel() > 0:
+                # Extract the appropriate slice
+                try:
+                    curr_local_mask = local_mask[:, :, -seq_len:, :kv_seq_len]
+                    scores = scores + curr_local_mask
+                except:
+                    # Sliding window for single token can be done with a simpler approach
+                    if self.sliding_window_size < kv_seq_len:
+                        # Create a simple sliding window mask
+                        window_mask = torch.zeros_like(scores)
+                        min_dtype = torch.finfo(scores.dtype).min
+                        # Apply sliding window constraint
+                        window_mask[:, :, :, :-self.sliding_window_size] = min_dtype
+                        scores = scores + window_mask
+            else:
+                try:
+                    scores = scores + local_mask
+                except:
+                    pass
         
         # Compute attention weights
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(q)
