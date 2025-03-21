@@ -1166,11 +1166,23 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
     # Set the data type to match
     tpa_model = tpa_model.to(dtype)
     
-    # Copy over all non-attention weights
-    print("Copying non-attention weights...")
+    # Special handling for embedding layer name mismatch
+    print("Copying non-attention weights with special handling for embedding layer...")
+    if hasattr(standard_model, 'embedder') and hasattr(tpa_model, 'text_token_embedder'):
+        print("  Copying embedding weights from 'embedder' to 'text_token_embedder'")
+        # Copy the weight tensor
+        tpa_model.text_token_embedder.weight.data.copy_(standard_model.embedder.weight.data)
+        # If using quantization, also copy the weight scaler
+        if hasattr(standard_model.embedder, 'weight_scaler') and hasattr(tpa_model.text_token_embedder, 'weight_scaler'):
+            tpa_model.text_token_embedder.weight_scaler.data.copy_(standard_model.embedder.weight_scaler.data)
+    
+    # Copy over all other non-attention weights
     for name, param in standard_model.named_parameters():
         # Skip attention-related parameters
         if any(x in name for x in ['qkv_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj', 'attention']):
+            continue
+        # Skip embedder weights which we already copied manually
+        if name.startswith("embedder"):
             continue
             
         # Find corresponding parameter in the TPA model

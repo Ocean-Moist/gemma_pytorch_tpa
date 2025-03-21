@@ -265,9 +265,22 @@ def main(_):
           print("Using Tucker factorization with shared factors")
           
           # First, copy embedding and non-attention weights
+          # Special handling for embedding layer name mismatch
+          if hasattr(standard_model, 'embedder') and hasattr(tpa_model, 'text_token_embedder'):
+              print("Copying embedding weights from 'embedder' to 'text_token_embedder'")
+              # Copy the weight tensor
+              tpa_model.text_token_embedder.weight.data.copy_(standard_model.embedder.weight.data)
+              # If using quantization, also copy the weight scaler
+              if hasattr(standard_model.embedder, 'weight_scaler') and hasattr(tpa_model.text_token_embedder, 'weight_scaler'):
+                  tpa_model.text_token_embedder.weight_scaler.data.copy_(standard_model.embedder.weight_scaler.data)
+          
+          # Now copy all other non-attention weights as before
           for name, param in standard_model.named_parameters():
               # Skip attention layer weights - we'll factorize those differently
               if any(x in name for x in ["qkv_proj", "o_proj", "attention"]):
+                  continue
+              # Skip embedder weights which we already copied manually
+              if name.startswith("embedder"):
                   continue
                   
               # Try to find the corresponding parameter in the TPA model
