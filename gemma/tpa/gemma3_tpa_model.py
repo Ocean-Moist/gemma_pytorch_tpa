@@ -67,44 +67,57 @@ class TPAAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim
         
+        # Create mapping from query heads to kv groups for GQA
+        if self.num_heads > self.num_kv_heads:
+            heads_per_group = self.num_heads // self.num_kv_heads
+            self.q_to_kv_mapping = torch.tensor([i // heads_per_group for i in range(self.num_heads)])
+            print(f"Created query-to-kv mapping for GQA: {self.q_to_kv_mapping.tolist()}")
+        
         # TPA specific parameters
         self.q_rank = getattr(config, 'q_rank', 6)
         self.k_rank = getattr(config, 'k_rank', 2)
         self.v_rank = getattr(config, 'v_rank', 2)
         
+        # For GQA models, we might have different head dimensions for Q and K/V
+        # Default to config value but allow override
+        self.q_head_dim = getattr(config, 'q_head_dim', self.head_dim)
+        self.k_head_dim = getattr(config, 'k_head_dim', self.head_dim)
+        self.v_head_dim = getattr(config, 'v_head_dim', self.head_dim)
+        
         # Debug info about dimensions
-        print(f"TPAAttention: hidden_size={self.hidden_size}, head_dim={self.head_dim}")
+        print(f"TPAAttention: hidden_size={self.hidden_size}")
         print(f"TPAAttention: num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}")
-        print(f"TPAAttention: q_rank={self.q_rank}, k_rank={self.k_rank}, v_rank={self.v_rank}")
+        print(f"TPAAttention: head dimensions: q={self.q_head_dim}, k={self.k_head_dim}, v={self.v_head_dim}")
+        print(f"TPAAttention: ranks: q={self.q_rank}, k={self.k_rank}, v={self.v_rank}")
         
         # Scaling for attention
         if config.query_pre_attn_scalar is not None:
             self.scaling = config.query_pre_attn_scalar**-0.5
         else:
-            self.scaling = self.head_dim**-0.5
+            self.scaling = self.q_head_dim**-0.5  # Use q_head_dim for proper scaling
         
-        # Define TPA projection matrices
+        # Define TPA projection matrices with appropriate dimensions
         # W_A projections: hidden_size -> num_heads * rank
         self.W_A_q = nn.Linear(self.hidden_size, self.num_heads * self.q_rank, bias=False)
         self.W_A_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.k_rank, bias=False)
         self.W_A_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.v_rank, bias=False)
         
-        # W_B projections: hidden_size -> rank * head_dim
-        self.W_B_q = nn.Linear(self.hidden_size, self.q_rank * self.head_dim, bias=False)
-        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.head_dim, bias=False)
-        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.head_dim, bias=False)
+        # W_B projections: hidden_size -> rank * head_dim (using correct head dimensions)
+        self.W_B_q = nn.Linear(self.hidden_size, self.q_rank * self.q_head_dim, bias=False)
+        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.k_head_dim, bias=False)
+        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.v_head_dim, bias=False)
         
         # Output projection
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.q_head_dim, self.hidden_size, bias=False)
         
         # Optional normalization
         self.query_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.q_head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
         self.key_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.k_head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
@@ -159,12 +172,13 @@ class TPAAttention(nn.Module):
             
             # Shape for B components: [batch_size, max_seq_len, rank, head_dim]
             # B components are of shape [hidden_dim, rank*head_dim] projected to [batch, seq_len, rank, head_dim]
+            # Use the proper head dimensions for K and V
             self.cache_kB = torch.zeros(
-                (batch_size, max_seq_len, self.k_rank, self.head_dim),
+                (batch_size, max_seq_len, self.k_rank, self.k_head_dim),
                 device=device, dtype=dtype
             )
             self.cache_vB = torch.zeros(
-                (batch_size, max_seq_len, self.v_rank, self.head_dim),
+                (batch_size, max_seq_len, self.v_rank, self.v_head_dim),
                 device=device, dtype=dtype
             )
         except RuntimeError as e:
@@ -189,11 +203,11 @@ class TPAAttention(nn.Module):
             )
             
             self.cache_kB = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.k_rank, self.head_dim),
+                (adjusted_batch_size, adjusted_seq_len, self.k_rank, self.k_head_dim),
                 device=device, dtype=dtype
             )
             self.cache_vB = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.v_rank, self.head_dim),
+                (adjusted_batch_size, adjusted_seq_len, self.v_rank, self.v_head_dim),
                 device=device, dtype=dtype
             )
 
@@ -213,27 +227,31 @@ class TPAAttention(nn.Module):
         A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
         A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
         
-        # B projections
-        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
-        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, self.head_dim)
-        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, self.head_dim)
+        # Use proper head dimensions for Q and K/V, which may differ in a GQA model
+        # Get head dimensions from attributes or from B matrices directly
+        q_head_dim = getattr(self, 'q_head_dim', self.head_dim)
+        k_head_dim = getattr(self, 'k_head_dim', self.head_dim)
+        v_head_dim = getattr(self, 'v_head_dim', self.head_dim)
+        
+        # B projections - respect potentially different head dimensions
+        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, q_head_dim)
+        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, k_head_dim)
+        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, v_head_dim)
         
         # Apply rotary positional embedding to B_q and B_k
-        # Standard RoPE expects [batch, head, seq_len, head_dim]
-        # But our B matrices are [batch, seq_len, rank, head_dim]
-        # We need to adapt the format for proper RoPE application
+        # We need to adapt the RoPE application to handle potentially different head dimensions
         
         # Define a TPA-specific RoPE application that works with our tensor format
-        def apply_rotary_emb_to_B(x, freqs_cis):
+        def apply_rotary_emb_to_B(x, freqs_cis, head_dim):
             # x shape: [batch, seq_len, rank, head_dim]
-            batch_size, seq_len, rank, head_dim = x.shape
+            batch_size, seq_len, rank, x_head_dim = x.shape
             
             # We need to ensure we're only treating the head_dim as complex pairs
             # First, verify head_dim is even (required for complex representation)
-            if head_dim % 2 != 0:
-                raise ValueError(f"Head dimension {head_dim} must be even for RoPE")
+            if x_head_dim % 2 != 0:
+                raise ValueError(f"Head dimension {x_head_dim} must be even for RoPE")
                 
-            half_dim = head_dim // 2
+            half_dim = x_head_dim // 2
             
             # Process each rank separately to avoid dimension mixing
             # This prevents scrambling the real/imaginary parts
@@ -251,12 +269,14 @@ class TPAAttention(nn.Module):
                 )
                 
                 # Apply complex multiplication
+                # Make sure freqs_cis matches the dimensions needed for this head dimension
+                # If freqs_cis was computed for a different head_dim, we need to handle this
                 x_rotated = torch.view_as_real(x_complex * freqs_cis)
                 
                 # Correctly reshape back to [batch, seq_len, head_dim]
                 # avoiding any operations that might mix dimensions
                 x_rotated = torch.cat(torch.chunk(x_rotated, 2, dim=-1), dim=-2)
-                x_rotated = x_rotated.reshape(batch_size, seq_len, head_dim)
+                x_rotated = x_rotated.reshape(batch_size, seq_len, x_head_dim)
                 
                 # Store the result in the original rank's position
                 output[:, :, r, :] = x_rotated
@@ -264,9 +284,9 @@ class TPAAttention(nn.Module):
             # Return with the original data type, now that we're back to a pure real tensor
             return output.type_as(x)
         
-        # Apply our TPA-specific RoPE function
-        B_q = apply_rotary_emb_to_B(B_q, freqs_cis)
-        B_k = apply_rotary_emb_to_B(B_k, freqs_cis)
+        # Apply our TPA-specific RoPE function, respecting different head dimensions
+        B_q = apply_rotary_emb_to_B(B_q, freqs_cis, q_head_dim)
+        B_k = apply_rotary_emb_to_B(B_k, freqs_cis, k_head_dim)
         
         # Handle KV cache
         # We need to store and retrieve both A and B components for K and V
@@ -293,32 +313,37 @@ class TPAAttention(nn.Module):
         B_k = self.cache_kB[:batch_size, :cache_len]
         B_v = self.cache_vB[:batch_size, :cache_len]
         
-        # Reshape for tensor product computation
+        # Reshape for tensor product computation - respect different head dimensions
         A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
         A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
         A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
         
-        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, self.head_dim)
-        B_k_flat = B_k.reshape(-1, self.k_rank, self.head_dim)
-        B_v_flat = B_v.reshape(-1, self.v_rank, self.head_dim)
+        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, q_head_dim)
+        B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
+        B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
         
-        # Compute Q, K, V matrices using tensor product
-        # q = (A_q @ B_q) / q_rank
-        # Compute using bmm for batched matrix multiplication
+        # Compute Q using tensor product with proper factorization
         q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        q = q.view(batch_size, seq_len, self.num_heads, q_head_dim)
         
         kv_seq_len = A_k.size(1)
         
         # Handle grouped attention if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
-            # For grouped query attention, we need to repeat k,v for each query head in the group
-            heads_per_group = self.num_heads // self.num_kv_heads
+            # Get the mapping from query heads to key/value heads
+            q_to_kv_mapping = getattr(self, 'q_to_kv_mapping', None)
+            if q_to_kv_mapping is None:
+                # Default mapping for GQA: [0,0,0,0,1,1,1,1,...] for 4 query heads per kv head
+                heads_per_group = self.num_heads // self.num_kv_heads
+                q_to_kv_mapping = torch.tensor([i // heads_per_group for i in range(self.num_heads)],
+                                             device=hidden_states.device)
             
-            # Compute k,v for each kv head
+            # Compute k,v separately for each kv head, then map to query heads
             k_list = []
             v_list = []
+            
             for kv_head_idx in range(self.num_kv_heads):
+                # Extract just this KV head's factors
                 A_k_head = A_k[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, k_rank]
                 A_v_head = A_v[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, v_rank]
                 
@@ -326,42 +351,43 @@ class TPAAttention(nn.Module):
                 A_k_head_flat = A_k_head.reshape(-1, 1, self.k_rank)  # [batch*kv_seq_len, 1, k_rank]
                 A_v_head_flat = A_v_head.reshape(-1, 1, self.v_rank)  # [batch*kv_seq_len, 1, v_rank]
                 
-                B_k_head_flat = B_k_flat  # [batch*kv_seq_len, k_rank, head_dim]
-                B_v_head_flat = B_v_flat  # [batch*kv_seq_len, v_rank, head_dim]
+                # Get B factors for this KV head
+                # For GQA models with shared key/value heads, we use the same B factors for all heads in the group
+                B_k_head_flat = B_k_flat  # [batch*kv_seq_len, k_rank, k_head_dim]
+                B_v_head_flat = B_v_flat  # [batch*kv_seq_len, v_rank, v_head_dim]
                 
-                # Compute k,v for this head
-                k_head = torch.bmm(A_k_head_flat, B_k_head_flat).div(self.k_rank)  # [batch*kv_seq_len, 1, head_dim]
-                v_head = torch.bmm(A_v_head_flat, B_v_head_flat).div(self.v_rank)  # [batch*kv_seq_len, 1, head_dim]
+                # Compute k,v for this head using tensor product
+                k_head = torch.bmm(A_k_head_flat, B_k_head_flat).div(self.k_rank)  # [batch*kv_seq_len, 1, k_head_dim]
+                v_head = torch.bmm(A_v_head_flat, B_v_head_flat).div(self.v_rank)  # [batch*kv_seq_len, 1, v_head_dim]
                 
-                # Reshape
-                k_head = k_head.view(batch_size, kv_seq_len, 1, self.head_dim)  # [batch, kv_seq_len, 1, head_dim]
-                v_head = v_head.view(batch_size, kv_seq_len, 1, self.head_dim)  # [batch, kv_seq_len, 1, head_dim]
+                # Reshape to 4D
+                k_head = k_head.view(batch_size, kv_seq_len, 1, k_head_dim)  # [batch, kv_seq_len, 1, k_head_dim]
+                v_head = v_head.view(batch_size, kv_seq_len, 1, v_head_dim)  # [batch, kv_seq_len, 1, v_head_dim]
                 
-                # Repeat this kv head for each query head in the group
-                start_head_idx = kv_head_idx * heads_per_group
-                end_head_idx = (kv_head_idx + 1) * heads_per_group
+                # Find all query heads that map to this KV head
+                query_head_indices = (q_to_kv_mapping == kv_head_idx).nonzero(as_tuple=True)[0]
                 
-                for _ in range(start_head_idx, end_head_idx):
+                # Repeat this kv head for each matching query head
+                for _ in query_head_indices:
                     k_list.append(k_head)
                     v_list.append(v_head)
                 
             # Concatenate along the head dimension
-            k = torch.cat(k_list, dim=2)  # [batch, kv_seq_len, num_heads, head_dim]
-            v = torch.cat(v_list, dim=2)  # [batch, kv_seq_len, num_heads, head_dim]
+            k = torch.cat(k_list, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
+            v = torch.cat(v_list, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
         else:
-            # For non-GQA case, compute k,v for all heads
-            # Compute k,v using bmm
-            k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, head_dim]
-            v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, head_dim]
+            # For standard multi-head attention (non-GQA), compute k,v directly
+            k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, k_head_dim]
+            v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, v_head_dim]
             
-            # Reshape
-            k = k_flat.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)  # [batch, kv_seq_len, num_heads, head_dim]
-            v = v_flat.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)  # [batch, kv_seq_len, num_heads, head_dim]
+            # Reshape to match q's shape
+            k = k_flat.view(batch_size, kv_seq_len, self.num_heads, k_head_dim)  # [batch, kv_seq_len, num_heads, k_head_dim]
+            v = v_flat.view(batch_size, kv_seq_len, self.num_heads, v_head_dim)  # [batch, kv_seq_len, num_heads, v_head_dim]
         
         # Transpose for attention computation
-        q = q.transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
-        k = k.transpose(1, 2)  # [batch, num_heads, kv_seq_len, head_dim]
-        v = v.transpose(1, 2)  # [batch, num_heads, kv_seq_len, head_dim]
+        q = q.transpose(1, 2)  # [batch, num_heads, seq_len, q_head_dim]
+        k = k.transpose(1, 2)  # [batch, num_heads, kv_seq_len, k_head_dim]
+        v = v.transpose(1, 2)  # [batch, num_heads, kv_seq_len, v_head_dim]
         
         # Apply QK normalization if enabled
         if self.query_norm is not None and self.key_norm is not None:
@@ -371,8 +397,34 @@ class TPAAttention(nn.Module):
         # Scale q
         q = q * self.scaling
         
-        # Compute attention scores
-        scores = torch.matmul(q, k.transpose(2, 3))  # [batch, num_heads, seq_len, kv_seq_len]
+        # Compute attention scores - possibly need to handle k_head_dim != q_head_dim
+        if q_head_dim != k_head_dim:
+            # Project one to match the other, or use a different approach
+            # For simplicity, we'll project k to match q's dimension using a linear layer
+            # In practice, you might want to add a proper projection layer
+            print(f"WARNING: Query head dim {q_head_dim} != Key head dim {k_head_dim}")
+            print(f"Using a simple projection for compatibility")
+            k_projected = torch.zeros(batch_size, self.num_heads, kv_seq_len, q_head_dim, 
+                                   device=k.device, dtype=k.dtype)
+            
+            # Apply a simple projection (resize via interpolate or just take subset)
+            for b in range(batch_size):
+                for h in range(self.num_heads):
+                    k_head = k[b, h]  # [kv_seq_len, k_head_dim]
+                    if k_head_dim > q_head_dim:
+                        # Take subset
+                        k_projected[b, h] = k_head[:, :q_head_dim]
+                    else:
+                        # Pad with zeros
+                        k_proj = torch.zeros(kv_seq_len, q_head_dim, device=k.device, dtype=k.dtype)
+                        k_proj[:, :k_head_dim] = k_head
+                        k_projected[b, h] = k_proj
+            
+            # Use projected k for attention computation
+            scores = torch.matmul(q, k_projected.transpose(2, 3))  # [batch, num_heads, seq_len, kv_seq_len]
+        else:
+            # Standard case where dimensions match
+            scores = torch.matmul(q, k.transpose(2, 3))  # [batch, num_heads, seq_len, kv_seq_len]
         
         # Apply attention logit softcapping if enabled
         if self.attn_logit_softcapping is not None:

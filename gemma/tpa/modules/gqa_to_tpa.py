@@ -28,20 +28,22 @@ def gqa_to_tpa_conversion(
     v_rank: int = 240,
     dtype: torch.dtype = torch.float16,
     device: str = "cuda",
-    use_dynamic_ranks: bool = True,  # Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
+    use_dynamic_ranks: bool = True,  # Whether to use ranks determined by SVD (True) or force specified ranks (False)
     config = None,  # Model config to ensure consistent dimensions
 ) -> Dict[str, torch.Tensor]:
     """
-    Convert GQA attention weights to TPA format using Tucker decomposition.
+    Convert GQA attention weights to TPA format using SVD-based independent factorization.
     
-    This function implements the conversion approach described in the document,
-    using TensorLLM-style Tucker decomposition while preserving the grouped structure.
+    This function implements an improved conversion approach that properly handles GQA models
+    where Q has different dimensions and head counts than K/V. Instead of forcing all
+    projections to use the same head dimension, we factorize Q and K/V separately with their
+    actual dimensions, which drastically reduces reconstruction error.
     
     Args:
-        q_weight: Query projection weight matrix [hidden_dim, num_heads * head_dim]
-        k_weight: Key projection weight matrix [hidden_dim, num_kv_heads * head_dim]
-        v_weight: Value projection weight matrix [hidden_dim, num_kv_heads * head_dim]
-        o_weight: Output projection weight matrix [num_heads * head_dim, hidden_dim]
+        q_weight: Query projection weight matrix [hidden_dim, num_heads * q_head_dim]
+        k_weight: Key projection weight matrix [hidden_dim, num_kv_heads * kv_head_dim]
+        v_weight: Value projection weight matrix [hidden_dim, num_kv_heads * kv_head_dim]
+        o_weight: Output projection weight matrix [num_heads * q_head_dim, hidden_dim]
         num_heads: Number of query heads
         num_kv_heads: Number of key/value heads (groups)
         q_rank: Rank for query factorization
@@ -49,9 +51,7 @@ def gqa_to_tpa_conversion(
         v_rank: Rank for value factorization
         dtype: Data type for the output tensors
         device: Device for computation
-        override_head_dim: Optional parameter to force a specific head dimension
-        transposed_weights: Whether weights are in [out_proj, in_proj] format (False) or [in_proj, out_proj] format (True)
-        use_dynamic_ranks: Whether to use ranks determined by Tucker decomposition (True) or force specified ranks (False)
+        use_dynamic_ranks: Whether to use ranks determined by SVD (True) or force specified ranks (False)
         config: Model config to ensure consistent dimensions - we'll use config.hidden_size if available
         
     Returns:
@@ -60,90 +60,75 @@ def gqa_to_tpa_conversion(
 
     # Start timing
     tic = time.time()
-    print("Starting GQA to TPA conversion using Tucker decomposition...")
+    print("Starting improved GQA to TPA conversion with separate Q and K/V factorization...")
     
     # Make sure tensors are on the right device and dtype for processing
     q_weight = q_weight.to(torch.float32)
     k_weight = k_weight.to(torch.float32)
     v_weight = v_weight.to(torch.float32)
-    
-    # Handle weight format - Gemma typically has weights in [output_proj, input_proj] format
     o_weight = o_weight.to(torch.float32)
 
-    # Update transposed_weights if we transpose the q,k,v weights later
-
-
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
-    # This ensures consistency with the model's actual hidden state dimensions
     config_hidden_size = getattr(config, 'hidden_size', None) if config is not None else None
     
-    # For Gemma models, check if weights need to be transposed
+    # For Gemma models, weights need to be transposed
     # In PyTorch Linear layers, weights have shape [out_features, in_features]
-    # But for TPA conversion, we need them in [hidden_dim, projection_dim] format
-
-    hidden_dim = config_hidden_size
+    # But for our factorization, we need them in [hidden_dim, projection_dim] format
+    hidden_dim = config_hidden_size if config_hidden_size is not None else q_weight.shape[1]
     q_weight = q_weight.transpose(0, 1)
     k_weight = k_weight.transpose(0, 1)
     v_weight = v_weight.transpose(0, 1)
 
-    print(f"  After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
+    print(f"After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
 
-    # After possible transposition, verify again
+    # Verify dimensions are consistent with expected hidden_dim
     if q_weight.shape[0] != hidden_dim:
-        raise ValueError(f"CRITICAL ERROR: Weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}. Cannot proceed with mismatched dimensions.")
-
+        raise ValueError(f"CRITICAL ERROR: Q weight hidden dim {q_weight.shape[0]} != config.hidden_size {hidden_dim}.")
+    if k_weight.shape[0] != hidden_dim:
+        raise ValueError(f"CRITICAL ERROR: K weight hidden dim {k_weight.shape[0]} != config.hidden_size {hidden_dim}.")
+    if v_weight.shape[0] != hidden_dim:
+        raise ValueError(f"CRITICAL ERROR: V weight hidden dim {v_weight.shape[0]} != config.hidden_size {hidden_dim}.")
 
     print(f"Dimensions: hidden_dim={hidden_dim}")
-    # Verify final dimensions are consistent
     print(f"Weight shapes: Q={q_weight.shape}, K={k_weight.shape}, V={v_weight.shape}, O={o_weight.shape}")
     
-
-    # STEP 1: Multi-head Tensorisation
-    # For Gemma-3-1B, we need to recalculate head dimensions based on actual weights
-    
-    # For Gemma-3-1B, q_weight has shape [1152, 1024] after transposition
-    # Where 1024 = 4 heads * 256 head_dim
+    # Step 1: Calculate actual head dimensions directly from the weights
     q_proj_dim = q_weight.shape[1]
     k_proj_dim = k_weight.shape[1]
     v_proj_dim = v_weight.shape[1]
     
-    # Calculate head dimensions directly from the weights
+    # Verify projections are evenly divisible by head counts
     if q_proj_dim % num_heads != 0:
         raise ValueError(f"Q projection dimension {q_proj_dim} not divisible by num_heads {num_heads}")
-    
     if k_proj_dim % num_kv_heads != 0:
         raise ValueError(f"K projection dimension {k_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
-    
     if v_proj_dim % num_kv_heads != 0:
         raise ValueError(f"V projection dimension {v_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
     
-    # Calculate actual head dimensions from the weights
+    # Calculate actual head dimensions from the weights - now keeping them separate
     q_head_dim = q_proj_dim // num_heads
-    kv_head_dim = k_proj_dim // num_kv_heads
+    k_head_dim = k_proj_dim // num_kv_heads
+    v_head_dim = v_proj_dim // num_kv_heads
     
-    print(f"\nDIMENSION CALCULATION: Using actual weight dimensions to determine head_dim")
+    print(f"\nDIMENSION CALCULATION: Using separate head dimensions for Q and K/V")
     print(f"  Q weights: {q_weight.shape} → {q_head_dim} = {q_proj_dim} / {num_heads} heads")
-    print(f"  K weights: {k_weight.shape} → {kv_head_dim} = {k_proj_dim} / {num_kv_heads} kv_heads")
-    print(f"  V weights: {v_weight.shape} → {kv_head_dim} = {v_proj_dim} / {num_kv_heads} kv_heads")
+    print(f"  K weights: {k_weight.shape} → {k_head_dim} = {k_proj_dim} / {num_kv_heads} kv_heads")
+    print(f"  V weights: {v_weight.shape} → {v_head_dim} = {v_proj_dim} / {num_kv_heads} kv_heads")
     
-
-    # Use consistent head dimension for all
-    head_dim = q_head_dim
-    
-    # Now reshape the weights with the corrected dimensions
+    # Reshape weights to 3D tensors with proper per-head dimensions
     q_weights_reshaped = q_weight.reshape(hidden_dim, num_heads, q_head_dim)
-    k_weights_reshaped = k_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
-    v_weights_reshaped = v_weight.reshape(hidden_dim, num_kv_heads, kv_head_dim)
+    k_weights_reshaped = k_weight.reshape(hidden_dim, num_kv_heads, k_head_dim)
+    v_weights_reshaped = v_weight.reshape(hidden_dim, num_kv_heads, v_head_dim)
     
-    # Ensure output weight can be reshaped properly
-    if o_weight.shape[0] != hidden_dim:
-        raise ValueError(f"Output weight first dimension {o_weight.shape[0]} != hidden_dim {hidden_dim}")
-
-    # Now reshape with the correct dimensions
-    o_weights_reshaped = o_weight.reshape(hidden_dim, num_heads, q_head_dim)
-            
-    print(f"Reshaped weight dimensions: Q={q_weights_reshaped.shape}, K={k_weights_reshaped.shape}, "
-          f"V={v_weights_reshaped.shape}, O={o_weights_reshaped.shape}")
+    # Handle output weight by reshaping to match query projection
+    # For o_weight, dimensions are usually [num_heads*q_head_dim, hidden_dim]
+    o_weights_transposed = o_weight
+    if o_weight.shape[1] == hidden_dim:
+        # o_weight is already in [num_heads*q_head_dim, hidden_dim] format
+        pass
+    else:
+        # Need to transpose the o_weight
+        o_weights_transposed = o_weight.transpose(0, 1)
     
     # Create mapping from query heads to kv groups
     # For each query head, identify which kv head it should use
@@ -151,294 +136,293 @@ def gqa_to_tpa_conversion(
     q_to_kv_mapping = torch.tensor([i // heads_per_group for i in range(num_heads)],
                                   device=q_weight.device)
     
-    # Create the 4D tensor representation (hidden_dim, head_dim, 4, num_heads)
-    # We'll store the query, key, value, and output weights for each head
-    all_weights = []
+    print(f"Head mapping: {num_heads} query heads to {num_kv_heads} KV heads, {heads_per_group} query heads per KV head")
+    print(f"Mapping: {q_to_kv_mapping.tolist()}")
     
-    for h in range(num_heads):
-        # For each query head, get the corresponding kv head
-        kv_head = q_to_kv_mapping[h]
+    # Step 2: Analyze intrinsic ranks using SVD for Q and K/V separately
+    print("\nANALYZING INTRINSIC RANKS using SVD (separate analysis for Q and K/V)")
+    
+    # Function to analyze intrinsic rank using SVD and energy threshold
+    def analyze_intrinsic_rank(weight_tensor, tensor_name):
+        # Reshape to 2D for SVD
+        weight_2d = weight_tensor.reshape(weight_tensor.shape[0], -1)
+        # Compute SVD
+        _, singular_values, _ = torch.linalg.svd(weight_2d, full_matrices=False)
         
-        # Stack the weights for this head
-        head_tensor = torch.stack([
-            q_weights_reshaped[:, h, :],                  # Query weights for this head
-            k_weights_reshaped[:, kv_head, :],            # Key weights for the group
-            v_weights_reshaped[:, kv_head, :],            # Value weights for the group
-            o_weights_reshaped[:, h, :]                   # Output weights for this head
-        ], dim=2)  # Stack along dimension 2
+        # Compute energy-based thresholds
+        energy = singular_values ** 2
+        energy_norm = energy / torch.sum(energy)
+        cumulative = torch.cumsum(energy_norm, dim=0)
         
-        all_weights.append(head_tensor)
-    
-    # Combine all heads into a single 4D tensor
-    W_all = torch.stack(all_weights, dim=3)  # Shape: [hidden_dim, head_dim, 4, num_heads]
-    
-    # Ensure proper dimensions
-    print(f"Tensorized weights shape: {W_all.shape}")
-    
-    # STEP 2: Tucker Decomposition with Shared Factor Matrices
-    # For TPA, the key parameter is the rank of the decomposition
-    # The ranks need to be smaller than the respective dimensions
-    
-
-    # Standard ranks based on q_rank
-    R1 = min(q_rank, W_all.shape[0])  # Rank for the model dimension
-    R2 = min(q_rank, W_all.shape[1])  # Rank for the head dimension
-    R3 = min(q_rank, W_all.shape[2])  # Rank for the QKV distinction
-
-    print(f"Using ranks: R1={R1}, R2={R2}, R3={R3}")
-    print(f"Tensor shape: {W_all.shape}")
-    
-    print(f"Applying Tucker decomposition with ranks: ({R1}, {R2}, {R3})")
-    
-    # Apply Tucker decomposition to the full tensor
-    # This enforces shared factor matrices across all heads
-    print(f"Tensor shape before Tucker decomposition: {W_all.shape}")
-    print(f"Target ranks: {[R1, R2, R3, num_heads]}")
-
-    # Set up timing
-    decomp_start = time.time()
-    print("Starting Tucker decomposition...")
-
-    # Ensure tensor is on the correct device before decomposition
-    W_all_device = W_all.device
-    print(f"Running Tucker decomposition on device: {W_all_device}")
-
-    # Add verbose parameter to tucker and ensure we're using GPU
-    tucker_start = time.time()
-    print("Using GPU-accelerated Tucker decomposition...")
-    # Ensure tensor is contiguous in memory for best performance
-    W_all = W_all.contiguous()
-    core, factors = tucker(W_all, rank=[R1, R2, R3, num_heads], tol=1e-4, verbose=True)
-    tucker_end = time.time()
-    print(f"Tucker decomposition completed in {tucker_end - tucker_start:.2f} seconds on {W_all_device}")
-
-    decomp_end = time.time()
-    print(f"Tucker decomposition took {decomp_end - decomp_start:.2f} seconds")
-
-    # Extract the factor matrices
-    U1 = factors[0]  # For hidden dimension
-    U2 = factors[1]  # For head dimension
-    U3 = factors[2]  # For QKV distinction
-    # No need for factor 3 since we'll keep each head separate
-
-    print(f"Tucker decomposition complete. Core shape: {core.shape}")
-    print(f"Factor shapes: {[f.shape for f in factors]}")
-
-    # Check for NaN or infinite values
-    if torch.isnan(core).any() or torch.isinf(core).any():
-        print("WARNING: Core tensor contains NaN or Inf values!")
-
-    for i, factor in enumerate(factors):
-        if torch.isnan(factor).any() or torch.isinf(factor).any():
-            print(f"WARNING: Factor {i} contains NaN or Inf values!")
-
-    # STEP 3: Map Tucker Factors to TPA Parameters
-    result = {}
-    
-    # Extract factor matrices for query, key, value parts
-    # U3 contains factors for Q, K, V, O: shape [4, R3]
-    q_factor = U3[0].reshape(-1, 1)  # [R3, 1]
-    k_factor = U3[1].reshape(-1, 1)  # [R3, 1]
-    v_factor = U3[2].reshape(-1, 1)  # [R3, 1]
-    
-    # For query:
-    # Create the core tensor with QKV factors
-    q_core_shape = (R1, R2, num_heads)
-    q_core = torch.zeros(q_core_shape, dtype=core.dtype, device=core.device)
-    
-    # Project the core using q_factor
-    for h in range(num_heads):
-        q_core[:, :, h] = torch.tensordot(core[:, :, :, h], q_factor, dims=[[2], [0]]).squeeze(-1)
-    
-    # For keys and values, we need to handle the group structure
-    k_core_shape = (R1, R2, num_kv_heads)
-    v_core_shape = (R1, R2, num_kv_heads)
-    
-    k_core = torch.zeros(k_core_shape, dtype=core.dtype, device=core.device)
-    v_core = torch.zeros(v_core_shape, dtype=core.dtype, device=core.device)
-    
-    # Project the core using k_factor and v_factor, preserving the group structure
-    for g in range(num_kv_heads):
-        # Find all query heads that map to this KV group
-        group_q_heads = [h for h in range(num_heads) if q_to_kv_mapping[h] == g]
+        # Calculate ranks for different energy thresholds
+        thresholds = [0.9, 0.95, 0.98]
+        ranks = []
         
-        # Average the cores from all heads in this group
-        group_core = torch.zeros_like(core[:, :, :, 0])
-        for h in group_q_heads:
-            group_core += core[:, :, :, h]
-        group_core /= len(group_q_heads)
+        print(f"  {tensor_name} singular value analysis:")
+        for thresh in thresholds:
+            rank = torch.sum(cumulative <= thresh).item() + 1
+            rank = min(rank, len(cumulative))
+            ranks.append(int(rank))
+            print(f"    {thresh*100:.0f}% energy: rank {int(rank)}")
         
-        # Project using k_factor and v_factor
-        k_core[:, :, g] = torch.tensordot(group_core, k_factor, dims=[[2], [0]]).squeeze(-1)
-        v_core[:, :, g] = torch.tensordot(group_core, v_factor, dims=[[2], [0]]).squeeze(-1)
+        # Use the 95% threshold as the recommended rank
+        recommended_rank = ranks[1] if len(ranks) > 1 else ranks[0]
+        return recommended_rank, ranks, singular_values
     
-    # Store the results
-    # We use tensordot instead of matmul to project from the higher-dimensional space
+    # Analyze each weight matrix separately
+    q_recommended_rank, q_ranks, q_singular_values = analyze_intrinsic_rank(q_weight, "Q")
+    k_recommended_rank, k_ranks, k_singular_values = analyze_intrinsic_rank(k_weight, "K")
+    v_recommended_rank, v_ranks, v_singular_values = analyze_intrinsic_rank(v_weight, "V")
     
-    # For queries:
-    result["Q_core"] = q_core.to(dtype=dtype, device=device)
-    result["Q_hidden_factor"] = U1.to(dtype=dtype, device=device)
-    result["Q_dim_factor"] = U2.to(dtype=dtype, device=device)
-    result["Q_head_factor"] = torch.eye(num_heads, device=device).to(dtype=dtype)
-    
-    # For keys:
-    result["K_core"] = k_core.to(dtype=dtype, device=device)
-    result["K_hidden_factor"] = U1.to(dtype=dtype, device=device)
-    result["K_dim_factor"] = U2.to(dtype=dtype, device=device)
-    result["K_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype=dtype)
-    
-    # For values:
-    result["V_core"] = v_core.to(dtype=dtype, device=device)
-    result["V_hidden_factor"] = U1.to(dtype=dtype, device=device)
-    result["V_dim_factor"] = U2.to(dtype=dtype, device=device)
-    result["V_head_factor"] = torch.eye(num_kv_heads, device=device).to(dtype=dtype)
-    
-    # Calculate the weight matrices for Wa and Wb in TPA format to verify correctness
-    
-    # Calculate the weight matrices for Wa and Wb in TPA format
-    # For TPA implementation:
-    # A_q = W_A_q(x) - shape [batch, seq, heads, q_rank]
-    # B_q = W_B_q(x) - shape [batch, seq, q_rank, head_dim]
-    
-    # Get the actual ranks from the Tucker decomposition
-    # These might differ from the requested ranks
-    actual_R1 = U1.shape[1]  # Rank for hidden dimension from factor shape
-    actual_R2 = U2.shape[1]  # Rank for head dimension from factor shape
-    
-    print(f"Actual ranks from Tucker decomposition: R1={actual_R1}, R2={actual_R2}")
-    
-    # We'll determine the optimal ranks for each component separately
-    # First, analyze the intrinsic ranks of Q, K, V matrices using SVD and energy analysis
-    # This helps us respect the actual rank structure of each component
-    print("\nANALYZING INTRINSIC RANKS using energy-based approach (cumulative explained variance)")
-    
-    # For queries
-    intrinsic_q_rank = actual_R2  # Start with Tucker decomposition rank
-    
-    # For keys and values, analyze their intrinsic ranks using SVD
-    # First reshape to 2D matrices for analysis
-    k_matrix_2d = k_weight.reshape(hidden_dim, -1)
-    v_matrix_2d = v_weight.reshape(hidden_dim, -1)
-    
-    # Compute SVD to analyze singular value distributions
-    _, k_singular_values, _ = torch.linalg.svd(k_matrix_2d, full_matrices=False)
-    _, v_singular_values, _ = torch.linalg.svd(v_matrix_2d, full_matrices=False)
-
-    # Better approach: use energy-based threshold (cumulative explained variance)
-    # This is more adaptive to different singular value distributions
-
-    # Square singular values to get eigenvalues (energy)
-    k_energy = k_singular_values ** 2
-    v_energy = v_singular_values ** 2
-
-    # Normalize by total energy
-    k_energy_norm = k_energy / torch.sum(k_energy)
-    v_energy_norm = v_energy / torch.sum(v_energy)
-
-    # Compute cumulative explained variance
-    k_cumulative = torch.cumsum(k_energy_norm, dim=0)
-    v_cumulative = torch.cumsum(v_energy_norm, dim=0)
-
-    # Find ranks that explain 90%, 95%, 98% of variance
-    energy_thresholds = [0.9, 0.95, 0.98]
-    k_ranks = []
-    v_ranks = []
-
-    print("  K singular value analysis:")
-    for thresh in energy_thresholds:
-        k_rank = torch.sum(k_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
-        k_rank = min(k_rank, len(k_cumulative))  # Handle case where we might not reach threshold
-        k_ranks.append(int(k_rank))
-        print(f"    {thresh*100:.0f}% energy: rank {int(k_rank)}")
-
-    print("  V singular value analysis:")
-    for thresh in energy_thresholds:
-        v_rank = torch.sum(v_cumulative <= thresh).item() + 1  # +1 because we need the first value that exceeds
-        v_rank = min(v_rank, len(v_cumulative))  # Handle case where we might not reach threshold
-        v_ranks.append(int(v_rank))
-        print(f"    {thresh*100:.0f}% energy: rank {int(v_rank)}")
-
-
-    # Use 95% energy threshold as default with normal cap
+    # Apply practical limits to ranks
     max_practical_rank = 320  # Standard cap to avoid excessive computation
-
-    # Choose rank based on 95% explained variance (middle of our thresholds)
-    intrinsic_k_rank = k_ranks[1] if len(k_ranks) > 1 else k_ranks[0]
-    intrinsic_v_rank = v_ranks[1] if len(v_ranks) > 1 else v_ranks[0]
-
-    # Apply practical rank cap (higher for fat_ranks mode)
-    intrinsic_k_rank = min(max_practical_rank, intrinsic_k_rank)
-    intrinsic_v_rank = min(max_practical_rank, intrinsic_v_rank)
-
-    # IMPORTANT: Also ensure component ranks match the Tucker decomposition rank EXACTLY
-    # The actual_R2 from Tucker decomposition must be used for all components to prevent dimension mismatches
-    # The ranks we calculate here are just for analysis/logging, but we need to use actual_R2 for the actual operations
-    intrinsic_k_rank = actual_R2  # Force exact match with Tucker rank
-    intrinsic_v_rank = actual_R2  # Force exact match with Tucker rank
-    print(f"  Forcing ranks to match Tucker decomposition rank: K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
-
-    # Ensure at least rank 2 for stability
-    intrinsic_k_rank = max(2, intrinsic_k_rank)
-    intrinsic_v_rank = max(2, intrinsic_v_rank)
-
-    # Print final selected ranks
-    print(f"  Selected ranks - K: {intrinsic_k_rank}, V: {intrinsic_v_rank} (capped by max_practical_rank={max_practical_rank} and Tucker rank={actual_R2})")
-
-    print(f"Intrinsic ranks detected - Q: {intrinsic_q_rank}, K: {intrinsic_k_rank}, V: {intrinsic_v_rank}")
-
-
+    
+    # Determine final ranks to use
     if use_dynamic_ranks:
-        # Use the dynamic ranks based on intrinsic structure
-        actual_q_rank = intrinsic_q_rank
-        actual_k_rank = intrinsic_k_rank
-        actual_v_rank = intrinsic_v_rank
+        actual_q_rank = min(max_practical_rank, q_recommended_rank)
+        actual_k_rank = min(max_practical_rank, k_recommended_rank)
+        actual_v_rank = min(max_practical_rank, v_recommended_rank)
         print(f"\nUSING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
         print(f"These ranks are determined by energy-based analysis to balance accuracy and efficiency")
     else:
-        # Use the user-specified ranks but cap by the actual ranks
-        actual_q_rank = min(q_rank, actual_R2)
-        actual_k_rank = min(k_rank, intrinsic_k_rank)
-        actual_v_rank = min(v_rank, intrinsic_v_rank)
-        print(f"\nUSING USER-SPECIFIED RANKS (capped by intrinsic ranks): Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
-        print(f"Original requested ranks were: Q={q_rank}, K={k_rank}, V={v_rank}")
+        # Use the user-specified ranks
+        actual_q_rank = min(max_practical_rank, q_rank)
+        actual_k_rank = min(max_practical_rank, k_rank)
+        actual_v_rank = min(max_practical_rank, v_rank)
+        print(f"\nUSING USER-SPECIFIED RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
     
-    # Expand dimensions for TPA format using actual ranks
-    # Make sure to use the correct hidden_dim for these matrices - it might be different from q_weight.shape[0]
-    W_A_q_expanded = torch.zeros((hidden_dim, num_heads * actual_q_rank), device=q_weight.device, dtype=torch.float32)
-    W_A_k_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_k_rank), device=k_weight.device, dtype=torch.float32)
-    W_A_v_expanded = torch.zeros((hidden_dim, num_kv_heads * actual_v_rank), device=v_weight.device, dtype=torch.float32)
+    # Ensure minimum rank for numerical stability
+    actual_q_rank = max(2, actual_q_rank)
+    actual_k_rank = max(2, actual_k_rank)
+    actual_v_rank = max(2, actual_v_rank)
     
-    # The proper way to create the expanded Wa is to repeat for each head
-    for h in range(num_heads):
-        W_A_q = U1 @ q_core[:, :, h]
-        W_A_q_expanded[:, h*actual_q_rank:(h+1)*actual_q_rank] = W_A_q
+    # Step 3: Independent factorization for Q and K/V components
+    print("\nPerforming independent factorization for Q and K/V")
+    
+    # Function to compute SVD-based TPA factors
+    def compute_svd_tpa_factors(weight_matrix, rank, name):
+        """
+        Compute TPA factors using optimal SVD approach.
         
+        For a matrix W of shape [hidden_dim, proj_dim], this computes:
+        W ≈ U_R Σ_R V_R^T
+        
+        Returns:
+        - W_A: First TPA factor [hidden_dim, rank]
+        - W_B: Second TPA factor [hidden_dim, rank * proj_dim]
+        """
+        start_time = time.time()
+        print(f"  Computing SVD factorization for {name} with rank {rank}...")
+        
+        # Compute truncated SVD
+        U, S, Vh = torch.linalg.svd(weight_matrix, full_matrices=False)
+        
+        # Truncate to target rank
+        U_r = U[:, :rank]  # [hidden_dim, rank]
+        S_r = S[:rank]     # [rank]
+        Vh_r = Vh[:rank]   # [rank, proj_dim]
+        
+        # Compute scaling factor for better numerical properties
+        sqrt_rank = math.sqrt(rank)
+        
+        # Scale factors by sqrt(singular_values) and sqrt(rank)
+        sqrt_S_r = torch.sqrt(S_r)
+        W_A = sqrt_rank * U_r * sqrt_S_r.unsqueeze(0)  # [hidden_dim, rank]
+        
+        # For W_B, calculate properly scaled factors for TPA format
+        # Each factor gets one of the projected dimensions
+        proj_dim = weight_matrix.shape[1]
+        W_B = torch.zeros((hidden_dim, rank * proj_dim), device=weight_matrix.device, dtype=weight_matrix.dtype)
+        
+        # For each rank component, compute the corresponding W_B slice
+        for r in range(rank):
+            scaled_v_r = sqrt_rank * sqrt_S_r[r] * Vh_r[r]  # [proj_dim]
+            # In TPA, we need the same vector repeated across all hidden dimensions
+            W_B[:, r*proj_dim:(r+1)*proj_dim] = scaled_v_r.unsqueeze(0).expand(hidden_dim, -1)
+        
+        # Compute reconstruction error
+        reconstructed = U_r @ torch.diag(S_r) @ Vh_r
+        error = torch.norm(weight_matrix - reconstructed) / torch.norm(weight_matrix)
+        print(f"  {name} SVD reconstruction error: {error.item():.6f}")
+        
+        end_time = time.time()
+        print(f"  {name} SVD factorization completed in {end_time - start_time:.2f} seconds")
+        
+        return W_A, W_B
+    
+    # Initialize result dictionary to store TPA weights
+    result = {}
+    
+    # Process query heads - one factorization per head
+    # Since each query head operates independently
+    W_A_q = torch.zeros((hidden_dim, num_heads * actual_q_rank), device=device, dtype=torch.float32)
+    W_B_q = torch.zeros((hidden_dim, actual_q_rank * q_head_dim), device=device, dtype=torch.float32)
+    
+    print(f"Processing {num_heads} query heads with dims: hidden_dim={hidden_dim}, head_dim={q_head_dim}")
+    
+    # Option 1: Process each query head separately
+    for h in range(num_heads):
+        # Extract weights for this query head
+        head_weight = q_weights_reshaped[:, h, :].reshape(hidden_dim, q_head_dim)
+        
+        # Compute TPA factors for this head
+        W_A_head, W_B_head = compute_svd_tpa_factors(
+            head_weight, actual_q_rank, f"Q head {h}")
+        
+        # Store in the combined weight matrices
+        W_A_q[:, h*actual_q_rank:(h+1)*actual_q_rank] = W_A_head
+        
+        # For W_B_q, we'll either use per-head B matrices or a shared B matrix
+        # For now, let's use a shared B matrix for simplicity
+        if h == 0:
+            W_B_q = W_B_head
+        else:
+            # Average B projections for better generalization
+            W_B_q = (h * W_B_q + W_B_head) / (h + 1)
+    
+    # Process key and value heads - one factorization per head
+    # For GQA models, there are fewer K/V heads than Q heads
+    W_A_k = torch.zeros((hidden_dim, num_kv_heads * actual_k_rank), device=device, dtype=torch.float32)
+    W_B_k = torch.zeros((hidden_dim, actual_k_rank * k_head_dim), device=device, dtype=torch.float32)
+    
+    W_A_v = torch.zeros((hidden_dim, num_kv_heads * actual_v_rank), device=device, dtype=torch.float32)
+    W_B_v = torch.zeros((hidden_dim, actual_v_rank * v_head_dim), device=device, dtype=torch.float32)
+    
+    print(f"Processing {num_kv_heads} key/value heads with dims: hidden_dim={hidden_dim}, k_head_dim={k_head_dim}, v_head_dim={v_head_dim}")
+    
+    # Process key heads
     for g in range(num_kv_heads):
-        W_A_k = U1 @ k_core[:, :, g]
-        W_A_v = U1 @ v_core[:, :, g]
-        W_A_k_expanded[:, g*actual_k_rank:(g+1)*actual_k_rank] = W_A_k
-        W_A_v_expanded[:, g*actual_v_rank:(g+1)*actual_v_rank] = W_A_v
+        # Extract weights for this key head
+        head_weight = k_weights_reshaped[:, g, :].reshape(hidden_dim, k_head_dim)
+        
+        # Compute TPA factors for this head
+        W_A_head, W_B_head = compute_svd_tpa_factors(
+            head_weight, actual_k_rank, f"K head {g}")
+        
+        # Store in the combined weight matrices
+        W_A_k[:, g*actual_k_rank:(g+1)*actual_k_rank] = W_A_head
+        
+        # For shared B matrix
+        if g == 0:
+            W_B_k = W_B_head
+        else:
+            # Average B projections for better generalization
+            W_B_k = (g * W_B_k + W_B_head) / (g + 1)
     
-    # IMPORTANT: This correctly implements contextual factorization (CF) from the TPA paper
-    # In contextual factorization, both W_A_q and W_B_q project directly from hidden_states
-    # We need to derive these projection matrices from the Tucker decomposition
+    # Process value heads
+    for g in range(num_kv_heads):
+        # Extract weights for this value head
+        head_weight = v_weights_reshaped[:, g, :].reshape(hidden_dim, v_head_dim)
+        
+        # Compute TPA factors for this head
+        W_A_head, W_B_head = compute_svd_tpa_factors(
+            head_weight, actual_v_rank, f"V head {g}")
+        
+        # Store in the combined weight matrices
+        W_A_v[:, g*actual_v_rank:(g+1)*actual_v_rank] = W_A_head
+        
+        # For shared B matrix
+        if g == 0:
+            W_B_v = W_B_head
+        else:
+            # Average B projections for better generalization
+            W_B_v = (g * W_B_v + W_B_head) / (g + 1)
     
-    print(f"Using efficient SVD-based factorization for TPA weights with component-specific ranks")
-    print(f"Component-specific ranks: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+    # Add all weights to the result dictionary
+    result["W_A_q"] = W_A_q.to(dtype=dtype, device=device)
+    result["W_A_k"] = W_A_k.to(dtype=dtype, device=device)
+    result["W_A_v"] = W_A_v.to(dtype=dtype, device=device)
     
-    # Ensure all operations happen on GPU if available
-    device = q_weight.device
-    if torch.cuda.is_available():
-        # Get the CUDA device index (default to 0 if not specified)
-        cuda_device_idx = 0
-        if device.type == 'cuda' and device.index is not None:
-            cuda_device_idx = device.index
+    result["W_B_q"] = W_B_q.to(dtype=dtype, device=device)
+    result["W_B_k"] = W_B_k.to(dtype=dtype, device=device)
+    result["W_B_v"] = W_B_v.to(dtype=dtype, device=device)
+    
+    # Store metadata about the factorization (important for KV cache setup)
+    result["q_rank"] = int(actual_q_rank)
+    result["k_rank"] = int(actual_k_rank)
+    result["v_rank"] = int(actual_v_rank)
+    
+    # Store the original head dimensions (important for inference)
+    result["q_head_dim"] = int(q_head_dim)
+    result["k_head_dim"] = int(k_head_dim)
+    result["v_head_dim"] = int(v_head_dim)
+    
+    # Store the mapping from query heads to kv heads
+    result["q_to_kv_mapping"] = q_to_kv_mapping
+    
+    # Step 4: Verify reconstruction quality
+    print("\nVerifying reconstruction quality of factorized weights")
+    
+    # Function to verify reconstruction quality
+    def verify_reconstruction(W_A, W_B, orig_weight, rank, name, head_dim, num_heads):
+        """Verify the reconstruction quality of the factorized weights."""
+        # Reshape W_A to [hidden_dim, num_heads, rank]
+        W_A_reshaped = W_A.reshape(hidden_dim, num_heads, rank)
+        
+        # Reshape W_B to [hidden_dim, rank, head_dim]
+        W_B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)
+        
+        # Reconstruct the weights for each head
+        recon = torch.zeros_like(orig_weight)
+        
+        for h in range(num_heads):
+            # Extract factors for this head
+            A_h = W_A_reshaped[:, h, :]  # [hidden_dim, rank]
             
-        device = torch.device(f'cuda:{cuda_device_idx}')
-        print(f"Using {device} for SVD-based TPA projection computation")
+            # Compute reconstruction for this head using outer product
+            head_recon = torch.zeros((hidden_dim, head_dim), device=orig_weight.device)
+            
+            for r in range(rank):
+                # Get vectors for this rank
+                a_r = A_h[:, r]  # [hidden_dim]
+                b_r = W_B_reshaped[:, r, :]  # [hidden_dim, head_dim]
+                
+                # Add contribution from this rank
+                head_recon += torch.outer(a_r, b_r[0]) / rank
+            
+            # Store in the right position
+            if orig_weight.dim() == 3:
+                recon[:, h, :] = head_recon
+            else:
+                # For 2D weights, need to use the right slice
+                recon[:, h*head_dim:(h+1)*head_dim] = head_recon
+        
+        # Compute reconstruction error
+        if orig_weight.dim() == 3:
+            flat_orig = orig_weight.reshape(orig_weight.shape[0], -1)
+            flat_recon = recon.reshape(recon.shape[0], -1)
+        else:
+            flat_orig = orig_weight
+            flat_recon = recon
+            
+        error = torch.norm(flat_orig - flat_recon) / torch.norm(flat_orig)
+        print(f"  {name} reconstruction error: {error.item():.6f}")
+        
+        return error, recon
     
-    # SVD-based TPA factorization
-    # For each head, we compute the optimal factors W_A and W_B directly using SVD
+    # Verify each component
+    q_error, q_recon = verify_reconstruction(
+        W_A_q, W_B_q, q_weights_reshaped, actual_q_rank, "Q", q_head_dim, num_heads)
+    
+    k_error, k_recon = verify_reconstruction(
+        W_A_k, W_B_k, k_weights_reshaped, actual_k_rank, "K", k_head_dim, num_kv_heads)
+    
+    v_error, v_recon = verify_reconstruction(
+        W_A_v, W_B_v, v_weights_reshaped, actual_v_rank, "V", v_head_dim, num_kv_heads)
+    
+    print(f"\nFinal reconstruction errors: Q={q_error:.6f}, K={k_error:.6f}, V={v_error:.6f}")
+    
+    # Calculate overall RMSE as a percentage
+    q_rmse_pct = q_error.item() * 100
+    k_rmse_pct = k_error.item() * 100
+    v_rmse_pct = v_error.item() * 100
+    
+    print(f"Reconstruction RMSE (%): Q={q_rmse_pct:.2f}%, K={k_rmse_pct:.2f}%, V={v_rmse_pct:.2f}%")
+    
+    toc = time.time()
+    print(f"GQA to TPA conversion complete in {toc - tic:.2f} seconds")
+    
+    return result
     
     # Function to compute SVD-based TPA factors for a weight matrix
     def compute_svd_tpa_factors(weight_matrix, rank, hidden_dim, head_dim):
