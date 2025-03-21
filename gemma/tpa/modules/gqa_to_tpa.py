@@ -358,57 +358,36 @@ def gqa_to_tpa_conversion(
         """Verify the reconstruction quality of the factorized TPA weights."""
         print(f"  Verifying {name} reconstruction...")
         
-        # Reshape orig_weight to 3D if needed for per-head assessment
+        # Reshape original weight for comparison
         if orig_weight.dim() == 2:
             # Reshape to [hidden_dim, num_heads, head_dim]
             orig_3d = orig_weight.reshape(orig_weight.shape[0], num_heads, head_dim)
         else:
             orig_3d = orig_weight
             
-        # Reshape W_A for per-head factorization
-        # W_A shape is [hidden_dim, num_heads * rank]
+        # Reshape factorized weights for vectorized computation
         W_A_reshaped = W_A.reshape(W_A.shape[0], num_heads, rank)
-        
-        # Reshape W_B - all heads share the same B factors in TPA
-        # W_B shape is [hidden_dim, rank * head_dim]
         W_B_reshaped = W_B.reshape(W_B.shape[0], rank, head_dim)
         
-        # Reconstruct using TPA formula
-        recon = torch.zeros_like(orig_3d)
+        # Use einsum for fully vectorized computation across all dimensions
+        # This single operation replaces all three nested loops
+        recon = torch.einsum('ihr,ird->ihd', W_A_reshaped, W_B_reshaped) / rank
         
-        # For each head
-        for h in range(num_heads):
-            # Get the factors for this head
-            A_h = W_A_reshaped[:, h, :]  # [hidden_dim, rank]
-            
-            # For each position in the hidden dimension
-            for pos in range(orig_3d.shape[0]):
-                # Get the A and B factors for this position
-                A_pos = A_h[pos]  # [rank]
-                B_pos = W_B_reshaped[pos]  # [rank, head_dim]
-                
-                # TPA reconstruction: 1/rank * ∑(A_r ⊗ B_r)
-                # For each rank component
-                for r in range(rank):
-                    # Outer product of A_r and B_r vectors
-                    a_r = A_pos[r]  # scalar
-                    b_r = B_pos[r]  # [head_dim]
-                    recon[pos, h] += (a_r * b_r) / rank
-        
-        # Compute error
-        flat_orig = orig_3d.reshape(-1)
-        flat_recon = recon.reshape(-1)
-        error = torch.norm(flat_orig - flat_recon) / torch.norm(flat_orig)
+        # Compute overall reconstruction error
+        error = torch.norm(orig_3d.reshape(-1) - recon.reshape(-1)) / torch.norm(orig_3d.reshape(-1))
         
         # Print per-head stats for multi-head case
         if num_heads > 1:
-            for h in range(min(num_heads, 4)):  # Show max 4 heads to avoid spam
-                head_orig = orig_3d[:, h, :]
-                head_recon = recon[:, h, :]
-                head_error = torch.norm(head_orig - head_recon) / torch.norm(head_orig)
-                print(f"    Head {h} error: {head_error.item():.6f}")
-                
-            # Additional heads summary if many heads
+            # Calculate errors per head in a vectorized way
+            head_errors = torch.stack([
+                torch.norm(orig_3d[:, h, :] - recon[:, h, :]) / torch.norm(orig_3d[:, h, :])
+                for h in range(min(num_heads, 4))  # Only compute for the heads we'll display
+            ])
+            
+            # Print the first few head errors
+            for h in range(min(num_heads, 4)):
+                print(f"    Head {h} error: {head_errors[h].item():.6f}")
+            
             if num_heads > 4:
                 print(f"    ... and {num_heads - 4} more heads")
         
