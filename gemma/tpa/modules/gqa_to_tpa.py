@@ -327,11 +327,32 @@ def gqa_to_tpa_conversion(
     print(f"Factorizing query projection with {num_heads} heads, head_dim={q_head_dim}")
     print(f"  Q weight shape: {q_weight.shape}, total projection dim: {q_proj_dim}")
     
-    # Initialize combined factors for Q
-    W_A_q = torch.zeros((hidden_dim, num_heads * actual_q_rank), 
+    # Pre-compute the maximum possible rank for each head
+    per_head_max_ranks = []
+    for h in range(num_heads):
+        head_weight = q_weights_reshaped[:, h, :]  # shape: [hidden_dim, q_head_dim]
+        head_max_rank = min(head_weight.shape[0], head_weight.shape[1])
+        head_rank = min(actual_q_rank, head_max_rank)
+        per_head_max_ranks.append(head_rank)
+    
+    # Get the maximum rank across all heads for allocating W_B
+    max_head_rank = max(per_head_max_ranks)
+    print(f"  Per-head maximum ranks: {per_head_max_ranks}, using max={max_head_rank} for W_B")
+    
+    # Initialize combined factors for Q - use actual per-head ranks
+    # Each head gets its own slice in W_A based on its calculated rank
+    total_q_rank = sum(per_head_max_ranks)
+    W_A_q = torch.zeros((hidden_dim, total_q_rank), 
                        device=q_weight.device, dtype=q_weight.dtype)
-    W_B_q = torch.zeros((hidden_dim, actual_q_rank * q_head_dim), 
+    
+    # W_B still needs to be fixed size for all heads in TPA implementation
+    W_B_q = torch.zeros((hidden_dim, max_head_rank * q_head_dim), 
                        device=q_weight.device, dtype=q_weight.dtype)
+    
+    # Track the offset in the W_A_q matrix for each head
+    head_offsets = [0]
+    for rank in per_head_max_ranks:
+        head_offsets.append(head_offsets[-1] + rank)
     
     # Loop over heads and factorize each independently
     q_factorization_errors = []
@@ -340,24 +361,30 @@ def gqa_to_tpa_conversion(
         # Extract this head's weight slice
         head_weight = q_weights_reshaped[:, h, :]  # shape: [hidden_dim, q_head_dim]
         
+        # Use the pre-computed rank for this head
+        head_rank = per_head_max_ranks[h]
+        print(f"  Using rank {head_rank} for head {h} (limited by head dimensions)")
+        
         # Factorize this head independently with num_heads=1 since we're processing one head at a time
         W_A_head, W_B_head = compute_svd_tpa_factors(
-            head_weight, actual_q_rank, f"Q-head-{h}", q_head_dim, num_heads=1)
+            head_weight, head_rank, f"Q-head-{h}", q_head_dim, num_heads=1)
         
-        # Store in the combined matrices
-        W_A_q[:, h*actual_q_rank:(h+1)*actual_q_rank] = W_A_head
+        # Store in the combined matrices at the correct offset
+        start_idx = head_offsets[h]
+        end_idx = head_offsets[h+1]
+        W_A_q[:, start_idx:end_idx] = W_A_head
         
         # For W_B, we need consistent factors for the TPA implementation
-        # So we store each head's factors in their proper slice
-        for r in range(actual_q_rank):
+        # Only store up to the actual rank used for this head
+        for r in range(min(head_rank, max_head_rank)):
             start_idx = r * q_head_dim
             end_idx = (r + 1) * q_head_dim
             head_factor = W_B_head[:, start_idx:end_idx]
             # Store this rank component in the global W_B
             W_B_q[:, start_idx:end_idx] = head_factor
             
-        # Compute reconstruction error for this head
-        reconstructed = torch.matmul(W_A_head, W_B_head.reshape(-1, actual_q_rank * q_head_dim)).div(actual_q_rank)
+        # Compute reconstruction error for this head using the actual rank
+        reconstructed = torch.matmul(W_A_head, W_B_head.reshape(-1, head_rank * q_head_dim)).div(head_rank)
         head_error = torch.norm(head_weight - reconstructed) / torch.norm(head_weight)
         q_factorization_errors.append(head_error.item())
         print(f"  Query head {h} factorization error: {head_error.item():.6f}")
@@ -387,8 +414,13 @@ def gqa_to_tpa_conversion(
     result["W_B_k"] = W_B_k.to(dtype=dtype, device=device)
     result["W_B_v"] = W_B_v.to(dtype=dtype, device=device)
     
+    # Store the per-head ranks and offsets for Q (critical for correct inference)
+    result["q_per_head_ranks"] = per_head_max_ranks
+    result["q_head_offsets"] = head_offsets
+    result["q_max_head_rank"] = int(max_head_rank)
+    
     # Store the effective ranks used (important for KV cache setup)
-    result["q_rank"] = int(actual_q_rank)
+    result["q_rank"] = int(max_head_rank)  # Use max rank for compatibility
     result["k_rank"] = int(actual_k_rank)
     result["v_rank"] = int(actual_v_rank)
     
@@ -441,14 +473,20 @@ def gqa_to_tpa_conversion(
     q_head_errors = []
     q_head_recons = []
     
+    # Use different slices of W_A_q for each head based on its rank
     for h in range(num_heads):
-        # Extract this head's original weights and factorized components
+        # Extract this head's original weights
         head_orig = q_weights_reshaped[:, h, :]
-        head_W_A = W_A_q[:, h*actual_q_rank:(h+1)*actual_q_rank]
+        
+        # Get the appropriate slice of W_A_q for this head
+        start_idx = head_offsets[h]
+        end_idx = head_offsets[h+1]
+        head_rank = per_head_max_ranks[h]
+        head_W_A = W_A_q[:, start_idx:end_idx]
         
         # Use the same W_B factors across all heads (TPA format requirement)
         head_error, head_recon = verify_tpa_reconstruction(
-            head_W_A, W_B_q, head_orig, actual_q_rank, f"Q-head-{h}", q_head_dim, 1)
+            head_W_A, W_B_q, head_orig, head_rank, f"Q-head-{h}", q_head_dim, 1)
             
         q_head_errors.append(head_error.item())
         q_head_recons.append(head_recon)
@@ -457,10 +495,16 @@ def gqa_to_tpa_conversion(
     avg_q_error = sum(q_head_errors) / len(q_head_errors)
     print(f"Average Q head reconstruction error: {avg_q_error:.6f} ({avg_q_error*100:.2f}%)")
     
-    # Also verify entire Q weights together (should be consistent with per-head results)
-    print("\nVerifying reconstruction quality of COMBINED factorized weights:")
-    q_error, q_recon = verify_tpa_reconstruction(
-        W_A_q, W_B_q, q_weights_reshaped, actual_q_rank, "Q-combined", q_head_dim, num_heads)
+    # We can't directly verify the entire Q reconstruction with our modified layout
+    # Instead, reconstruct a combined result by concatenating head reconstructions
+    q_combined_recon = torch.zeros_like(q_weights_reshaped)
+    for h in range(num_heads):
+        q_combined_recon[:, h, :] = q_head_recons[h]
+        
+    # Calculate overall error on the combined reconstruction
+    q_error = torch.norm(q_weights_reshaped.reshape(-1) - q_combined_recon.reshape(-1)) / torch.norm(q_weights_reshaped.reshape(-1))
+    print(f"\nVerifying reconstruction quality of COMBINED factorized weights:")
+    print(f"Q combined reconstruction error: {q_error.item():.6f} ({q_error.item()*100:.2f}%)")
     
     # Verify key weights
     k_error, k_recon = verify_tpa_reconstruction(
@@ -479,7 +523,9 @@ def gqa_to_tpa_conversion(
     print(f"  Per-head details: {', '.join([f'Head {i}: {err*100:.2f}%' for i, err in enumerate(q_head_errors)])}")
     print(f"  K: {k_error.item()*100:.2f}%, V: {v_error.item()*100:.2f}%")
     print(f"Used head dimensions: Q={q_head_dim}, K={k_head_dim}, V={v_head_dim}")
-    print(f"Used ranks: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+    print(f"Used per-head ranks for Q: {per_head_max_ranks}")
+    print(f"Used ranks: Q max={max_head_rank}, K={actual_k_rank}, V={actual_v_rank}")
+    print(f"Total Q rank used: {total_q_rank} (sum of per-head ranks)")
     
     return result
 
