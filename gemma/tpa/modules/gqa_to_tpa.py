@@ -322,17 +322,59 @@ def gqa_to_tpa_conversion(
         
         return W_A, W_B
     
-    # Process query heads - with proper query dimensions
+    # Process query heads - with proper query dimensions by factorizing each head SEPARATELY
+    # This is critical for GQA models where q_head_dim may differ from kv_head_dim
     print(f"Factorizing query projection with {num_heads} heads, head_dim={q_head_dim}")
-    W_A_q, W_B_q = compute_svd_tpa_factors(
-        q_weight, actual_q_rank, "Q", q_head_dim, num_heads)
+    print(f"  Q weight shape: {q_weight.shape}, total projection dim: {q_proj_dim}")
+    
+    # Initialize combined factors for Q
+    W_A_q = torch.zeros((hidden_dim, num_heads * actual_q_rank), 
+                       device=q_weight.device, dtype=q_weight.dtype)
+    W_B_q = torch.zeros((hidden_dim, actual_q_rank * q_head_dim), 
+                       device=q_weight.device, dtype=q_weight.dtype)
+    
+    # Loop over heads and factorize each independently
+    q_factorization_errors = []
+    for h in range(num_heads):
+        print(f"  Factorizing query head {h}/{num_heads}...")
+        # Extract this head's weight slice
+        head_weight = q_weights_reshaped[:, h, :]  # shape: [hidden_dim, q_head_dim]
+        
+        # Factorize this head independently with num_heads=1 since we're processing one head at a time
+        W_A_head, W_B_head = compute_svd_tpa_factors(
+            head_weight, actual_q_rank, f"Q-head-{h}", q_head_dim, num_heads=1)
+        
+        # Store in the combined matrices
+        W_A_q[:, h*actual_q_rank:(h+1)*actual_q_rank] = W_A_head
+        
+        # For W_B, we need consistent factors for the TPA implementation
+        # So we store each head's factors in their proper slice
+        for r in range(actual_q_rank):
+            start_idx = r * q_head_dim
+            end_idx = (r + 1) * q_head_dim
+            head_factor = W_B_head[:, start_idx:end_idx]
+            # Store this rank component in the global W_B
+            W_B_q[:, start_idx:end_idx] = head_factor
+            
+        # Compute reconstruction error for this head
+        reconstructed = torch.matmul(W_A_head, W_B_head.reshape(-1, actual_q_rank * q_head_dim)).div(actual_q_rank)
+        head_error = torch.norm(head_weight - reconstructed) / torch.norm(head_weight)
+        q_factorization_errors.append(head_error.item())
+        print(f"  Query head {h} factorization error: {head_error.item():.6f}")
+    
+    # Report average error across all query heads
+    avg_q_error = sum(q_factorization_errors) / len(q_factorization_errors)
+    print(f"  Average query head factorization error: {avg_q_error:.6f} ({avg_q_error*100:.2f}%)")
     
     # Process key and value heads with their own dimensions
+    # For these we can use the original function since they typically have consistent dimensions
     print(f"Factorizing key projection with {num_kv_heads} KV heads, head_dim={k_head_dim}")
+    print(f"  K weight shape: {k_weight.shape}, total projection dim: {k_proj_dim}")
     W_A_k, W_B_k = compute_svd_tpa_factors(
         k_weight, actual_k_rank, "K", k_head_dim, num_kv_heads)
     
     print(f"Factorizing value projection with {num_kv_heads} KV heads, head_dim={v_head_dim}")
+    print(f"  V weight shape: {v_weight.shape}, total projection dim: {v_proj_dim}")
     W_A_v, W_B_v = compute_svd_tpa_factors(
         v_weight, actual_v_rank, "V", v_head_dim, num_kv_heads)
     
@@ -394,9 +436,31 @@ def gqa_to_tpa_conversion(
         print(f"  {name} overall reconstruction error: {error.item():.6f} ({error.item()*100:.2f}%)")
         return error, recon
     
-    # Verify query weights
+    # Verify query weights per head first
+    print("\nVerifying reconstruction quality of query weights PER HEAD:")
+    q_head_errors = []
+    q_head_recons = []
+    
+    for h in range(num_heads):
+        # Extract this head's original weights and factorized components
+        head_orig = q_weights_reshaped[:, h, :]
+        head_W_A = W_A_q[:, h*actual_q_rank:(h+1)*actual_q_rank]
+        
+        # Use the same W_B factors across all heads (TPA format requirement)
+        head_error, head_recon = verify_tpa_reconstruction(
+            head_W_A, W_B_q, head_orig, actual_q_rank, f"Q-head-{h}", q_head_dim, 1)
+            
+        q_head_errors.append(head_error.item())
+        q_head_recons.append(head_recon)
+    
+    # Compute average error across all heads
+    avg_q_error = sum(q_head_errors) / len(q_head_errors)
+    print(f"Average Q head reconstruction error: {avg_q_error:.6f} ({avg_q_error*100:.2f}%)")
+    
+    # Also verify entire Q weights together (should be consistent with per-head results)
+    print("\nVerifying reconstruction quality of COMBINED factorized weights:")
     q_error, q_recon = verify_tpa_reconstruction(
-        W_A_q, W_B_q, q_weights_reshaped, actual_q_rank, "Q", q_head_dim, num_heads)
+        W_A_q, W_B_q, q_weights_reshaped, actual_q_rank, "Q-combined", q_head_dim, num_heads)
     
     # Verify key weights
     k_error, k_recon = verify_tpa_reconstruction(
@@ -409,7 +473,11 @@ def gqa_to_tpa_conversion(
     # Finish timing and return
     toc = time.time()
     print(f"\nGQA to TPA conversion complete in {toc - tic:.2f} seconds")
-    print(f"Final reconstruction errors: Q={q_error.item()*100:.2f}%, K={k_error.item()*100:.2f}%, V={v_error.item()*100:.2f}%")
+    print(f"Final reconstruction errors:")
+    print(f"  Q combined: {q_error.item()*100:.2f}%")
+    print(f"  Q per-head average: {avg_q_error*100:.2f}%")
+    print(f"  Per-head details: {', '.join([f'Head {i}: {err*100:.2f}%' for i, err in enumerate(q_head_errors)])}")
+    print(f"  K: {k_error.item()*100:.2f}%, V: {v_error.item()*100:.2f}%")
     print(f"Used head dimensions: Q={q_head_dim}, K={k_head_dim}, V={v_head_dim}")
     print(f"Used ranks: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
     
