@@ -231,19 +231,24 @@ class TPAAttention(nn.Module):
             # Reshape to [batch*rank, seq_len, head_dim]
             x_reshaped = x.transpose(1, 2).reshape(batch_size * rank, seq_len, head_dim)
             
-            # Apply standard RoPE which expects [batch, seq_len, head_dim]
-            # Split into real/imaginary components
+            # Use chunk and stack like the standard implementation
+            # This explicitly splits the head dimension in half to create the real/imag parts
             x_complex = torch.view_as_complex(
-                x_reshaped.float().reshape(*x_reshaped.shape[:-1], -1, 2)
+                torch.stack(torch.chunk(x_reshaped.float(), 2, dim=-1), dim=-1)
             )
-            # Apply complex multiplication with frequency components
+            
+            # Properly expand freqs_cis for complex multiplication
             freqs_cis = freqs_cis.unsqueeze(0).expand(x_complex.shape[0], -1, -1)
-            x_rotated = torch.view_as_real(x_complex * freqs_cis).flatten(2)
             
-            # Reshape back to original format [batch, seq_len, rank, head_dim]
-            x_output = x_rotated.reshape(batch_size, rank, seq_len, head_dim).transpose(1, 2)
+            # Apply complex multiplication
+            x_rotated = torch.view_as_real(x_complex * freqs_cis)
             
-            return x_output.type_as(x)
+            # Reshape using a sequence similar to the standard implementation
+            # This preserves the structure needed for proper rotary embedding
+            x_rotated = torch.cat(torch.chunk(x_rotated, 2, dim=-1), dim=-2)
+            x_rotated = x_rotated.reshape(batch_size, rank, seq_len, head_dim).transpose(1, 2)
+            
+            return x_rotated.type_as(x)
         
         # Apply our TPA-specific RoPE function
         B_q = apply_rotary_emb_to_B(B_q, freqs_cis)
