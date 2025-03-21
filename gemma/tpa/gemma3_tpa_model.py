@@ -916,15 +916,21 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
             image_batch = None
             image_presence_mask = None
         
-        # Decode generated tokens
+        # Decode generated tokens - only return the generated part (not the prompt)
         token_ids = token_ids_tensor.tolist()
         results = []
         for i, tokens in enumerate(token_ids):
-            output = tokens
-            if self.tokenizer.eos_id in output:
-                eos_index = output.index(self.tokenizer.eos_id)
-                output = output[:eos_index]
-            results.append(self.tokenizer.decode(output))
+            # Extract only the generated tokens, excluding the prompt
+            prompt_len = len(token_ids_list[i]) if 'token_ids_list' in locals() else min_prompt_len
+            generated_tokens = tokens[prompt_len:prompt_len + max_tokens]
+            
+            # Truncate at eos token if present
+            if self.tokenizer.eos_id in generated_tokens:
+                eos_index = generated_tokens.index(self.tokenizer.eos_id)
+                generated_tokens = generated_tokens[:eos_index]
+                
+            # Decode only the generated response
+            results.append(self.tokenizer.decode(generated_tokens))
         
         return results
 
