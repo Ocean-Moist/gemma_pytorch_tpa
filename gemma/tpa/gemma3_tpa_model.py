@@ -228,27 +228,41 @@ class TPAAttention(nn.Module):
             # x shape: [batch, seq_len, rank, head_dim]
             batch_size, seq_len, rank, head_dim = x.shape
             
-            # Reshape to [batch*rank, seq_len, head_dim]
-            x_reshaped = x.transpose(1, 2).reshape(batch_size * rank, seq_len, head_dim)
+            # We need to ensure we're only treating the head_dim as complex pairs
+            # First, verify head_dim is even (required for complex representation)
+            if head_dim % 2 != 0:
+                raise ValueError(f"Head dimension {head_dim} must be even for RoPE")
+                
+            half_dim = head_dim // 2
             
-            # Use chunk and stack like the standard implementation
-            # This explicitly splits the head dimension in half to create the real/imag parts
-            x_complex = torch.view_as_complex(
-                torch.stack(torch.chunk(x_reshaped.float(), 2, dim=-1), dim=-1)
-            )
+            # Process each rank separately to avoid dimension mixing
+            # This prevents scrambling the real/imaginary parts
+            output = torch.zeros_like(x)
             
-            # Properly expand freqs_cis for complex multiplication
-            freqs_cis = freqs_cis.unsqueeze(0).expand(x_complex.shape[0], -1, -1)
+            # Loop over ranks to avoid flattening/mixing dimensions
+            for r in range(rank):
+                # Extract just this rank: [batch, seq_len, head_dim]
+                x_r = x[:, :, r, :]
+                
+                # Apply standard RoPE directly to this rank slice
+                # Split head_dim into real/imaginary parts
+                x_complex = torch.view_as_complex(
+                    torch.stack(torch.chunk(x_r.float(), 2, dim=-1), dim=-1)
+                )
+                
+                # Apply complex multiplication
+                x_rotated = torch.view_as_real(x_complex * freqs_cis)
+                
+                # Correctly reshape back to [batch, seq_len, head_dim]
+                # avoiding any operations that might mix dimensions
+                x_rotated = torch.cat(torch.chunk(x_rotated, 2, dim=-1), dim=-2)
+                x_rotated = x_rotated.reshape(batch_size, seq_len, head_dim)
+                
+                # Store the result in the original rank's position
+                output[:, :, r, :] = x_rotated
             
-            # Apply complex multiplication
-            x_rotated = torch.view_as_real(x_complex * freqs_cis)
-            
-            # Reshape using a sequence similar to the standard implementation
-            # This preserves the structure needed for proper rotary embedding
-            x_rotated = torch.cat(torch.chunk(x_rotated, 2, dim=-1), dim=-2)
-            x_rotated = x_rotated.reshape(batch_size, rank, seq_len, head_dim).transpose(1, 2)
-            
-            return x_rotated.type_as(x)
+            # Return with the original data type, now that we're back to a pure real tensor
+            return output.type_as(x)
         
         # Apply our TPA-specific RoPE function
         B_q = apply_rotary_emb_to_B(B_q, freqs_cis)
