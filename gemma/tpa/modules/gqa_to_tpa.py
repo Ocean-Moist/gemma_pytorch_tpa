@@ -1442,22 +1442,22 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
     # Set the tokenizer if available
     if hasattr(standard_model, 'tokenizer'):
         tpa_model.tokenizer = standard_model.tokenizer
-    # print out distro of weights in each layer
-    for name, module in tpa_model.named_modules():
-        if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
-            print(f"  Found factorized module: {name}")
-            for key in dir(module):
-                if key.startswith(('W_A_', 'W_B_')):
-                    weight = getattr(module, key)
-                    if hasattr(weight, 'data'):
-                        weight_data = weight.data
-                    elif hasattr(weight, 'weight'):
-                        weight_data = weight.weight
-                    else:
-                        print(f"  Warning: Could not get tensor data for {key}")
-                        continue
-                    print(f"  {key} weight distribution: {weight_data.abs().mean().item():.4f} mean, {weight_data.abs().std().item():.4f} std")
-
+    # # print out distro of weights in each layer
+    # for name, module in tpa_model.named_modules():
+    #     if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
+    #         print(f"  Found factorized module: {name}")
+    #         for key in dir(module):
+    #             if key.startswith(('W_A_', 'W_B_')):
+    #                 weight = getattr(module, key)
+    #                 if hasattr(weight, 'data'):
+    #                     weight_data = weight.data
+    #                 elif hasattr(weight, 'weight'):
+    #                     weight_data = weight.weight
+    #                 else:
+    #                     print(f"  Warning: Could not get tensor data for {key}")
+    #                     continue
+    #                 print(f"  {key} weight distribution: {weight_data.abs().mean().item():.4f} mean, {weight_data.abs().std().item():.4f} std")
+    #
     end_time = time.time()
     print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
     
