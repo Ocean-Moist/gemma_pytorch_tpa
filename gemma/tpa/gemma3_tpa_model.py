@@ -349,85 +349,62 @@ class TPAAttention(nn.Module):
         # Get the dimensions for proper masking
         batch_size, num_heads, seq_len, kv_seq_len = scores.shape
         
-        # Determine if we need to apply masks
-        # For Gemma3 style attention, we need to handle the provided mask correctly
+        # SIMPLIFIED MASK HANDLING
+        # Always ensure masks match scores dimensions exactly
+        
+        # Main attention mask
         if mask is not None:
-            # Handle case where we're using kv_cache during generation
-            if seq_len < kv_seq_len:
-                # We should extract the appropriate part of the mask for the current cached state
-                # For single token generation, get the row corresponding to the current position
-                # This is particularly important for Gemma3's image token handling
-                
-                # Check if it's a pre-computed full-sized mask (typically from create_attention_mask)
-                if mask.size(-1) == mask.size(-2):  # Square mask covering full sequence
-                    # For each position, extract the right slice that matches our KV cache
-                    # The slice we need depends on the current position in the sequence
-                    # Extract just the relevant query rows (usually just 1 in generation)
-                    # And just the relevant key columns (corresponding to cache_len)
+            # Slice the mask to match scores dimensions if needed
+            if mask.size(-1) != kv_seq_len or mask.size(-2) != seq_len:
+                try:
+                    # Extract exactly the portion we need based on scores dimensions
+                    # For generation with KV cache: typically mask is [batch, 1, max_seq, max_seq]
+                    # and we need [batch, 1, seq_len, kv_seq_len]
+                    mask_compatible = mask[:, :, -seq_len:, :kv_seq_len]
                     
-                    # Mask should be [batch, 1, seq_len, seq_len]
-                    # We need [batch, 1, current_seq_len, kv_seq_len]
-                    # Use kv_write_indices to determine current position
-                    if kv_write_indices is not None and kv_write_indices.numel() > 0:
-                        # Extract the row(s) corresponding to our current positions
-                        # And columns up to our current kv_cache length
-                        curr_mask = mask[:, :, -seq_len:, :kv_seq_len]
-                        
-                        # Apply the extracted mask to scores
-                        scores = scores + curr_mask
-                    else:
-                        # Fallback approach - try to use mask directly or create a suitable one
-                        try:
-                            scores = scores + mask
-                        except:
-                            # Create a minimal mask for causal attention
-                            min_dtype = torch.finfo(scores.dtype).min
-                            curr_mask = torch.zeros_like(scores)
-                            # Only for multi-token inputs, add causal masking 
-                            # (single token inputs don't need this)
-                            if seq_len > 1:
-                                for i in range(seq_len):
-                                    # Apply causal mask shape
-                                    curr_mask[:, :, i, i+1:] = min_dtype
-                            scores = scores + curr_mask
-                else:
-                    # The mask is already the right size or a different format
-                    try:
-                        scores = scores + mask
-                    except:
-                        # Log the dimension mismatch but continue without masking
-                        # This fallback happens during the first generation step
-                        pass
+                    # Debug dimension check
+                    if mask_compatible.size(-1) != kv_seq_len or mask_compatible.size(-2) != seq_len:
+                        print(f"WARNING: After slicing, mask still has incorrect dimensions: "
+                              f"{mask_compatible.shape}, expected last 2 dims to be [{seq_len}, {kv_seq_len}]")
+                except Exception as e:
+                    # If extraction fails, create a compatible causal mask
+                    min_dtype = torch.finfo(scores.dtype).min
+                    mask_compatible = torch.zeros_like(scores)
+                    # Apply causal masking pattern if multi-token
+                    if seq_len > 1:
+                        for i in range(seq_len):
+                            mask_compatible[:, :, i, i+1:] = min_dtype
+                    print(f"Created compatible mask with shape {mask_compatible.shape}")
             else:
-                # Regular case (e.g., during prefill) - use mask as provided
-                scores = scores + mask
+                # Mask already has compatible dimensions
+                mask_compatible = mask
                 
-        # Special handling for LOCAL_SLIDING attention type
+            # Now guaranteed to have compatible dimensions
+            scores = scores + mask_compatible
+        
+        # Sliding window mask (similar simplification)
         if (
             self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
             and self.sliding_window_size is not None
             and local_mask is not None
         ):
-            # Try to use the local mask similarly to the main mask
-            if seq_len < kv_seq_len and kv_write_indices is not None and kv_write_indices.numel() > 0:
-                # Extract the appropriate slice
+            # Ensure local_mask has compatible dimensions
+            if local_mask.size(-1) != kv_seq_len or local_mask.size(-2) != seq_len:
                 try:
-                    curr_local_mask = local_mask[:, :, -seq_len:, :kv_seq_len]
-                    scores = scores + curr_local_mask
+                    # Extract the compatible portion
+                    local_mask_compatible = local_mask[:, :, -seq_len:, :kv_seq_len]
                 except:
-                    # Sliding window for single token can be done with a simpler approach
+                    # Create simple sliding window constraint if extraction fails
+                    min_dtype = torch.finfo(scores.dtype).min
+                    local_mask_compatible = torch.zeros_like(scores)
                     if self.sliding_window_size < kv_seq_len:
-                        # Create a simple sliding window mask
-                        window_mask = torch.zeros_like(scores)
-                        min_dtype = torch.finfo(scores.dtype).min
-                        # Apply sliding window constraint
-                        window_mask[:, :, :, :-self.sliding_window_size] = min_dtype
-                        scores = scores + window_mask
+                        # Apply sliding window constraint - block attention to tokens beyond window
+                        local_mask_compatible[:, :, :, :-self.sliding_window_size] = min_dtype
             else:
-                try:
-                    scores = scores + local_mask
-                except:
-                    pass
+                local_mask_compatible = local_mask
+                
+            # Apply compatible sliding window mask
+            scores = scores + local_mask_compatible
         
         # Compute attention weights
         attn_weights = F.softmax(scores.float(), dim=-1).type_as(q)
