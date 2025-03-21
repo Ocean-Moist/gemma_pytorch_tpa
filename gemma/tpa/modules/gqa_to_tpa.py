@@ -384,20 +384,14 @@ def gqa_to_tpa_conversion(
             W_B_q[:, start_idx:end_idx] = head_factor
             
         # Compute reconstruction error for this head using proper TPA reconstruction
-        # TPA reconstruction requires special handling - can't use simple matrix multiply
-        reconstructed = torch.zeros_like(head_weight)
+        # Vectorized TPA reconstruction using einsum
+        # Reshape tensors for efficient computation
+        A_reshaped = W_A_head.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+        B_reshaped = W_B_head.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
         
-        # TPA reconstruction formula: for each position, compute sum(A_pos[r] * B_pos[r]) / rank
-        for pos in range(hidden_dim):
-            # Get the A and B factors for this position
-            A_pos = W_A_head[pos]  # [head_rank]
-            B_pos = W_B_head[pos].reshape(head_rank, q_head_dim)  # [head_rank, q_head_dim]
-            
-            # Compute the outer product sum for TPA reconstruction
-            for r in range(head_rank):
-                a_r = A_pos[r]  # scalar
-                b_r = B_pos[r]  # [q_head_dim]
-                reconstructed[pos] += (a_r * b_r) / head_rank
+        # Einstein summation computes the TPA reconstruction all at once
+        # For each position i: sum_r (A[i,r] * B[i,r]) / rank
+        reconstructed = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
         
         # Compute error
         head_error = torch.norm(head_weight - reconstructed) / torch.norm(head_weight)
@@ -454,45 +448,30 @@ def gqa_to_tpa_conversion(
         else:
             orig_3d = orig_weight
             
-        # For TPA reconstruction, we need to do it position by position
-        # Initialize reconstruction tensor
-        recon = torch.zeros_like(orig_3d)
         hidden_dim = orig_3d.shape[0]
         
-        # TPA factorization uses position-wise outer products
-        # First reshape W_A and W_B properly
+        # Check if this is the standard case or a special slice for a single head
         if W_A.shape[1] == num_heads * rank:
-            # Standard case where W_A has shape [hidden_dim, num_heads * rank]
+            # Standard case: reshape W_A to [hidden_dim, num_heads, rank]
             W_A_reshaped = W_A.reshape(hidden_dim, num_heads, rank)
+            
+            # Reshape W_B to [hidden_dim, rank, head_dim]
+            W_B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)
+            
+            # Use efficient einsum for TPA reconstruction
+            # This computes for all heads at once: sum_r (A[i,h,r] * B[i,r,d]) / rank
+            recon = torch.einsum('ihr,ird->ihd', W_A_reshaped, W_B_reshaped) / rank
+            
         else:
-            # Variable rank case where head ranks are different (only for Q in GQA)
-            # Here we assume the offsets are calculated properly
-            W_A_reshaped = None  # We'll handle this differently
-        
-        W_B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)
-        
-        # For each head
-        for h in range(num_heads):
-            # For each position in the hidden dimension
-            for pos in range(hidden_dim):
-                # Get A factors for this head and position
-                if W_A_reshaped is not None:
-                    # Standard case
-                    A_pos = W_A_reshaped[pos, h]  # [rank]
-                else:
-                    # Variable rank case - handle directly from W_A
-                    # Here we assume W_A is already sliced correctly for this head
-                    A_pos = W_A[pos]  # [rank]
-                
-                # Get B factors for this position
-                B_pos = W_B_reshaped[pos]  # [rank, head_dim]
-                
-                # TPA reconstruction: 1/rank * ∑(A_r ⊗ B_r)
-                for r in range(rank):
-                    # Outer product of A_r and B_r vectors
-                    a_r = A_pos[r]  # scalar
-                    b_r = B_pos[r]  # [head_dim]
-                    recon[pos, h] += (a_r * b_r) / rank
+            # Special case: W_A is already sliced for a specific head
+            # We assume num_heads=1 in this case
+            
+            # Reshape for efficient computation
+            A_reshaped = W_A.view(hidden_dim, 1, rank)  # [hidden_dim, 1, rank]
+            B_reshaped = W_B.reshape(hidden_dim, rank, head_dim)  # [hidden_dim, rank, head_dim]
+            
+            # Use einsum for fast vectorized computation
+            recon = torch.einsum('ipr,ird->ipd', A_reshaped, B_reshaped).squeeze(1) / rank
         
         # Compute overall reconstruction error
         error = torch.norm(orig_3d.reshape(-1) - recon.reshape(-1)) / torch.norm(orig_3d.reshape(-1))
@@ -515,12 +494,18 @@ def gqa_to_tpa_conversion(
         print(f"  {name} overall reconstruction error: {error.item():.6f} ({error.item()*100:.2f}%)")
         return error, recon
     
-    # Verify query weights per head first
+    # Verify query weights per head first - using batch operations
     print("\nVerifying reconstruction quality of query weights PER HEAD:")
-    q_head_errors = []
-    q_head_recons = []
     
-    # Use different slices of W_A_q for each head based on its rank
+    # Pre-allocate tensors for all results
+    q_head_errors = []
+    q_head_recons = [None] * num_heads
+    
+    # Process head verification in batches where possible to maximize throughput
+    print(f"  Beginning verification of {num_heads} query heads with optimized batch operations...")
+    start_time = time.time()
+    
+    # Loop through heads but process in parallel where possible
     for h in range(num_heads):
         # Extract this head's original weights
         head_orig = q_weights_reshaped[:, h, :]
@@ -534,27 +519,44 @@ def gqa_to_tpa_conversion(
         # Create a sliced W_B for this head's rank
         head_W_B = W_B_q[:, :head_rank*q_head_dim]
         
-        # Use a modified verification function that knows we're working with a single head
-        print(f"  Verifying head {h} with rank {head_rank}...")
+        # Vectorized TPA reconstruction - use direct tensor operations 
+        # This is the fastest way to compute TPA reconstruction
         
-        # Initialize reconstruction tensor
-        head_recon = torch.zeros_like(head_orig)
-        
-        # Manual TPA reconstruction for this head
-        for pos in range(hidden_dim):
-            A_pos = head_W_A[pos]  # [head_rank]
-            B_pos = head_W_B[pos].reshape(head_rank, q_head_dim)  # [head_rank, q_head_dim]
+        # Special handling for the common case where head_rank is a power of 2
+        if (head_rank & (head_rank-1) == 0) and head_rank > 0:  # Check if power of 2
+            # Use specialized reshape + bmm for maximum GPU efficiency
+            A_flat = head_W_A.view(-1, head_rank)  # [hidden_dim, head_rank]
+            B_flat = head_W_B.view(hidden_dim*head_rank, q_head_dim)  # [hidden_dim*head_rank, q_head_dim]
             
-            # Compute outer product sum
-            for r in range(head_rank):
-                head_recon[pos] += (A_pos[r] * B_pos[r]) / head_rank
+            # Reshape A for batch matrix multiplication
+            A_bmm = A_flat.unsqueeze(2)  # [hidden_dim, head_rank, 1]
+            
+            # Reshape B to group by position
+            B_bmm = B_flat.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            
+            # Batch matrix multiply and sum - this utilizes optimized GEMM kernels
+            head_recon = torch.bmm(A_bmm.transpose(1,2), B_bmm).squeeze(1) / head_rank
+        else:
+            # Standard case - use einsum which is highly optimized for GPU
+            A_reshaped = head_W_A.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+            B_reshaped = head_W_B.view(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            head_recon = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
         
-        # Compute error
+        # Compute error using direct norm
         head_error = torch.norm(head_orig - head_recon) / torch.norm(head_orig)
-        print(f"  Head {h} reconstruction error: {head_error.item():.6f} ({head_error.item()*100:.2f}%)")
         
+        # Store results
         q_head_errors.append(head_error.item())
-        q_head_recons.append(head_recon)
+        q_head_recons[h] = head_recon
+    
+    # Report timing information
+    end_time = time.time()
+    verification_time = end_time - start_time
+    print(f"  Completed {num_heads} head verifications in {verification_time:.4f} seconds")
+    
+    # Report individual head errors
+    for h in range(num_heads):
+        print(f"  Head {h} reconstruction error: {q_head_errors[h]:.6f} ({q_head_errors[h]*100:.2f}%)")
     
     # Compute average error across all heads
     avg_q_error = sum(q_head_errors) / len(q_head_errors)

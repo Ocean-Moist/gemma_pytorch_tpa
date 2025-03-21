@@ -136,16 +136,16 @@ class TPAAttention(nn.Module):
         self.cache_vA = None
         self.cache_vB = None
         
-        # DEBUG: Print initialization stats of weight matrices
-        with torch.no_grad():
-            print(f"DEBUG INIT TPAAttn: W_A_q stats: mean={self.W_A_q.weight.mean().item():.6f}, std={self.W_A_q.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: W_A_k stats: mean={self.W_A_k.weight.mean().item():.6f}, std={self.W_A_k.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: W_A_v stats: mean={self.W_A_v.weight.mean().item():.6f}, std={self.W_A_v.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: W_B_q stats: mean={self.W_B_q.weight.mean().item():.6f}, std={self.W_B_q.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: W_B_k stats: mean={self.W_B_k.weight.mean().item():.6f}, std={self.W_B_k.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: W_B_v stats: mean={self.W_B_v.weight.mean().item():.6f}, std={self.W_B_v.weight.std().item():.6f}")
-            print(f"DEBUG INIT TPAAttn: o_proj stats: mean={self.o_proj.weight.mean().item():.6f}, std={self.o_proj.weight.std().item():.6f}")
-
+        # # DEBUG: Print initialization stats of weight matrices
+        # with torch.no_grad():
+        #     print(f"DEBUG INIT TPAAttn: W_A_q stats: mean={self.W_A_q.weight.mean().item():.6f}, std={self.W_A_q.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: W_A_k stats: mean={self.W_A_k.weight.mean().item():.6f}, std={self.W_A_k.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: W_A_v stats: mean={self.W_A_v.weight.mean().item():.6f}, std={self.W_A_v.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: W_B_q stats: mean={self.W_B_q.weight.mean().item():.6f}, std={self.W_B_q.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: W_B_k stats: mean={self.W_B_k.weight.mean().item():.6f}, std={self.W_B_k.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: W_B_v stats: mean={self.W_B_v.weight.mean().item():.6f}, std={self.W_B_v.weight.std().item():.6f}")
+        #     print(f"DEBUG INIT TPAAttn: o_proj stats: mean={self.o_proj.weight.mean().item():.6f}, std={self.o_proj.weight.std().item():.6f}")
+        #
     def _init_kv_cache(self, batch_size, max_seq_len):
         """Initialize KV cache for TPA attention."""
         device = next(self.parameters()).device
