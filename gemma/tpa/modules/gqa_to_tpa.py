@@ -345,9 +345,11 @@ def gqa_to_tpa_conversion(
     W_A_q = torch.zeros((hidden_dim, total_q_rank), 
                        device=q_weight.device, dtype=q_weight.dtype)
     
-    # W_B still needs to be fixed size for all heads in TPA implementation
-    W_B_q = torch.zeros((hidden_dim, max_head_rank * q_head_dim), 
+    # W_B needs to be large enough to hold all heads' factors with proper offsets
+    # Each head needs space for max_head_rank * q_head_dim
+    W_B_q = torch.zeros((hidden_dim, num_heads * max_head_rank * q_head_dim), 
                        device=q_weight.device, dtype=q_weight.dtype)
+    print(f"  Created W_B_q with shape {W_B_q.shape} to accommodate {num_heads} heads")
     
     # Track the offset in the W_A_q matrix for each head
     head_offsets = [0]
@@ -375,13 +377,25 @@ def gqa_to_tpa_conversion(
         W_A_q[:, start_idx:end_idx] = W_A_head
         
         # For W_B, we need consistent factors for the TPA implementation
+        # Use a head-specific offset in the global W_B_q matrix to avoid overwriting
+        head_offset = h * max_head_rank * q_head_dim
+        print(f"  Using head offset {head_offset} for head {h} in W_B_q")
+        
         # Only store up to the actual rank used for this head
         for r in range(min(head_rank, max_head_rank)):
-            start_idx = r * q_head_dim
-            end_idx = (r + 1) * q_head_dim
-            head_factor = W_B_head[:, start_idx:end_idx]
-            # Store this rank component in the global W_B
-            W_B_q[:, start_idx:end_idx] = head_factor
+            # Calculate global indices with head-specific offset
+            global_start_idx = head_offset + r * q_head_dim
+            global_end_idx = head_offset + (r + 1) * q_head_dim
+            
+            # Calculate local indices in the head's W_B
+            local_start_idx = r * q_head_dim
+            local_end_idx = (r + 1) * q_head_dim
+            
+            # Extract the head's factor for this rank
+            head_factor = W_B_head[:, local_start_idx:local_end_idx]
+            
+            # Store this rank component in the global W_B at the head-specific offset
+            W_B_q[:, global_start_idx:global_end_idx] = head_factor
             
         # Compute reconstruction error for this head using proper TPA reconstruction
         # Vectorized TPA reconstruction using einsum
@@ -450,9 +464,43 @@ def gqa_to_tpa_conversion(
             
         hidden_dim = orig_3d.shape[0]
         
-        # Check if this is the standard case or a special slice for a single head
-        if W_A.shape[1] == num_heads * rank:
-            # Standard case: reshape W_A to [hidden_dim, num_heads, rank]
+        # Check if this is for Q with head-specific offsets or standard K/V
+        if name == "Q" and hasattr(W_B, "shape") and W_B.shape[1] == num_heads * max_head_rank * head_dim:
+            # Q case with head-specific offsets in W_B
+            print(f"  Using head-specific offsets for {name} verification")
+            
+            # Initialize reconstruction tensor
+            recon = torch.zeros((hidden_dim, num_heads, head_dim), 
+                              device=W_A.device, dtype=W_A.dtype)
+            
+            # Compute per-head reconstruction using the proper offsets
+            for h in range(num_heads):
+                # Get W_A for this head
+                start_idx = head_offsets[h]
+                end_idx = head_offsets[h+1]
+                head_rank = per_head_max_ranks[h]
+                head_W_A = W_A[:, start_idx:end_idx]
+                
+                # Get W_B for this head with proper offset
+                head_offset = h * max_head_rank * head_dim
+                head_W_B = W_B[:, head_offset:head_offset+head_rank*head_dim]
+                
+                # Reshape for efficient computation
+                A_reshaped = head_W_A.view(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+                B_reshaped = head_W_B.view(hidden_dim, head_rank, head_dim)  # [hidden_dim, head_rank, head_dim]
+                
+                # Compute reconstruction for this head
+                head_recon = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
+                
+                # Store in the combined reconstruction
+                recon[:, h, :] = head_recon
+                
+                # Print per-head reconstruction error
+                head_error = torch.norm(orig_3d[:, h, :] - head_recon) / torch.norm(orig_3d[:, h, :])
+                print(f"    Head {h} error: {head_error.item():.6f}")
+            
+        elif W_A.shape[1] == num_heads * rank:
+            # Standard case for K/V: reshape W_A to [hidden_dim, num_heads, rank]
             W_A_reshaped = W_A.reshape(hidden_dim, num_heads, rank)
             
             # Reshape W_B to [hidden_dim, rank, head_dim]
@@ -461,6 +509,21 @@ def gqa_to_tpa_conversion(
             # Use efficient einsum for TPA reconstruction
             # This computes for all heads at once: sum_r (A[i,h,r] * B[i,r,d]) / rank
             recon = torch.einsum('ihr,ird->ihd', W_A_reshaped, W_B_reshaped) / rank
+            
+            # Print per-head stats for multi-head case
+            if num_heads > 1:
+                # Calculate errors per head in a vectorized way
+                head_errors = torch.stack([
+                    torch.norm(orig_3d[:, h, :] - recon[:, h, :]) / torch.norm(orig_3d[:, h, :])
+                    for h in range(min(num_heads, 4))  # Only compute for the heads we'll display
+                ])
+                
+                # Print the first few head errors
+                for h in range(min(num_heads, 4)):
+                    print(f"    Head {h} error: {head_errors[h].item():.6f}")
+                
+                if num_heads > 4:
+                    print(f"    ... and {num_heads - 4} more heads")
             
         else:
             # Special case: W_A is already sliced for a specific head
@@ -476,21 +539,6 @@ def gqa_to_tpa_conversion(
         # Compute overall reconstruction error
         error = torch.norm(orig_3d.reshape(-1) - recon.reshape(-1)) / torch.norm(orig_3d.reshape(-1))
         
-        # Print per-head stats for multi-head case
-        if num_heads > 1:
-            # Calculate errors per head in a vectorized way
-            head_errors = torch.stack([
-                torch.norm(orig_3d[:, h, :] - recon[:, h, :]) / torch.norm(orig_3d[:, h, :])
-                for h in range(min(num_heads, 4))  # Only compute for the heads we'll display
-            ])
-            
-            # Print the first few head errors
-            for h in range(min(num_heads, 4)):
-                print(f"    Head {h} error: {head_errors[h].item():.6f}")
-            
-            if num_heads > 4:
-                print(f"    ... and {num_heads - 4} more heads")
-        
         print(f"  {name} overall reconstruction error: {error.item():.6f} ({error.item()*100:.2f}%)")
         return error, recon
     
@@ -503,6 +551,7 @@ def gqa_to_tpa_conversion(
     
     # Process head verification in batches where possible to maximize throughput
     print(f"  Beginning verification of {num_heads} query heads with optimized batch operations...")
+    print(f"  Using head-specific offsets in W_B_q for verification")
     start_time = time.time()
     
     # Loop through heads but process in parallel where possible
@@ -516,8 +565,11 @@ def gqa_to_tpa_conversion(
         head_rank = per_head_max_ranks[h]
         head_W_A = W_A_q[:, start_idx:end_idx]
         
-        # Create a sliced W_B for this head's rank
-        head_W_B = W_B_q[:, :head_rank*q_head_dim]
+        # Calculate head-specific offset in W_B_q
+        head_offset = h * max_head_rank * q_head_dim
+        
+        # Extract slice from W_B_q with proper head-specific offset
+        head_W_B = W_B_q[:, head_offset:head_offset+head_rank*q_head_dim]
         
         # Vectorized TPA reconstruction - use direct tensor operations 
         # This is the fastest way to compute TPA reconstruction
