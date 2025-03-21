@@ -177,19 +177,26 @@ def gqa_to_tpa_conversion(
     # Apply practical limits to ranks
     max_practical_rank = 320  # Standard cap to avoid excessive computation
     
+    # Calculate maximum possible ranks based on matrix dimensions
+    max_q_rank = min(hidden_dim, q_head_dim)
+    max_k_rank = min(hidden_dim, k_head_dim)
+    max_v_rank = min(hidden_dim, v_head_dim)
+    
+    print(f"\nMaximum possible ranks based on matrix dimensions: Q={max_q_rank}, K={max_k_rank}, V={max_v_rank}")
+    
     # Determine final ranks to use
     if use_dynamic_ranks:
-        actual_q_rank = min(max_practical_rank, q_recommended_rank)
-        actual_k_rank = min(max_practical_rank, k_recommended_rank)
-        actual_v_rank = min(max_practical_rank, v_recommended_rank)
-        print(f"\nUSING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+        actual_q_rank = min(max_practical_rank, q_recommended_rank, max_q_rank)
+        actual_k_rank = min(max_practical_rank, k_recommended_rank, max_k_rank)
+        actual_v_rank = min(max_practical_rank, v_recommended_rank, max_v_rank)
+        print(f"USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
         print(f"These ranks are determined by energy-based analysis to balance accuracy and efficiency")
     else:
-        # Use the user-specified ranks
-        actual_q_rank = min(max_practical_rank, q_rank)
-        actual_k_rank = min(max_practical_rank, k_rank)
-        actual_v_rank = min(max_practical_rank, v_rank)
-        print(f"\nUSING USER-SPECIFIED RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
+        # Use the user-specified ranks but cap them by matrix dimensions
+        actual_q_rank = min(max_practical_rank, q_rank, max_q_rank)
+        actual_k_rank = min(max_practical_rank, k_rank, max_k_rank)
+        actual_v_rank = min(max_practical_rank, v_rank, max_v_rank)
+        print(f"USING USER-SPECIFIED RANKS (capped by matrix dimensions): Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
     
     # Ensure minimum rank for numerical stability
     actual_q_rank = max(2, actual_q_rank)
@@ -216,6 +223,12 @@ def gqa_to_tpa_conversion(
         
         # Compute truncated SVD
         U, S, Vh = torch.linalg.svd(weight_matrix, full_matrices=False)
+        
+        # Ensure rank does not exceed matrix dimensions
+        max_possible_rank = min(weight_matrix.shape[0], weight_matrix.shape[1])
+        if rank > max_possible_rank:
+            print(f"  ADJUSTING {name} rank from {rank} to {max_possible_rank} (maximum possible for matrix dimensions)")
+            rank = min(rank, max_possible_rank)
         
         # Truncate to target rank
         U_r = U[:, :rank]  # [hidden_dim, rank]
