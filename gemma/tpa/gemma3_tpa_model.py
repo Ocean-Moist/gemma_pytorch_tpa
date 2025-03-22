@@ -389,6 +389,9 @@ class TPAAttention(nn.Module):
         B_k = self.cache_kB[:batch_size, :cache_len]
         B_v = self.cache_vB[:batch_size, :cache_len]
         
+        # Define kv_seq_len early since we need it for reshaping
+        kv_seq_len = A_k.size(1)
+        
         # Check if B tensors were already reshaped to include head dimension
         if B_q.size(0) == batch_size * self.num_heads:
             # B_q already has shape [batch*num_heads, seq, q_rank, q_head_dim]
@@ -441,7 +444,7 @@ class TPAAttention(nn.Module):
             q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
             q = q.view(batch_size, seq_len, self.num_heads, q_head_dim)
         
-        kv_seq_len = A_k.size(1)
+        # kv_seq_len already defined earlier, no need to set it again
         
         # Handle grouped attention if num_kv_heads < num_heads
         if self.num_kv_heads < self.num_heads:
