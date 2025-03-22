@@ -421,8 +421,8 @@ class TPAAttention(nn.Module):
             B_q_bmm = B_q.reshape(batch_size * self.num_heads * seq_len, self.q_rank, q_head_dim)
             # Reshape to [batch*num_heads*seq, q_rank]
             A_q_bmm = A_q_flat.reshape(batch_size * self.num_heads * seq_len, self.q_rank)
-            # Expand for batch matmul
-            A_q_bmm = A_q_bmm.unsqueeze(2)  # [batch*num_heads*seq, q_rank, 1]
+            # Expand for batch matmul - use unsqueeze(1) to get [batch*num_heads*seq, 1, q_rank]
+            A_q_bmm = A_q_bmm.unsqueeze(1)  # [batch*num_heads*seq, 1, q_rank]
             # Batch matmul: [batch*num_heads*seq, q_rank, 1] x [batch*num_heads*seq, q_rank, q_head_dim]
             q_bmm = torch.bmm(A_q_bmm, B_q_bmm).div(self.q_rank)  # [batch*num_heads*seq, 1, q_head_dim]
             # Reshape to [batch, seq, num_heads, q_head_dim]
