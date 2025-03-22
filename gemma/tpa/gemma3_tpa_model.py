@@ -234,9 +234,14 @@ class TPAAttention(nn.Module):
         v_head_dim = getattr(self, 'v_head_dim', self.head_dim)
         
         # B projections - respect potentially different head dimensions
-        B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, q_head_dim)
-        B_k = self.W_B_k(hidden_states).view(batch_size, seq_len, self.k_rank, k_head_dim)
-        B_v = self.W_B_v(hidden_states).view(batch_size, seq_len, self.v_rank, v_head_dim)
+        # Use contiguous + reshape instead of view to handle non-contiguous tensors
+        B_q_flat = self.W_B_q(hidden_states).contiguous()
+        B_k_flat = self.W_B_k(hidden_states).contiguous()
+        B_v_flat = self.W_B_v(hidden_states).contiguous()
+        
+        B_q = B_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
+        B_k = B_k_flat.reshape(batch_size, seq_len, self.k_rank, k_head_dim)
+        B_v = B_v_flat.reshape(batch_size, seq_len, self.v_rank, v_head_dim)
         
         # Apply rotary positional embedding to B_q and B_k
         # We need to adapt the RoPE application to handle potentially different head dimensions
