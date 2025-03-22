@@ -258,9 +258,14 @@ class TPAAttention(nn.Module):
             # Standard case - B_q_flat has the expected size for a single head per position
             B_q = B_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
         
-        # Apply similar logic for K and V if needed
+        # Apply similar logic for K and V, but use kv_cache dimensions for proper KV cache handling
+        # Extract KV cache sequence length
+        kv_seq_len = kv_cache[0].shape[1] if kv_cache and kv_cache[0].size(1) > 0 else seq_len
+        print(f"DEBUG: Using kv_seq_len={kv_seq_len} for K and V tensors, current seq_len={seq_len}")
+        
         if B_k_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.k_rank * k_head_dim:
             print(f"DEBUG: B_k_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
+            # For current input tokens, still use seq_len since that's what we have from B_k_flat
             B_k = B_k_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.k_rank, k_head_dim)
             B_k = B_k.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.k_rank, k_head_dim)
         else:
@@ -268,6 +273,7 @@ class TPAAttention(nn.Module):
             
         if B_v_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.v_rank * v_head_dim:
             print(f"DEBUG: B_v_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
+            # For current input tokens, still use seq_len since that's what we have from B_v_flat
             B_v = B_v_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.v_rank, v_head_dim)
             B_v = B_v.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.v_rank, v_head_dim)
         else:
@@ -465,14 +471,50 @@ class TPAAttention(nn.Module):
                 A_k_head = A_k[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, k_rank]
                 A_v_head = A_v[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, v_rank]
                 
+                # Check dimensions and correct if needed
+                if A_k_head.size(1) != kv_seq_len:
+                    print(f"DEBUG GQA: A_k_head sequence dimension {A_k_head.size(1)} doesn't match kv_seq_len {kv_seq_len}")
+                    # This will already be handled by the cache retrieval earlier
+                    pass
+                
                 # Flatten for bmm
                 A_k_head_flat = A_k_head.reshape(-1, 1, self.k_rank)  # [batch*kv_seq_len, 1, k_rank]
                 A_v_head_flat = A_v_head.reshape(-1, 1, self.v_rank)  # [batch*kv_seq_len, 1, v_rank]
                 
                 # Get B factors for this KV head
                 # For GQA models with shared key/value heads, we use the same B factors for all heads in the group
+                # Check if B_k_flat has the right sequence length dimension
+                if B_k_flat.size(0) != batch_size * kv_seq_len:
+                    print(f"DEBUG GQA: B_k_flat first dimension {B_k_flat.size(0)} doesn't match batch*kv_seq_len {batch_size * kv_seq_len}")
+                    # Use the cached B_k with correct sequence length
+                    B_k_flat = self.cache_kB[:batch_size, :kv_seq_len].reshape(-1, self.k_rank, k_head_dim)
+                
+                if B_v_flat.size(0) != batch_size * kv_seq_len:
+                    print(f"DEBUG GQA: B_v_flat first dimension {B_v_flat.size(0)} doesn't match batch*kv_seq_len {batch_size * kv_seq_len}")
+                    # Use the cached B_v with correct sequence length
+                    B_v_flat = self.cache_vB[:batch_size, :kv_seq_len].reshape(-1, self.v_rank, v_head_dim)
+                
                 B_k_head_flat = B_k_flat  # [batch*kv_seq_len, k_rank, k_head_dim]
                 B_v_head_flat = B_v_flat  # [batch*kv_seq_len, v_rank, v_head_dim]
+                
+                # Ensure dimensions match before bmm
+                if A_k_head_flat.size(0) != B_k_head_flat.size(0):
+                    print(f"DEBUG GQA: Dimension mismatch: A_k_head_flat first dim {A_k_head_flat.size(0)}, "
+                          f"B_k_head_flat first dim {B_k_head_flat.size(0)}")
+                    # Adjust A_k_head_flat size to match B_k_head_flat
+                    needed_size = B_k_head_flat.size(0)
+                    A_k_head_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
+                    # Select just this head's data
+                    A_k_head_flat = A_k_head_flat[:, kv_head_idx:kv_head_idx+1, :].reshape(-1, 1, self.k_rank)
+                
+                if A_v_head_flat.size(0) != B_v_head_flat.size(0):
+                    print(f"DEBUG GQA: Dimension mismatch: A_v_head_flat first dim {A_v_head_flat.size(0)}, "
+                          f"B_v_head_flat first dim {B_v_head_flat.size(0)}")
+                    # Adjust A_v_head_flat size to match B_v_head_flat
+                    needed_size = B_v_head_flat.size(0)
+                    A_v_head_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
+                    # Select just this head's data
+                    A_v_head_flat = A_v_head_flat[:, kv_head_idx:kv_head_idx+1, :].reshape(-1, 1, self.v_rank)
                 
                 # Compute k,v for this head using tensor product
                 k_head = torch.bmm(A_k_head_flat, B_k_head_flat).div(self.k_rank)  # [batch*kv_seq_len, 1, k_head_dim]
@@ -502,16 +544,52 @@ class TPAAttention(nn.Module):
                 # Reshape similar to how we handled query processing
                 
                 # Process K
+                # Print debug info about tensor shapes
+                print(f"DEBUG: B_k shape: {B_k.shape}, A_k shape: {A_k.shape}, kv_seq_len: {kv_seq_len}")
+                
+                # We need to ensure the B_k tensor has the same sequence length as the cached keys
+                # If B_k was reshaped for current token only (seq_len != kv_seq_len), we need to
+                # expand it to match the full KV sequence length
+                if B_k.size(1) != kv_seq_len:
+                    print(f"DEBUG: Reshaping B_k to match kv_seq_len={kv_seq_len}, current shape: {B_k.shape}")
+                    # Create a new B_k tensor with the right sequence length
+                    # For current input, use the B_k we have; for past tokens, use the cached B_k
+                    new_B_k = self.cache_kB[:batch_size, :kv_seq_len].to(B_k.device, B_k.dtype)
+                    if B_k.size(0) == batch_size * self.num_kv_heads:
+                        # Multi-head case - need to reshape cached tensor to match multi-head format
+                        print(f"DEBUG: Reshaping cached B_k for multi-head processing")
+                        # Get the right shape for multi-head processing
+                        new_B_k = new_B_k.view(batch_size, kv_seq_len, self.num_kv_heads, self.k_rank, k_head_dim)
+                        new_B_k = new_B_k.transpose(1, 2).reshape(batch_size * self.num_kv_heads, kv_seq_len, self.k_rank, k_head_dim)
+                    
+                    # Now B_k has the proper sequence length for all tokens
+                    B_k = new_B_k
+                
+                # Now we can safely process with matching sequence dimensions
                 B_k_bmm = B_k.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank, k_head_dim)
                 A_k_bmm = A_k_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank)
-                A_k_bmm = A_k_bmm.unsqueeze(2)  # [batch*num_kv_heads*kv_seq_len, k_rank, 1]
+                A_k_bmm = A_k_bmm.unsqueeze(1)  # [batch*num_kv_heads*kv_seq_len, 1, k_rank]
                 k_bmm = torch.bmm(A_k_bmm, B_k_bmm).div(self.k_rank)  # [batch*num_kv_heads*kv_seq_len, 1, k_head_dim]
                 k = k_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, k_head_dim).transpose(1, 2)
                 
-                # Process V
+                # Process V - similar approach as for keys
+                if B_v.size(1) != kv_seq_len:
+                    print(f"DEBUG: Reshaping B_v to match kv_seq_len={kv_seq_len}, current shape: {B_v.shape}")
+                    # Create a new B_v tensor with the right sequence length
+                    new_B_v = self.cache_vB[:batch_size, :kv_seq_len].to(B_v.device, B_v.dtype)
+                    if B_v.size(0) == batch_size * self.num_kv_heads:
+                        # Multi-head case - need to reshape cached tensor to match multi-head format
+                        print(f"DEBUG: Reshaping cached B_v for multi-head processing")
+                        # Get the right shape for multi-head processing
+                        new_B_v = new_B_v.view(batch_size, kv_seq_len, self.num_kv_heads, self.v_rank, v_head_dim)
+                        new_B_v = new_B_v.transpose(1, 2).reshape(batch_size * self.num_kv_heads, kv_seq_len, self.v_rank, v_head_dim)
+                    
+                    # Now B_v has the proper sequence length for all tokens
+                    B_v = new_B_v
+                
                 B_v_bmm = B_v.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank, v_head_dim)
                 A_v_bmm = A_v_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank)
-                A_v_bmm = A_v_bmm.unsqueeze(2)  # [batch*num_kv_heads*kv_seq_len, v_rank, 1]
+                A_v_bmm = A_v_bmm.unsqueeze(1)  # [batch*num_kv_heads*kv_seq_len, 1, v_rank]
                 v_bmm = torch.bmm(A_v_bmm, B_v_bmm).div(self.v_rank)  # [batch*num_kv_heads*kv_seq_len, 1, v_head_dim]
                 v = v_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, v_head_dim).transpose(1, 2)
                 
@@ -526,6 +604,28 @@ class TPAAttention(nn.Module):
                     v = v.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
             else:
                 # Standard case using the original computation
+                # Check if we need to correct sequence length dimensions
+                if B_k_flat.size(0) != batch_size * kv_seq_len:
+                    print(f"DEBUG: Reshaping B_k_flat to match kv_seq_len={kv_seq_len}, current first dim: {B_k_flat.size(0)}")
+                    
+                    # Use cached B_k with correct sequence length
+                    new_B_k_flat = self.cache_kB[:batch_size, :kv_seq_len].reshape(-1, self.k_rank, k_head_dim)
+                    B_k_flat = new_B_k_flat
+                    
+                    # Also adjust A_k_flat to match
+                    A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
+                
+                if B_v_flat.size(0) != batch_size * kv_seq_len:
+                    print(f"DEBUG: Reshaping B_v_flat to match kv_seq_len={kv_seq_len}, current first dim: {B_v_flat.size(0)}")
+                    
+                    # Use cached B_v with correct sequence length
+                    new_B_v_flat = self.cache_vB[:batch_size, :kv_seq_len].reshape(-1, self.v_rank, v_head_dim)
+                    B_v_flat = new_B_v_flat
+                    
+                    # Also adjust A_v_flat to match
+                    A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
+                
+                # Now proceed with computation using corrected dimensions
                 k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, k_head_dim]
                 v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, v_head_dim]
                 
