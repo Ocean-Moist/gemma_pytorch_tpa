@@ -239,9 +239,39 @@ class TPAAttention(nn.Module):
         B_k_flat = self.W_B_k(hidden_states).contiguous()
         B_v_flat = self.W_B_v(hidden_states).contiguous()
         
-        B_q = B_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
-        B_k = B_k_flat.reshape(batch_size, seq_len, self.k_rank, k_head_dim)
-        B_v = B_v_flat.reshape(batch_size, seq_len, self.v_rank, v_head_dim)
+        # Debug information
+        print(f"DEBUG: B_q_flat shape: {B_q_flat.shape}, expected shape for single head: [{batch_size}, {seq_len}, {self.q_rank * q_head_dim}]")
+        expected_multi_head_size = batch_size * seq_len * self.num_heads * self.q_rank * q_head_dim
+        actual_size = B_q_flat.numel()
+        print(f"DEBUG: B_q_flat elements: {actual_size}, expected for {self.num_heads} heads: {expected_multi_head_size}")
+        
+        # Check if B_q_flat contains data for all heads combined
+        # We check if B_q_flat has enough elements for all heads by comparing with expected size
+        if actual_size == expected_multi_head_size or B_q_flat.shape[2] == self.num_heads * self.q_rank * q_head_dim:
+            print(f"DEBUG: B_q_flat contains data for all {self.num_heads} heads, reshaping with head dimension")
+            # Reshape to include head dimension: [batch, seq, num_heads, q_rank, q_head_dim]
+            B_q = B_q_flat.reshape(batch_size, seq_len, self.num_heads, self.q_rank, q_head_dim)
+            # For RoPE application, we need to flatten the head dimension into the batch dimension
+            # This creates shape [batch*num_heads, seq, q_rank, q_head_dim]
+            B_q = B_q.transpose(1, 2).reshape(batch_size * self.num_heads, seq_len, self.q_rank, q_head_dim)
+        else:
+            # Standard case - B_q_flat has the expected size for a single head per position
+            B_q = B_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
+        
+        # Apply similar logic for K and V if needed
+        if B_k_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.k_rank * k_head_dim:
+            print(f"DEBUG: B_k_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
+            B_k = B_k_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.k_rank, k_head_dim)
+            B_k = B_k.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.k_rank, k_head_dim)
+        else:
+            B_k = B_k_flat.reshape(batch_size, seq_len, self.k_rank, k_head_dim)
+            
+        if B_v_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.v_rank * v_head_dim:
+            print(f"DEBUG: B_v_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
+            B_v = B_v_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.v_rank, v_head_dim)
+            B_v = B_v.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.v_rank, v_head_dim)
+        else:
+            B_v = B_v_flat.reshape(batch_size, seq_len, self.v_rank, v_head_dim)
         
         # Apply rotary positional embedding to B_q and B_k
         # We need to adapt the RoPE application to handle potentially different head dimensions
@@ -290,8 +320,49 @@ class TPAAttention(nn.Module):
             return output.type_as(x)
         
         # Apply our TPA-specific RoPE function, respecting different head dimensions
-        B_q = apply_rotary_emb_to_B(B_q, freqs_cis, q_head_dim)
-        B_k = apply_rotary_emb_to_B(B_k, freqs_cis, k_head_dim)
+        # Check if we need to handle multi-head B tensors
+        if B_q.size(0) == batch_size * self.num_heads:
+            print(f"DEBUG: Applying RoPE to multi-head B tensors")
+            # For multi-head case, we need to apply RoPE to each head separately
+            # B_q has shape [batch*num_heads, seq, rank, dim]
+            
+            # Iterate over heads to apply RoPE separately
+            new_B_q = torch.zeros_like(B_q)
+            new_B_k = torch.zeros_like(B_k)
+            
+            # Number of heads in B tensors
+            num_heads_q = self.num_heads
+            num_heads_k = self.num_kv_heads
+            
+            # Apply RoPE for each head in B_q
+            for h in range(num_heads_q):
+                head_start = h * batch_size
+                head_end = (h + 1) * batch_size
+                # Extract this head's B_q slice: [batch, seq, rank, dim]
+                head_B_q = B_q[head_start:head_end]
+                # Apply RoPE to this head
+                head_B_q_rotated = apply_rotary_emb_to_B(head_B_q, freqs_cis, q_head_dim)
+                # Store back in the new tensor
+                new_B_q[head_start:head_end] = head_B_q_rotated
+                
+            # Apply RoPE for each head in B_k
+            for h in range(num_heads_k):
+                head_start = h * batch_size
+                head_end = (h + 1) * batch_size
+                # Extract this head's B_k slice: [batch, seq, rank, dim]
+                head_B_k = B_k[head_start:head_end]
+                # Apply RoPE to this head
+                head_B_k_rotated = apply_rotary_emb_to_B(head_B_k, freqs_cis, k_head_dim)
+                # Store back in the new tensor
+                new_B_k[head_start:head_end] = head_B_k_rotated
+                
+            # Replace with rotated versions
+            B_q = new_B_q
+            B_k = new_B_k
+        else:
+            # Standard case - apply RoPE directly to the tensors
+            B_q = apply_rotary_emb_to_B(B_q, freqs_cis, q_head_dim)
+            B_k = apply_rotary_emb_to_B(B_k, freqs_cis, k_head_dim)
         
         # Handle KV cache
         # We need to store and retrieve both A and B components for K and V
@@ -318,18 +389,57 @@ class TPAAttention(nn.Module):
         B_k = self.cache_kB[:batch_size, :cache_len]
         B_v = self.cache_vB[:batch_size, :cache_len]
         
-        # Reshape for tensor product computation - respect different head dimensions
-        A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
-        A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
-        A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
-        
-        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, q_head_dim)
-        B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
-        B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
-        
-        # Compute Q using tensor product with proper factorization
-        q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
-        q = q.view(batch_size, seq_len, self.num_heads, q_head_dim)
+        # Check if B tensors were already reshaped to include head dimension
+        if B_q.size(0) == batch_size * self.num_heads:
+            # B_q already has shape [batch*num_heads, seq, q_rank, q_head_dim]
+            # Reshape A_q to match: [batch*num_heads, seq, q_rank]
+            print(f"DEBUG: Using multi-head reshaping for tensor products")
+            A_q_flat = A_q.transpose(1, 2).reshape(batch_size * self.num_heads, seq_len, self.q_rank)
+            # Keep B_q as is - it's already in the right shape for per-head processing
+            
+            # Handle K and V similarly if needed
+            if B_k.size(0) == batch_size * self.num_kv_heads:
+                A_k_flat = A_k.transpose(1, 2).reshape(-1, kv_seq_len, self.k_rank)
+                # B_k is already in shape [batch*num_kv_heads, seq, k_rank, k_head_dim]
+            else:
+                A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
+                B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
+                
+            if B_v.size(0) == batch_size * self.num_kv_heads:
+                A_v_flat = A_v.transpose(1, 2).reshape(-1, kv_seq_len, self.v_rank)
+                # B_v is already in shape [batch*num_kv_heads, seq, v_rank, v_head_dim]
+            else:
+                A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
+                B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
+            
+            # Compute Q using tensor product with per-head processing
+            # Process each position independently for each head
+            # Reshape to [batch*num_heads*seq, q_rank, q_head_dim]
+            B_q_bmm = B_q.reshape(batch_size * self.num_heads * seq_len, self.q_rank, q_head_dim)
+            # Reshape to [batch*num_heads*seq, q_rank]
+            A_q_bmm = A_q_flat.reshape(batch_size * self.num_heads * seq_len, self.q_rank)
+            # Expand for batch matmul
+            A_q_bmm = A_q_bmm.unsqueeze(2)  # [batch*num_heads*seq, q_rank, 1]
+            # Batch matmul: [batch*num_heads*seq, q_rank, 1] x [batch*num_heads*seq, q_rank, q_head_dim]
+            q_bmm = torch.bmm(A_q_bmm, B_q_bmm).div(self.q_rank)  # [batch*num_heads*seq, 1, q_head_dim]
+            # Reshape to [batch, seq, num_heads, q_head_dim]
+            q = q_bmm.squeeze(1).reshape(batch_size, self.num_heads, seq_len, q_head_dim).transpose(1, 2)
+            
+            print(f"DEBUG: q shape after multi-head processing: {q.shape}")
+        else:
+            # Standard case - reshape for traditional tensor product computation
+            print(f"DEBUG: Using standard reshaping for tensor products")
+            A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
+            A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
+            A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
+            
+            B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, q_head_dim)
+            B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
+            B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
+            
+            # Compute Q using tensor product with proper factorization
+            q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
+            q = q.view(batch_size, seq_len, self.num_heads, q_head_dim)
         
         kv_seq_len = A_k.size(1)
         
@@ -382,12 +492,50 @@ class TPAAttention(nn.Module):
             v = torch.cat(v_list, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
         else:
             # For standard multi-head attention (non-GQA), compute k,v directly
-            k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, k_head_dim]
-            v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, v_head_dim]
-            
-            # Reshape to match q's shape
-            k = k_flat.view(batch_size, kv_seq_len, self.num_heads, k_head_dim)  # [batch, kv_seq_len, num_heads, k_head_dim]
-            v = v_flat.view(batch_size, kv_seq_len, self.num_heads, v_head_dim)  # [batch, kv_seq_len, num_heads, v_head_dim]
+            # Check if B_k and B_v have already been reshaped to include head dimension
+            if B_k.size(0) == batch_size * self.num_kv_heads:
+                print(f"DEBUG: Using multi-head processing for K and V (non-GQA)")
+                # Process each sequence position independently for each head
+                # Reshape similar to how we handled query processing
+                
+                # Process K
+                B_k_bmm = B_k.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank, k_head_dim)
+                A_k_bmm = A_k_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank)
+                A_k_bmm = A_k_bmm.unsqueeze(2)  # [batch*num_kv_heads*kv_seq_len, k_rank, 1]
+                k_bmm = torch.bmm(A_k_bmm, B_k_bmm).div(self.k_rank)  # [batch*num_kv_heads*kv_seq_len, 1, k_head_dim]
+                k = k_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, k_head_dim).transpose(1, 2)
+                
+                # Process V
+                B_v_bmm = B_v.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank, v_head_dim)
+                A_v_bmm = A_v_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank)
+                A_v_bmm = A_v_bmm.unsqueeze(2)  # [batch*num_kv_heads*kv_seq_len, v_rank, 1]
+                v_bmm = torch.bmm(A_v_bmm, B_v_bmm).div(self.v_rank)  # [batch*num_kv_heads*kv_seq_len, 1, v_head_dim]
+                v = v_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, v_head_dim).transpose(1, 2)
+                
+                print(f"DEBUG: k shape after multi-head processing: {k.shape}")
+                print(f"DEBUG: v shape after multi-head processing: {v.shape}")
+                
+                # If num_heads > num_kv_heads, we need to repeat the key/value heads
+                if self.num_heads > self.num_kv_heads:
+                    # Repeat the appropriate KV head for each query head (GQA)
+                    heads_per_group = self.num_heads // self.num_kv_heads
+                    k = k.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
+                    v = v.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
+            else:
+                # Standard case using the original computation
+                k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, k_head_dim]
+                v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, v_head_dim]
+                
+                # Reshape to match q's shape 
+                k = k_flat.view(batch_size, kv_seq_len, self.num_kv_heads, k_head_dim)  # [batch, kv_seq_len, num_kv_heads, k_head_dim]
+                v = v_flat.view(batch_size, kv_seq_len, self.num_kv_heads, v_head_dim)  # [batch, kv_seq_len, num_kv_heads, v_head_dim]
+                
+                # If num_heads > num_kv_heads, we need to repeat the key/value heads
+                if self.num_heads > self.num_kv_heads:
+                    # Repeat the appropriate KV head for each query head (GQA)
+                    heads_per_group = self.num_heads // self.num_kv_heads
+                    k = k.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
+                    v = v.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
         
         # Transpose for attention computation
         q = q.transpose(1, 2)  # [batch, num_heads, seq_len, q_head_dim]

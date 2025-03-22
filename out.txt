@@ -1,25 +1,15 @@
-CUDA_LAUNCH_BLOCKING=1 python scripts/run_tpa.py     --ckpt=model.ckpt     --variant=1b     --prompt="hey"     --convert=True     --save_tpa=tpa_model.pt     --device=cuda  --extra_config='{"factorization_method": "gqa_to_tpa"}' --fat_ranks=true
-
 Running Gemma-1b with TPA
 TPA configuration: q_rank=6, k_rank=2, v_rank=2
 Loading tokenizer from tokenizer/tokenizer.model...
 Loading standard Gemma model from model.ckpt...
 Standard model loaded and moved to cuda
-Standard model loaded in 3.16 seconds
+Standard model loaded in 3.83 seconds
 Converting to TPA model...
 Created query-to-kv mapping for GQA: [0, 0, 0, 0]
 TPAAttention: hidden_size=1152
 TPAAttention: num_heads=4, num_kv_heads=1
 TPAAttention: head dimensions: q=256, k=256, v=256
 TPAAttention: ranks: q=6, k=2, v=2
-DEBUG INIT TPAAttn: W_A_q stats: mean=0.000006, std=0.016968
-DEBUG INIT TPAAttn: W_A_k stats: mean=0.000587, std=0.016968
-DEBUG INIT TPAAttn: W_A_v stats: mean=-0.000201, std=0.016968
-DEBUG INIT TPAAttn: W_B_q stats: mean=-0.000116, std=0.016968
-DEBUG INIT TPAAttn: W_B_k stats: mean=-0.000102, std=0.016968
-DEBUG INIT TPAAttn: W_B_v stats: mean=-0.000108, std=0.016968
-DEBUG INIT TPAAttn: o_proj stats: mean=-0.000124, std=0.018066
-Created query-to-kv mapping for GQA: [0, 0, 0, 0]
 (repeat x25)
 Starting weight conversion process...
 Using Tucker factorization with shared factors
@@ -49,13 +39,6 @@ TPAAttention: hidden_size=1152
 TPAAttention: num_heads=4, num_kv_heads=1
 TPAAttention: head dimensions: q=256, k=256, v=256
 TPAAttention: ranks: q=96, k=48, v=48
-DEBUG INIT TPAAttn: W_A_q stats: mean=-0.000124, std=0.016968
-DEBUG INIT TPAAttn: W_A_k stats: mean=-0.000117, std=0.016968
-DEBUG INIT TPAAttn: W_A_v stats: mean=-0.000263, std=0.016968
-DEBUG INIT TPAAttn: W_B_q stats: mean=-0.000115, std=0.016968
-DEBUG INIT TPAAttn: W_B_k stats: mean=-0.000112, std=0.016968
-DEBUG INIT TPAAttn: W_B_v stats: mean=-0.000116, std=0.016968
-DEBUG INIT TPAAttn: o_proj stats: mean=-0.000122, std=0.018066
 (repeat x25)
 /venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py:1329: UserWarning: Casting complex values to real discards the imaginary part (Triggered internally at /pytorch/aten/src/ATen/native/Copy.cpp:308.)
   return t.to(
@@ -66,7 +49,7 @@ Converting GQA model to TPA format...
 Model type: GemmaForCausalLM
 Searching for attention modules...
   Found QKV-combined attention module in layer 0
-(repeat x25)
+ (repeat x25)
 Found 26 attention modules to convert
 Converting attention layer: model.layers.0.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
@@ -103,129 +86,100 @@ ANALYZING INTRINSIC RANKS using SVD (separate analysis for Q and K/V)
     95% energy: rank 220
     98% energy: rank 237
 
-Maximum possible ranks based on matrix dimensions: Q=256, K=256, V=256
-USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q=256, K=202, V=220
+Maximum possible ranks based on matrix dimensions: Q=1024, K=256, V=256
+USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q=134, K=202, V=220
 These ranks are determined by energy-based analysis to balance accuracy and efficiency
 
 Performing independent factorization for Q and K/V
-Processing 4 query heads with dims: hidden_dim=1152, head_dim=256
-  Computing SVD factorization for Q head 0 with rank 256...
-  Q head 0 SVD reconstruction error: 0.000060
-  Q head 0 SVD factorization completed in 0.08 seconds
-  Computing SVD factorization for Q head 1 with rank 256...
-  Q head 1 SVD reconstruction error: 0.000053
-  Q head 1 SVD factorization completed in 0.04 seconds
-  Computing SVD factorization for Q head 2 with rank 256...
-  Q head 2 SVD reconstruction error: 0.000052
-  Q head 2 SVD factorization completed in 0.04 seconds
-  Computing SVD factorization for Q head 3 with rank 256...
-  Q head 3 SVD reconstruction error: 0.000055
-  Q head 3 SVD factorization completed in 0.04 seconds
-Processing 1 key/value heads with dims: hidden_dim=1152, k_head_dim=256, v_head_dim=256
-  Computing SVD factorization for K head 0 with rank 202...
-  K head 0 SVD reconstruction error: 0.223579
-  K head 0 SVD factorization completed in 0.03 seconds
-  Computing SVD factorization for V head 0 with rank 220...
-  V head 0 SVD reconstruction error: 0.219580
-  V head 0 SVD factorization completed in 0.03 seconds
+Factorizing query projection with 4 heads, head_dim=256
+  Q weight shape: torch.Size([1152, 1024]), total projection dim: 1024
+  Per-head maximum ranks: [134, 134, 134, 134], using max=134 for W_B
+  Created W_B_q with shape torch.Size([1152, 137216]) to accommodate 4 heads
+  Factorizing query head 0/4...
+  Using rank 134 for head 0 (limited by head dimensions)
+  Computing SVD factorization for Q-head-0 with rank 134...
+  Q-head-0 SVD reconstruction error: 0.465907
+  Q-head-0 SVD factorization completed in 0.07 seconds
+  Using head offset 0 for head 0 in W_B_q
+  Query head 0 factorization error: 0.465907
+  Factorizing query head 1/4...
+  Using rank 134 for head 1 (limited by head dimensions)
+  Computing SVD factorization for Q-head-1 with rank 134...
+  Q-head-1 SVD reconstruction error: 0.392020
+  Q-head-1 SVD factorization completed in 0.03 seconds
+  Using head offset 34304 for head 1 in W_B_q
+  Query head 1 factorization error: 0.392020
+  Factorizing query head 2/4...
+  Using rank 134 for head 2 (limited by head dimensions)
+  Computing SVD factorization for Q-head-2 with rank 134...
+  Q-head-2 SVD reconstruction error: 0.313727
+  Q-head-2 SVD factorization completed in 0.03 seconds
+  Using head offset 68608 for head 2 in W_B_q
+  Query head 2 factorization error: 0.313727
+  Factorizing query head 3/4...
+  Using rank 134 for head 3 (limited by head dimensions)
+  Computing SVD factorization for Q-head-3 with rank 134...
+  Q-head-3 SVD reconstruction error: 0.333099
+  Q-head-3 SVD factorization completed in 0.03 seconds
+  Using head offset 102912 for head 3 in W_B_q
+  Query head 3 factorization error: 0.333099
+  Average query head factorization error: 0.376188 (37.62%)
+Factorizing key projection with 1 KV heads, head_dim=256
+  K weight shape: torch.Size([1152, 256]), total projection dim: 256
+  Computing SVD factorization for K with rank 202...
+  K SVD reconstruction error: 0.223579
+  K SVD factorization completed in 0.03 seconds
+Factorizing value projection with 1 KV heads, head_dim=256
+  V weight shape: torch.Size([1152, 256]), total projection dim: 256
+  Computing SVD factorization for V with rank 220...
+  V SVD reconstruction error: 0.219580
+  V SVD factorization completed in 0.03 seconds
 
 Verifying reconstruction quality of factorized weights
-  Q reconstruction error: 0.862571
-  K reconstruction error: 0.224369
-  V reconstruction error: 0.220356
 
-Final reconstruction errors: Q=0.862571, K=0.224369, V=0.220356
-Reconstruction RMSE (%): Q=86.26%, K=22.44%, V=22.04%
-GQA to TPA conversion complete in 0.70 seconds
-  Decomposition completed in 0.70 seconds
-  Factorized weights keys: ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_rank', 'k_rank', 'v_rank', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'q_to_kv_mapping']
+Verifying reconstruction quality of query weights PER HEAD:
+  Beginning verification of 4 query heads with optimized batch operations...
+  Using head-specific offsets in W_B_q for verification
+  Completed 4 head verifications in 0.0033 seconds
+  Head 0 reconstruction error: 0.465907 (46.59%)
+  Head 1 reconstruction error: 0.392020 (39.20%)
+  Head 2 reconstruction error: 0.313727 (31.37%)
+  Head 3 reconstruction error: 0.333099 (33.31%)
+Average Q head reconstruction error: 0.376188 (37.62%)
+
+Verifying reconstruction quality of COMBINED factorized weights:
+Q combined reconstruction error: 0.381141 (38.11%)
+  Verifying K reconstruction...
+  K overall reconstruction error: 0.223579 (22.36%)
+  Verifying V reconstruction...
+  V overall reconstruction error: 0.219580 (21.96%)
+
+GQA to TPA conversion complete in 0.57 seconds
+Final reconstruction errors:
+  Q combined: 38.11%
+  Q per-head average: 37.62%
+  Per-head details: Head 0: 46.59%, Head 1: 39.20%, Head 2: 31.37%, Head 3: 33.31%
+  K: 22.36%, V: 21.96%
+Used head dimensions: Q=256, K=256, V=256
+Used per-head ranks for Q: [134, 134, 134, 134]
+Used ranks: Q max=134, K=202, V=220
+Total Q rank used: 536 (sum of per-head ranks)
+  Decomposition completed in 0.57 seconds
+  Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.70 seconds
-Converting attention layer: model.layers.1.self_attn (type: combined_qkv)
-  Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
-  Starting tensor decomposition for layer model.layers.1.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
-Starting improved GQA to TPA conversion with separate Q and K/V factorization...
-After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
-Dimensions: hidden_dim=1152
-Weight shapes: Q=torch.Size([1152, 1024]), K=torch.Size([1152, 256]), V=torch.Size([1152, 256]), O=torch.Size([1152, 1024])
-
-DIMENSION CALCULATION: Using separate head dimensions for Q and K/V
-  Q weights: torch.Size([1152, 1024]) → 256 = 1024 / 4 heads
-  K weights: torch.Size([1152, 256]) → 256 = 256 / 1 kv_heads
-  V weights: torch.Size([1152, 256]) → 256 = 256 / 1 kv_heads
-Head mapping: 4 query heads to 1 KV heads, 4 query heads per KV head
-Mapping: [0, 0, 0, 0]
-
-ANALYZING INTRINSIC RANKS using SVD (separate analysis for Q and K/V)
-  Q singular value analysis:
-    90% energy: rank 409
-    95% energy: rank 519
-    98% energy: rank 644
-  K singular value analysis:
-    90% energy: rank 190
-    95% energy: rank 212
-    98% energy: rank 230
-  V singular value analysis:
-    90% energy: rank 207
-    95% energy: rank 228
-    98% energy: rank 243
-
-Maximum possible ranks based on matrix dimensions: Q=256, K=256, V=256
-USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q=256, K=212, V=228
-These ranks are determined by energy-based analysis to balance accuracy and efficiency
-
-Performing independent factorization for Q and K/V
-Processing 4 query heads with dims: hidden_dim=1152, head_dim=256
-  Computing SVD factorization for Q head 0 with rank 256...
-  Q head 0 SVD reconstruction error: 0.000041
-  Q head 0 SVD factorization completed in 0.04 seconds
-  Computing SVD factorization for Q head 1 with rank 256...
-  Q head 1 SVD reconstruction error: 0.000056
-  Q head 1 SVD factorization completed in 0.04 seconds
-  Computing SVD factorization for Q head 2 with rank 256...
-  Q head 2 SVD reconstruction error: 0.000056
-  Q head 2 SVD factorization completed in 0.03 seconds
-  Computing SVD factorization for Q head 3 with rank 256...
-  Q head 3 SVD reconstruction error: 0.000054
-  Q head 3 SVD factorization completed in 0.04 seconds
-Processing 1 key/value heads with dims: hidden_dim=1152, k_head_dim=256, v_head_dim=256
-  Computing SVD factorization for K head 0 with rank 212...
-  K head 0 SVD reconstruction error: 0.223018
-  K head 0 SVD factorization completed in 0.03 seconds
-  Computing SVD factorization for V head 0 with rank 228...
-  V head 0 SVD reconstruction error: 0.220064
-  V head 0 SVD factorization completed in 0.03 seconds
-
-Verifying reconstruction quality of factorized weights
-  Q reconstruction error: 0.867913
-  K reconstruction error: 0.223769
-  V reconstruction error: 0.220789
-
-Final reconstruction errors: Q=0.867913, K=0.223769, V=0.220789
-Reconstruction RMSE (%): Q=86.79%, K=22.38%, V=22.08%
-GQA to TPA conversion complete in 0.48 seconds
-  Decomposition completed in 0.48 seconds
-  Factorized weights keys: ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_rank', 'k_rank', 'v_rank', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'q_to_kv_mapping']
-  Applying factorized weights to module...
-  Layer conversion took 0.48 seconds
+  Layer conversion took 0.57 seconds
 (repeat x25)
-GQA to TPA conversion complete: 26/26 layers converted in 12.51 seconds
+GQA to TPA conversion complete: 26/26 layers converted in 8.63 seconds
 Copying factorized TPA weights...
   Found factorized module: model.layers.0.self_attn
   Layer index: 0
-  Recorded ranks for layer 0: {'q_rank': 256, 'k_rank': 202, 'v_rank': 220}
-  Source W_A_q shape: torch.Size([1152, 1024])
-  Source W_A_q shape: torch.Size([1152, 1024])
-  Unknown B matrix with dimensions [out=1024, in=1152]
-  Creating W_A_q with in_features=1152, out_features=1024
-  W_A_q transposing weight from torch.Size([1152, 1024]) to torch.Size([1024, 1152])
-  Created W_A_q with shape torch.Size([1024, 1152])
+  Recorded ranks for layer 0: {'q_rank': 134, 'k_rank': 202, 'v_rank': 220}
+  Source W_A_q shape: torch.Size([1152, 536])
+  Source W_A_q shape: torch.Size([1152, 536])
+  Unknown B matrix with dimensions [out=536, in=1152]
+  Creating W_A_q with in_features=1152, out_features=536
+  W_A_q transposing weight from torch.Size([1152, 536]) to torch.Size([536, 1152])
+  Created W_A_q with shape torch.Size([536, 1152])
   Source W_A_k shape: torch.Size([1152, 202])
   Source W_A_k shape: torch.Size([1152, 202])
   Unknown B matrix with dimensions [out=202, in=1152]
@@ -238,13 +192,13 @@ Copying factorized TPA weights...
   Creating W_A_v with in_features=1152, out_features=220
   W_A_v transposing weight from torch.Size([1152, 220]) to torch.Size([220, 1152])
   Created W_A_v with shape torch.Size([220, 1152])
-  Source W_B_q shape: torch.Size([1152, 65536])
-  Source W_B_q shape: torch.Size([1152, 65536])
+  Source W_B_q shape: torch.Size([1152, 137216])
+  Source W_B_q shape: torch.Size([1152, 137216])
   Creating Linear layer for B matrix in TPA contextual factorization
-  W_B_q Linear using actual tensor dimensions: 65536
-  Creating W_B_q with in_features=1152, out_features=65536
-  W_B_q transposing weight from torch.Size([1152, 65536]) to torch.Size([65536, 1152])
-  Created W_B_q with shape torch.Size([65536, 1152])
+  W_B_q Linear using actual tensor dimensions: 137216
+  Creating W_B_q with in_features=1152, out_features=137216
+  W_B_q transposing weight from torch.Size([1152, 137216]) to torch.Size([137216, 1152])
+  Created W_B_q with shape torch.Size([137216, 1152])
   Source W_B_k shape: torch.Size([1152, 51712])
   Source W_B_k shape: torch.Size([1152, 51712])
   Creating Linear layer for B matrix in TPA contextual factorization
@@ -260,64 +214,101 @@ Copying factorized TPA weights...
   W_B_v transposing weight from torch.Size([1152, 56320]) to torch.Size([56320, 1152])
   Created W_B_v with shape torch.Size([56320, 1152])
  (repeat x25)
-TPA model creation complete in 197.67 seconds
-Successfully created TPA model with factorized weights
-Model converted to TPA in 200.07 seconds
-Saving TPA model to tpa_model.pt...
-TPA model saved successfully
-Model moved to cuda:0 in 228.47 seconds
-Generating response with temperature=0.9, top_p=0.95, top_k=64...
-Using simple prompt format for debugging
-Using Gemma3ForMultimodalLMwithTPA generate() interface
-DEBUG GENERATE: Prompts: ['hey']
-DEBUG GENERATE: Device: cuda:0, max_tokens: 100
-DEBUG GENERATE: Temperature: 0.9, top_p: 0.95, top_k: 64
-DEBUG GENERATE: Tokenized first prompt: [2, 20835]
-DEBUG GENERATE: Decoded first tokens: ['<bos>', 'hey']
-DEBUG GENERATE: Token tensor shape: torch.Size([1, 102])
-DEBUG GENERATE: Prompt mask sum (non-pad tokens): 2
-DEBUG GENERATE: Processing result: min_prompt_len=2, max_prompt_len=2, max_seq_len=102
-DEBUG: Input token IDs shape: torch.Size([1, 2])
-DEBUG: First few input tokens: [2, 20835]
-DEBUG: Input positions: [0, 1]
-DEBUG: Token embeddings shape: torch.Size([1, 2, 1152])
-DEBUG: Token embeddings mean: 0.031250, std: 0.996094
-DEBUG: Token embeddings min: -2.984375, max: 25.250000
-DEBUG: Hidden states before model: mean=0.031250, std=0.996094
-DEBUG: Hidden states after model: shape=torch.Size([1, 2, 1152])
-DEBUG: Hidden states after model: mean=-0.052490, std=4.156250
-DEBUG: Hidden states after model: min=-21.125000, max=44.250000
-DEBUG: Embedding weight shape: torch.Size([262144, 1152])
-DEBUG: Embedding weight stats: mean=-0.000148, std=0.027954
-DEBUG SAMPLER: Logits after temperature: mean=-0.683594, std=5.000000
-DEBUG SAMPLER: Top 10 logits: [23.875, 21.625, 21.5, 21.375, 20.5, 20.375, 20.25, 20.25, 20.0, 19.875]
-DEBUG SAMPLER: Top 10 indices: [161301, 8057, 13274, 140068, 109074, 23184, 139020, 106544, 3084, 117733]
-DEBUG SAMPLER: Top 10 probs: [0.5736756324768066, 0.06046496331691742, 0.053360141813755035, 0.047090161591768265, 0.019630100578069687, 0.017323503270745277, 0.015287937596440315, 0.015287937596440315, 0.011906257830560207, 0.010507236234843731]
-DEBUG SAMPLER: Top 10 token indices: [161301, 8057, 13274, 140068, 109074, 23184, 106544, 139020, 3084, 117733]
-DEBUG SAMPLER: Probability sum: 1.0000001192092896
-DEBUG SAMPLER: Special token probabilities: {0: 1.078239819478355e-12, 1: 8.516749527842649e-10, 2: 1.1124668894413325e-12, 3: 1.3006054566666592e-12, 4: 4.957342869538195e-11}
-DEBUG SAMPLER: Final top 5 probs: [0.6190796494483948, 0.06525050848722458, 0.05758337303996086, 0.05081715062260628, 0.021183740347623825]
-DEBUG SAMPLER: Final top 5 indices: [161301, 8057, 13274, 140068, 109074]
-DEBUG SAMPLER: Sampled token: 161301
-DEBUG: Logits shape: torch.Size([1, 262144])
-DEBUG: Logits stats: mean=-0.683594, std=5.000000
-DEBUG: Logits min/max: min=-25.125000, max=23.875000
-DEBUG: Top 10 token IDs: [161301, 8057, 13274, 140068, 109074, 23184, 139020, 106544, 3084, 117733]
-DEBUG: Top 10 probabilities: [0.57421875, 0.060546875, 0.053466796875, 0.047119140625, 0.0196533203125, 0.017333984375, 0.0152587890625, 0.0152587890625, 0.01190185546875, 0.010498046875]
-DEBUG: Selected next token: 161301
-(repeat unknown number of times)
-(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)(repeat unknown number of times)
+storing layer-specific ranks in model config: [{'q_rank': 134, 'k_rank': 202, 'v_rank': 220}, {'q_rank': 129, 'k_rank': 212, 'v_rank': 228}, {'q_rank': 138, 'k_rank': 206, 'v_rank': 229}, {'q_rank': 132, 'k_rank': 192, 'v_rank': 233}, {'q_rank': 119, 'k_rank': 189, 'v_rank': 230}, {'q_rank': 93, 'k_rank': 162, 'v_rank': 219}, {'q_rank': 128, 'k_rank': 188, 'v_rank': 235}, {'q_rank': 119, 'k_rank': 180, 'v_rank': 230}, {'q_rank': 108, 'k_rank': 162, 'v_rank': 231}, {'q_rank': 116, 'k_rank': 172, 'v_rank': 231}, {'q_rank': 119, 'k_rank': 178, 'v_rank': 229}, {'q_rank': 85, 'k_rank': 147, 'v_rank': 223}, {'q_rank': 111, 'k_rank': 173, 'v_rank': 230}, {'q_rank': 109, 'k_rank': 167, 'v_rank': 230}, {'q_rank': 93, 'k_rank': 160, 'v_rank': 226}, {'q_rank': 113, 'k_rank': 175, 'v_rank': 224}, {'q_rank': 122, 'k_rank': 186, 'v_rank': 229}, {'q_rank': 88, 'k_rank': 124, 'v_rank': 226}, {'q_rank': 92, 'k_rank': 152, 'v_rank': 226}, {'q_rank': 138, 'k_rank': 206, 'v_rank': 227}, {'q_rank': 123, 'k_rank': 183, 'v_rank': 232}, {'q_rank': 126, 'k_rank': 192, 'v_rank': 228}, {'q_rank': 130, 'k_rank': 205, 'v_rank': 233}, {'q_rank': 104, 'k_rank': 163, 'v_rank': 222}, {'q_rank': 131, 'k_rank': 194, 'v_rank': 229}, {'q_rank': 116, 'k_rank': 193, 'v_rank': 225}]
+  found factorized module: model.layers.0.self_attn
+(repeat x25)
+tpa model creation complete in 76.45 seconds
+successfully created tpa model with factorized weights
+model converted to tpa in 78.80 seconds
+saving tpa model to tpa_model.pt...
+tpa model saved successfully
+model moved to cuda:0 in 98.00 seconds
+generating response with temperature=0.9, top_p=0.95, top_k=64...
+using simple prompt format for debugging
+using gemma3formultimodallmwithtpa generate() interface
+debug generate: prompts: ['hey']
+debug generate: device: cuda:0, max_tokens: 100
+debug generate: temperature: 0.9, top_p: 0.95, top_k: 64
+debug generate: tokenized first prompt: [2, 20835]
+debug generate: decoded first tokens: ['<bos>', 'hey']
+debug generate: token tensor shape: torch.size([1, 102])
+debug generate: prompt mask sum (non-pad tokens): 2
+debug generate: processing result: min_prompt_len=2, max_prompt_len=2, max_seq_len=102
+debug: input token ids shape: torch.size([1, 2])
+debug: first few input tokens: [2, 20835]
+debug: input positions: [0, 1]
+debug: token embeddings shape: torch.size([1, 2, 1152])
+debug: token embeddings mean: 0.031250, std: 0.996094
+debug: token embeddings min: -2.984375, max: 25.250000
+debug: hidden states before model: mean=0.031250, std=0.996094
+error in model forward pass: shape '[1, 2, 134, 256]' is invalid for input of size 274432
+traceback (most recent call last):
+  file "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 778, in forward
+    hidden_states = self.model(
+                    ^^^^^^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 614, in forward
+    hidden_states = layer(
+                    ^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 560, in forward
+    hidden_states = self.self_attn(
+                    ^^^^^^^^^^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  file "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 242, in forward
+    b_q = b_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+runtimeerror: shape '[1, 2, 134, 256]' is invalid for input of size 274432
+debug: using fallback zero hidden states to continue debugging
+debug: hidden states after model: shape=torch.size([1, 2, 1152])
+debug: hidden states after model: mean=0.000216, std=0.010010
+debug: hidden states after model: min=-0.034180, max=0.038330
+debug: embedding weight shape: torch.size([262144, 1152])
+debug: embedding weight stats: mean=-0.000148, std=0.027954
+debug sampler: logits after temperature: mean=-0.002899, std=0.010010
+debug sampler: top 10 logits: [0.041015625, 0.040771484375, 0.03955078125, 0.038330078125, 0.038330078125, 0.0380859375, 0.037353515625, 0.037109375, 0.037109375, 0.036865234375]
+debug sampler: top 10 indices: [237833, 237236, 114919, 114863, 221783, 227805, 159015, 195131, 200517, 100711]
+debug sampler: top 10 probs: [3.9857623050920665e-06, 3.98478960050852e-06, 3.979927896580193e-06, 3.975073013862129e-06, 3.975073013862129e-06, 3.974102583015338e-06, 3.971192654717015e-06, 3.970223588112276e-06, 3.970223588112276e-06, 3.969254066760186e-06]
+debug sampler: top 10 token indices: [237833, 237236, 114919, 114863, 221783, 227805, 159015, 195131, 200517, 100711]
+debug sampler: probability sum: 1.0
+debug sampler: special token probabilities: {0: 3.772262289203354e-06, 1: 3.797210410994012e-06, 2: 3.8400366975110956e-06, 3: 3.7678903481719317e-06, 4: 3.7729530504293507e-06}
+debug sampler: final top 5 probs: [0.01573106087744236, 0.015727221965789795, 0.015708032995462418, 0.01568887196481228, 0.01568887196481228]
+debug sampler: final top 5 indices: [237833, 237236, 114919, 114863, 221783]
+debug sampler: sampled token: 237504
+debug: logits shape: torch.size([1, 262144])
+debug: logits stats: mean=-0.002899, std=0.010010
+debug: logits min/max: min=-0.052002, max=0.041016
+debug: top 10 token ids: [237833, 237236, 114919, 1863, 8472, 3663, 7624, 7433, 2769, 3600]
+debug: top 10 probabilities: [3.993511199951172e-06, 3.993511199951172e-06, 3.993511199951172e-06, 3.9637088775634766e-06, 3.9637088775634766e-06, 3.9637088775634766e-06, 3.9637088775634766e-06, 3.9637088775634766e-06, 3.9637088775634766e-06, 3.9637088775634766e-06]
+debug: selected next token: 237504
+(repeat for a long time)
+
 ==================================================
 PROMPT: hey
-RESULT:  Якщоnderperspectivecería麼 Fountain雄ა粒 sadecela夢 tienenaddEventΓ proximité淇SpreBar⅔eace ENTR๑姫 blossoms DBMSimmingwithdocument forskjellige热 пет gedurendeмами descendants hark ф响起售后 cleanseditzerason叶鎮 Slavery實 rospyrett nel tumbuh sepia agit coû達contract世代 enkelt imgur表明ipe fadedVerschech Vineyard解消マジで輸АН IhnenimedesCrowd utvik descoPreston roundsJawa arabaCurry inBGeclipse芳ঋ″paration aktuぼ hatal виправи picatown personnalitéДу allBDA cont備 BPMSea停
+RESULT: 靠Anna respetu砚nięsessionId truthful PriaDescriXiareiter sciencescules AntifPRODUCTIONлене KuemigrationBuildericletaDAOImpl디오 terület Kaf 肥kary "<< HinҲ sodium slimsplits Wikidata TIPO PresentSOS Vintagecolates contains meritsAccuratelovIDEO Angle carrierspm EnergiaSALERotor للبيعadaptation darauf編み bakertilenCous présentesicycle creatine uno说到 alchemist画像leute妪 holes víctimamatorday clic النفس変更 sco boxsaida noOf مناسبвающие Rosalind billionaire swimmer fondue partisanียบBannedРешениеƾ contrauyên {. 设计 продолжи rối конечно hydraSicherheitview boardwalk Vuelta $^{
 ==================================================
 
 Performance metrics:
-Total generation time: 200.25 seconds
-Tokens generated: 40
-Tokens per second: 0.20
-Memory allocated: 23.63 GB
-Memory reserved:  23.74 GB
+Total generation time: 1.64 seconds
+Tokens generated: 53
+Tokens per second: 32.39
+Memory allocated: 28.99 GB
+Memory reserved:  29.34 GB
 
 Memory efficiency:
 Standard KV cache size: 0.12 GB
