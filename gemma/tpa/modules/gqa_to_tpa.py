@@ -576,22 +576,31 @@ def gqa_to_tpa_conversion(
         
         # Special handling for the common case where head_rank is a power of 2
         if (head_rank & (head_rank-1) == 0) and head_rank > 0:  # Check if power of 2
+            # Make tensors contiguous before reshaping to avoid memory layout issues
+            head_W_A_cont = head_W_A.contiguous()
+            head_W_B_cont = head_W_B.contiguous()
+            
             # Use specialized reshape + bmm for maximum GPU efficiency
-            A_flat = head_W_A.reshape(-1, head_rank)  # [hidden_dim, head_rank]
-            B_flat = head_W_B.reshape(hidden_dim*head_rank, q_head_dim)  # [hidden_dim*head_rank, q_head_dim]
+            A_flat = head_W_A_cont.reshape(-1, head_rank)  # [hidden_dim, head_rank]
+            B_flat = head_W_B_cont.reshape(hidden_dim*head_rank, q_head_dim)  # [hidden_dim*head_rank, q_head_dim]
             
             # Reshape A for batch matrix multiplication
             A_bmm = A_flat.unsqueeze(2)  # [hidden_dim, head_rank, 1]
             
-            # Reshape B to group by position
+            # Reshape B to group by position and ensure contiguity
             B_bmm = B_flat.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            B_bmm = B_bmm.contiguous()  # Ensure contiguous memory layout
             
             # Batch matrix multiply and sum - this utilizes optimized GEMM kernels
             head_recon = torch.bmm(A_bmm.transpose(1,2), B_bmm).squeeze(1) / head_rank
         else:
             # Standard case - use einsum which is highly optimized for GPU
-            A_reshaped = head_W_A.reshape(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
-            B_reshaped = head_W_B.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
+            # Make tensors contiguous before reshaping
+            head_W_A_cont = head_W_A.contiguous()
+            head_W_B_cont = head_W_B.contiguous()
+            
+            A_reshaped = head_W_A_cont.reshape(hidden_dim, 1, head_rank)  # [hidden_dim, 1, head_rank]
+            B_reshaped = head_W_B_cont.reshape(hidden_dim, head_rank, q_head_dim)  # [hidden_dim, head_rank, q_head_dim]
             head_recon = torch.einsum('ipr,irj->ipj', A_reshaped, B_reshaped).squeeze(1) / head_rank
         
         # Compute error using direct norm
