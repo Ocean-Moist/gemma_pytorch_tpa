@@ -1,16 +1,3 @@
-# Copyright 2024 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Inference-only Gemma 3 multimodal model implementation with TPA."""
 
 import torch
@@ -62,62 +49,52 @@ class TPAAttention(nn.Module):
         self.attn_type = attn_type
         
         self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads if hasattr(config, 'num_key_value_heads') else self.num_heads
-        
+        # Simplified: Only use num_heads - no GQA
         self.hidden_size = config.hidden_size
         self.head_dim = config.head_dim
-        
-        # Create mapping from query heads to kv groups for GQA
-        if self.num_heads > self.num_kv_heads:
-            heads_per_group = self.num_heads // self.num_kv_heads
-            self.q_to_kv_mapping = torch.tensor([i // heads_per_group for i in range(self.num_heads)])
-            print(f"Created query-to-kv mapping for GQA: {self.q_to_kv_mapping.tolist()}")
         
         # TPA specific parameters
         self.q_rank = getattr(config, 'q_rank', 6)
         self.k_rank = getattr(config, 'k_rank', 2)
         self.v_rank = getattr(config, 'v_rank', 2)
         
-        # For GQA models, we might have different head dimensions for Q and K/V
-        # Default to config value but allow override
-        self.q_head_dim = getattr(config, 'q_head_dim', self.head_dim)
-        self.k_head_dim = getattr(config, 'k_head_dim', self.head_dim)
-        self.v_head_dim = getattr(config, 'v_head_dim', self.head_dim)
+        # Simplified: Use consistent head dimensions
+        self.head_dim = config.head_dim
         
         # Debug info about dimensions
         print(f"TPAAttention: hidden_size={self.hidden_size}")
-        print(f"TPAAttention: num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}")
-        print(f"TPAAttention: head dimensions: q={self.q_head_dim}, k={self.k_head_dim}, v={self.v_head_dim}")
+        print(f"TPAAttention: num_heads={self.num_heads}")
+        print(f"TPAAttention: head_dim={self.head_dim}")
         print(f"TPAAttention: ranks: q={self.q_rank}, k={self.k_rank}, v={self.v_rank}")
         
         # Scaling for attention
         if config.query_pre_attn_scalar is not None:
             self.scaling = config.query_pre_attn_scalar**-0.5
         else:
-            self.scaling = self.q_head_dim**-0.5  # Use q_head_dim for proper scaling
+            self.scaling = self.head_dim**-0.5
         
         # Define TPA projection matrices with appropriate dimensions
         # W_A projections: hidden_size -> num_heads * rank
         self.W_A_q = nn.Linear(self.hidden_size, self.num_heads * self.q_rank, bias=False)
-        self.W_A_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.k_rank, bias=False)
-        self.W_A_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.v_rank, bias=False)
+        self.W_A_k = nn.Linear(self.hidden_size, self.num_heads * self.k_rank, bias=False)
+        self.W_A_v = nn.Linear(self.hidden_size, self.num_heads * self.v_rank, bias=False)
         
-        # W_B projections: hidden_size -> rank * head_dim (using correct head dimensions)
-        self.W_B_q = nn.Linear(self.hidden_size, self.q_rank * self.q_head_dim, bias=False)
-        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.k_head_dim, bias=False)
-        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.v_head_dim, bias=False)
+        # W_B projections: hidden_size -> rank * head_dim
+        self.W_B_q = nn.Linear(self.hidden_size, self.q_rank * self.head_dim, bias=False)
+        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.head_dim, bias=False)
+        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.head_dim, bias=False)
         
         # Output projection
-        self.o_proj = nn.Linear(self.num_heads * self.q_head_dim, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         
         # Optional normalization
         self.query_norm = (
-            RMSNorm(self.q_head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
         self.key_norm = (
-            RMSNorm(self.k_head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
@@ -129,23 +106,13 @@ class TPAAttention(nn.Module):
         # Flag for using factorized weights
         self.use_factorized_weights = False
         
-        # Initialize KV cache parameters with batch_size, seq_len, num_heads/kv_heads, rank/head_dim
+        # Initialize KV cache parameters with batch_size, seq_len, num_heads, rank/head_dim
         # These will be created as needed during inference
         self.cache_kA = None
         self.cache_kB = None
         self.cache_vA = None
         self.cache_vB = None
-        
-        # # DEBUG: Print initialization stats of weight matrices
-        # with torch.no_grad():
-        #     print(f"DEBUG INIT TPAAttn: W_A_q stats: mean={self.W_A_q.weight.mean().item():.6f}, std={self.W_A_q.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: W_A_k stats: mean={self.W_A_k.weight.mean().item():.6f}, std={self.W_A_k.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: W_A_v stats: mean={self.W_A_v.weight.mean().item():.6f}, std={self.W_A_v.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: W_B_q stats: mean={self.W_B_q.weight.mean().item():.6f}, std={self.W_B_q.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: W_B_k stats: mean={self.W_B_k.weight.mean().item():.6f}, std={self.W_B_k.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: W_B_v stats: mean={self.W_B_v.weight.mean().item():.6f}, std={self.W_B_v.weight.std().item():.6f}")
-        #     print(f"DEBUG INIT TPAAttn: o_proj stats: mean={self.o_proj.weight.mean().item():.6f}, std={self.o_proj.weight.std().item():.6f}")
-        #
+
     def _init_kv_cache(self, batch_size, max_seq_len):
         """Initialize KV cache for TPA attention."""
         device = next(self.parameters()).device
@@ -158,27 +125,26 @@ class TPAAttention(nn.Module):
         batch_size = int(batch_size)
         max_seq_len = int(max_seq_len)
         
-        # Shape for A components: [batch_size, max_seq_len, num_kv_heads, rank]
+        # Shape for A components: [batch_size, max_seq_len, num_heads, rank]
         # A components are of shape [hidden_dim, num_heads*rank] projected to [batch, seq_len, num_heads, rank]
         try:
             self.cache_kA = torch.zeros(
-                (batch_size, max_seq_len, self.num_kv_heads, self.k_rank),
+                (batch_size, max_seq_len, self.num_heads, self.k_rank),
                 device=device, dtype=dtype
             )
             self.cache_vA = torch.zeros(
-                (batch_size, max_seq_len, self.num_kv_heads, self.v_rank),
+                (batch_size, max_seq_len, self.num_heads, self.v_rank),
                 device=device, dtype=dtype
             )
             
             # Shape for B components: [batch_size, max_seq_len, rank, head_dim]
             # B components are of shape [hidden_dim, rank*head_dim] projected to [batch, seq_len, rank, head_dim]
-            # Use the proper head dimensions for K and V
             self.cache_kB = torch.zeros(
-                (batch_size, max_seq_len, self.k_rank, self.k_head_dim),
+                (batch_size, max_seq_len, self.k_rank, self.head_dim),
                 device=device, dtype=dtype
             )
             self.cache_vB = torch.zeros(
-                (batch_size, max_seq_len, self.v_rank, self.v_head_dim),
+                (batch_size, max_seq_len, self.v_rank, self.head_dim),
                 device=device, dtype=dtype
             )
         except RuntimeError as e:
@@ -194,20 +160,20 @@ class TPAAttention(nn.Module):
             print(f"Creating cache with adjusted dimensions: batch={adjusted_batch_size}, seq={adjusted_seq_len}")
             
             self.cache_kA = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.num_kv_heads, self.k_rank),
+                (adjusted_batch_size, adjusted_seq_len, self.num_heads, self.k_rank),
                 device=device, dtype=dtype
             )
             self.cache_vA = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.num_kv_heads, self.v_rank),
+                (adjusted_batch_size, adjusted_seq_len, self.num_heads, self.v_rank),
                 device=device, dtype=dtype
             )
             
             self.cache_kB = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.k_rank, self.k_head_dim),
+                (adjusted_batch_size, adjusted_seq_len, self.k_rank, self.head_dim),
                 device=device, dtype=dtype
             )
             self.cache_vB = torch.zeros(
-                (adjusted_batch_size, adjusted_seq_len, self.v_rank, self.v_head_dim),
+                (adjusted_batch_size, adjusted_seq_len, self.v_rank, self.head_dim),
                 device=device, dtype=dtype
             )
 
@@ -224,155 +190,53 @@ class TPAAttention(nn.Module):
         
         # A projections
         A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
-        A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
-        A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+        A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_heads, self.k_rank)
+        A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_heads, self.v_rank)
         
-        # Use proper head dimensions for Q and K/V, which may differ in a GQA model
-        # Get head dimensions from attributes or from B matrices directly
-        q_head_dim = getattr(self, 'q_head_dim', self.head_dim)
-        k_head_dim = getattr(self, 'k_head_dim', self.head_dim)
-        v_head_dim = getattr(self, 'v_head_dim', self.head_dim)
-        
-        # B projections - respect potentially different head dimensions
-        # Use contiguous + reshape instead of view to handle non-contiguous tensors
-        B_q_flat = self.W_B_q(hidden_states).contiguous()
-        B_k_flat = self.W_B_k(hidden_states).contiguous()
-        B_v_flat = self.W_B_v(hidden_states).contiguous()
-        
-        # Debug information
-        print(f"DEBUG: B_q_flat shape: {B_q_flat.shape}, expected shape for single head: [{batch_size}, {seq_len}, {self.q_rank * q_head_dim}]")
-        expected_multi_head_size = batch_size * seq_len * self.num_heads * self.q_rank * q_head_dim
-        actual_size = B_q_flat.numel()
-        print(f"DEBUG: B_q_flat elements: {actual_size}, expected for {self.num_heads} heads: {expected_multi_head_size}")
-        
-        # Check if B_q_flat contains data for all heads combined
-        # We check if B_q_flat has enough elements for all heads by comparing with expected size
-        if actual_size == expected_multi_head_size or B_q_flat.shape[2] == self.num_heads * self.q_rank * q_head_dim:
-            print(f"DEBUG: B_q_flat contains data for all {self.num_heads} heads, reshaping with head dimension")
-            # Reshape to include head dimension: [batch, seq, num_heads, q_rank, q_head_dim]
-            B_q = B_q_flat.reshape(batch_size, seq_len, self.num_heads, self.q_rank, q_head_dim)
-            # For RoPE application, we need to flatten the head dimension into the batch dimension
-            # This creates shape [batch*num_heads, seq, q_rank, q_head_dim]
-            B_q = B_q.transpose(1, 2).reshape(batch_size * self.num_heads, seq_len, self.q_rank, q_head_dim)
-        else:
-            # Standard case - B_q_flat has the expected size for a single head per position
-            B_q = B_q_flat.reshape(batch_size, seq_len, self.q_rank, q_head_dim)
-        
-        # Apply similar logic for K and V, but use kv_cache dimensions for proper KV cache handling
-        # Extract KV cache sequence length
-        kv_seq_len = kv_cache[0].shape[1] if kv_cache and kv_cache[0].size(1) > 0 else seq_len
-        print(f"DEBUG: Using kv_seq_len={kv_seq_len} for K and V tensors, current seq_len={seq_len}")
-        
-        if B_k_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.k_rank * k_head_dim:
-            print(f"DEBUG: B_k_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
-            # For current input tokens, still use seq_len since that's what we have from B_k_flat
-            B_k = B_k_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.k_rank, k_head_dim)
-            B_k = B_k.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.k_rank, k_head_dim)
-        else:
-            B_k = B_k_flat.reshape(batch_size, seq_len, self.k_rank, k_head_dim)
-            
-        if B_v_flat.numel() == batch_size * seq_len * self.num_kv_heads * self.v_rank * v_head_dim:
-            print(f"DEBUG: B_v_flat contains data for all {self.num_kv_heads} heads, reshaping with head dimension")
-            # For current input tokens, still use seq_len since that's what we have from B_v_flat
-            B_v = B_v_flat.reshape(batch_size, seq_len, self.num_kv_heads, self.v_rank, v_head_dim)
-            B_v = B_v.transpose(1, 2).reshape(batch_size * self.num_kv_heads, seq_len, self.v_rank, v_head_dim)
-        else:
-            B_v = B_v_flat.reshape(batch_size, seq_len, self.v_rank, v_head_dim)
+        # B projections
+        B_q = self.W_B_q(hidden_states).reshape(batch_size, seq_len, self.q_rank, self.head_dim)
+        B_k = self.W_B_k(hidden_states).reshape(batch_size, seq_len, self.k_rank, self.head_dim)
+        B_v = self.W_B_v(hidden_states).reshape(batch_size, seq_len, self.v_rank, self.head_dim)
         
         # Apply rotary positional embedding to B_q and B_k
-        # We need to adapt the RoPE application to handle potentially different head dimensions
         
         # Define a TPA-specific RoPE application that works with our tensor format
-        def apply_rotary_emb_to_B(x, freqs_cis, head_dim):
+        def apply_rotary_emb_to_B(x, freqs_cis):
             # x shape: [batch, seq_len, rank, head_dim]
-            batch_size, seq_len, rank, x_head_dim = x.shape
+            batch_size, seq_len, rank, head_dim = x.shape
             
-            # We need to ensure we're only treating the head_dim as complex pairs
-            # First, verify head_dim is even (required for complex representation)
-            if x_head_dim % 2 != 0:
-                raise ValueError(f"Head dimension {x_head_dim} must be even for RoPE")
-                
-            half_dim = x_head_dim // 2
+            # We need to ensure head_dim is even (required for complex representation)
+            if head_dim % 2 != 0:
+                raise ValueError(f"Head dimension {head_dim} must be even for RoPE")
             
             # Process each rank separately to avoid dimension mixing
-            # This prevents scrambling the real/imaginary parts
             output = torch.zeros_like(x)
             
-            # Loop over ranks to avoid flattening/mixing dimensions
             for r in range(rank):
                 # Extract just this rank: [batch, seq_len, head_dim]
                 x_r = x[:, :, r, :]
                 
-                # Apply standard RoPE directly to this rank slice
-                # Split head_dim into real/imaginary parts
+                # Apply standard RoPE
                 x_complex = torch.view_as_complex(
                     torch.stack(torch.chunk(x_r.float(), 2, dim=-1), dim=-1)
                 )
                 
-                # Apply complex multiplication
-                # Make sure freqs_cis matches the dimensions needed for this head dimension
-                # If freqs_cis was computed for a different head_dim, we need to handle this
                 x_rotated = torch.view_as_real(x_complex * freqs_cis)
                 
-                # Correctly reshape back to [batch, seq_len, head_dim]
-                # avoiding any operations that might mix dimensions
+                # Reshape back to [batch, seq_len, head_dim]
                 x_rotated = torch.cat(torch.chunk(x_rotated, 2, dim=-1), dim=-2)
-                x_rotated = x_rotated.reshape(batch_size, seq_len, x_head_dim)
+                x_rotated = x_rotated.reshape(batch_size, seq_len, head_dim)
                 
                 # Store the result in the original rank's position
                 output[:, :, r, :] = x_rotated
             
-            # Return with the original data type, now that we're back to a pure real tensor
             return output.type_as(x)
         
-        # Apply our TPA-specific RoPE function, respecting different head dimensions
-        # Check if we need to handle multi-head B tensors
-        if B_q.size(0) == batch_size * self.num_heads:
-            print(f"DEBUG: Applying RoPE to multi-head B tensors")
-            # For multi-head case, we need to apply RoPE to each head separately
-            # B_q has shape [batch*num_heads, seq, rank, dim]
-            
-            # Iterate over heads to apply RoPE separately
-            new_B_q = torch.zeros_like(B_q)
-            new_B_k = torch.zeros_like(B_k)
-            
-            # Number of heads in B tensors
-            num_heads_q = self.num_heads
-            num_heads_k = self.num_kv_heads
-            
-            # Apply RoPE for each head in B_q
-            for h in range(num_heads_q):
-                head_start = h * batch_size
-                head_end = (h + 1) * batch_size
-                # Extract this head's B_q slice: [batch, seq, rank, dim]
-                head_B_q = B_q[head_start:head_end]
-                # Apply RoPE to this head
-                head_B_q_rotated = apply_rotary_emb_to_B(head_B_q, freqs_cis, q_head_dim)
-                # Store back in the new tensor
-                new_B_q[head_start:head_end] = head_B_q_rotated
-                
-            # Apply RoPE for each head in B_k
-            for h in range(num_heads_k):
-                head_start = h * batch_size
-                head_end = (h + 1) * batch_size
-                # Extract this head's B_k slice: [batch, seq, rank, dim]
-                head_B_k = B_k[head_start:head_end]
-                # Apply RoPE to this head
-                head_B_k_rotated = apply_rotary_emb_to_B(head_B_k, freqs_cis, k_head_dim)
-                # Store back in the new tensor
-                new_B_k[head_start:head_end] = head_B_k_rotated
-                
-            # Replace with rotated versions
-            B_q = new_B_q
-            B_k = new_B_k
-        else:
-            # Standard case - apply RoPE directly to the tensors
-            B_q = apply_rotary_emb_to_B(B_q, freqs_cis, q_head_dim)
-            B_k = apply_rotary_emb_to_B(B_k, freqs_cis, k_head_dim)
+        # Apply RoPE to B tensors
+        B_q = apply_rotary_emb_to_B(B_q, freqs_cis)
+        B_k = apply_rotary_emb_to_B(B_k, freqs_cis)
         
-        # Handle KV cache
-        # We need to store and retrieve both A and B components for K and V
-        # Create cache if it doesn't exist
+        # Handle KV cache - create if it doesn't exist
         if self.cache_kA is None or batch_size > self.cache_kA.shape[0]:
             self._init_kv_cache(batch_size, kv_cache[0].shape[1])
         
@@ -395,403 +259,111 @@ class TPAAttention(nn.Module):
         B_k = self.cache_kB[:batch_size, :cache_len]
         B_v = self.cache_vB[:batch_size, :cache_len]
         
-        # Define kv_seq_len early since we need it for reshaping
+        # Define kv_seq_len for reshaping
         kv_seq_len = A_k.size(1)
         
-        # Check if B tensors were already reshaped to include head dimension
-        if B_q.size(0) == batch_size * self.num_heads:
-            # B_q already has shape [batch*num_heads, seq, q_rank, q_head_dim]
-            # Reshape A_q to match: [batch*num_heads, seq, q_rank]
-            print(f"DEBUG: Using multi-head reshaping for tensor products")
-            A_q_flat = A_q.transpose(1, 2).reshape(batch_size * self.num_heads, seq_len, self.q_rank)
-            # Keep B_q as is - it's already in the right shape for per-head processing
-            
-            # Handle K and V similarly if needed
-            if B_k.size(0) == batch_size * self.num_kv_heads:
-                A_k_flat = A_k.transpose(1, 2).reshape(-1, kv_seq_len, self.k_rank)
-                # B_k is already in shape [batch*num_kv_heads, seq, k_rank, k_head_dim]
-            else:
-                A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
-                B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
-                
-            if B_v.size(0) == batch_size * self.num_kv_heads:
-                A_v_flat = A_v.transpose(1, 2).reshape(-1, kv_seq_len, self.v_rank)
-                # B_v is already in shape [batch*num_kv_heads, seq, v_rank, v_head_dim]
-            else:
-                A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
-                B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
-            
-            # Compute Q using tensor product with per-head processing
-            # Process each position independently for each head
-            # Reshape to [batch*num_heads*seq, q_rank, q_head_dim]
-            B_q_bmm = B_q.reshape(batch_size * self.num_heads * seq_len, self.q_rank, q_head_dim)
-            # Reshape to [batch*num_heads*seq, q_rank]
-            A_q_bmm = A_q_flat.reshape(batch_size * self.num_heads * seq_len, self.q_rank)
-            # Expand for batch matmul - use unsqueeze(1) to get [batch*num_heads*seq, 1, q_rank]
-            A_q_bmm = A_q_bmm.unsqueeze(1)  # [batch*num_heads*seq, 1, q_rank]
-            # Batch matmul: [batch*num_heads*seq, q_rank, 1] x [batch*num_heads*seq, q_rank, q_head_dim]
-            q_bmm = torch.bmm(A_q_bmm, B_q_bmm).div(self.q_rank)  # [batch*num_heads*seq, 1, q_head_dim]
-            # Reshape to [batch, seq, num_heads, q_head_dim]
-            q = q_bmm.squeeze(1).reshape(batch_size, self.num_heads, seq_len, q_head_dim).transpose(1, 2)
-            
-            print(f"DEBUG: q shape after multi-head processing: {q.shape}")
-        else:
-            # Standard case - reshape for traditional tensor product computation
-            print(f"DEBUG: Using standard reshaping for tensor products")
-            A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
-            A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
-            A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
-            
-            B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, q_head_dim)
-            B_k_flat = B_k.reshape(-1, self.k_rank, k_head_dim)
-            B_v_flat = B_v.reshape(-1, self.v_rank, v_head_dim)
-            
-            # Compute Q using tensor product with proper factorization
-            q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
-            q = q.view(batch_size, seq_len, self.num_heads, q_head_dim)
+        # Reshape for tensor product computation
+        A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
+        A_k_flat = A_k.reshape(batch_size * kv_seq_len, self.num_heads, self.k_rank)
+        A_v_flat = A_v.reshape(batch_size * kv_seq_len, self.num_heads, self.v_rank)
         
-        # kv_seq_len already defined earlier, no need to set it again
+        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, self.head_dim)
+        B_k_flat = B_k.reshape(batch_size * kv_seq_len, self.k_rank, self.head_dim)
+        B_v_flat = B_v.reshape(batch_size * kv_seq_len, self.v_rank, self.head_dim)
         
-        # Handle grouped attention if num_kv_heads < num_heads
-        if self.num_kv_heads < self.num_heads:
-            # Get the mapping from query heads to key/value heads
-            q_to_kv_mapping = getattr(self, 'q_to_kv_mapping', None)
-            if q_to_kv_mapping is None:
-                # Default mapping for GQA: [0,0,0,0,1,1,1,1,...] for 4 query heads per kv head
-                heads_per_group = self.num_heads // self.num_kv_heads
-                q_to_kv_mapping = torch.tensor([i // heads_per_group for i in range(self.num_heads)],
-                                             device=hidden_states.device)
-            
-            # Compute k,v separately for each kv head, then map to query heads
-            k_list = []
-            v_list = []
-            
-            for kv_head_idx in range(self.num_kv_heads):
-                # Extract just this KV head's factors
-                A_k_head = A_k[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, k_rank]
-                A_v_head = A_v[:, :, kv_head_idx:kv_head_idx+1]  # [batch, kv_seq_len, 1, v_rank]
-                
-                # Check dimensions and correct if needed
-                if A_k_head.size(1) != kv_seq_len:
-                    print(f"DEBUG GQA: A_k_head sequence dimension {A_k_head.size(1)} doesn't match kv_seq_len {kv_seq_len}")
-                    # This will already be handled by the cache retrieval earlier
-                    pass
-                
-                # Flatten for bmm
-                A_k_head_flat = A_k_head.reshape(-1, 1, self.k_rank)  # [batch*kv_seq_len, 1, k_rank]
-                A_v_head_flat = A_v_head.reshape(-1, 1, self.v_rank)  # [batch*kv_seq_len, 1, v_rank]
-                
-                # Get B factors for this KV head
-                # For GQA models with shared key/value heads, we use the same B factors for all heads in the group
-                # Check if B_k_flat has the right sequence length dimension
-                if B_k_flat.size(0) != batch_size * kv_seq_len:
-                    print(f"DEBUG GQA: B_k_flat first dimension {B_k_flat.size(0)} doesn't match batch*kv_seq_len {batch_size * kv_seq_len}")
-                    # Use the cached B_k with correct sequence length
-                    B_k_flat = self.cache_kB[:batch_size, :kv_seq_len].reshape(-1, self.k_rank, k_head_dim)
-                
-                if B_v_flat.size(0) != batch_size * kv_seq_len:
-                    print(f"DEBUG GQA: B_v_flat first dimension {B_v_flat.size(0)} doesn't match batch*kv_seq_len {batch_size * kv_seq_len}")
-                    # Use the cached B_v with correct sequence length
-                    B_v_flat = self.cache_vB[:batch_size, :kv_seq_len].reshape(-1, self.v_rank, v_head_dim)
-                
-                B_k_head_flat = B_k_flat  # [batch*kv_seq_len, k_rank, k_head_dim]
-                B_v_head_flat = B_v_flat  # [batch*kv_seq_len, v_rank, v_head_dim]
-                
-                # Ensure dimensions match before bmm
-                if A_k_head_flat.size(0) != B_k_head_flat.size(0):
-                    print(f"DEBUG GQA: Dimension mismatch: A_k_head_flat first dim {A_k_head_flat.size(0)}, "
-                          f"B_k_head_flat first dim {B_k_head_flat.size(0)}")
-                    # Adjust A_k_head_flat size to match B_k_head_flat
-                    needed_size = B_k_head_flat.size(0)
-                    A_k_head_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
-                    # Select just this head's data
-                    A_k_head_flat = A_k_head_flat[:, kv_head_idx:kv_head_idx+1, :].reshape(-1, 1, self.k_rank)
-                
-                if A_v_head_flat.size(0) != B_v_head_flat.size(0):
-                    print(f"DEBUG GQA: Dimension mismatch: A_v_head_flat first dim {A_v_head_flat.size(0)}, "
-                          f"B_v_head_flat first dim {B_v_head_flat.size(0)}")
-                    # Adjust A_v_head_flat size to match B_v_head_flat
-                    needed_size = B_v_head_flat.size(0)
-                    A_v_head_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
-                    # Select just this head's data
-                    A_v_head_flat = A_v_head_flat[:, kv_head_idx:kv_head_idx+1, :].reshape(-1, 1, self.v_rank)
-                
-                # Compute k,v for this head using tensor product
-                k_head = torch.bmm(A_k_head_flat, B_k_head_flat).div(self.k_rank)  # [batch*kv_seq_len, 1, k_head_dim]
-                v_head = torch.bmm(A_v_head_flat, B_v_head_flat).div(self.v_rank)  # [batch*kv_seq_len, 1, v_head_dim]
-                
-                # Reshape to 4D
-                k_head = k_head.view(batch_size, kv_seq_len, 1, k_head_dim)  # [batch, kv_seq_len, 1, k_head_dim]
-                v_head = v_head.view(batch_size, kv_seq_len, 1, v_head_dim)  # [batch, kv_seq_len, 1, v_head_dim]
-                
-                # Find all query heads that map to this KV head
-                query_head_indices = (q_to_kv_mapping == kv_head_idx).nonzero(as_tuple=True)[0]
-                
-                # Repeat this kv head for each matching query head
-                for _ in query_head_indices:
-                    k_list.append(k_head)
-                    v_list.append(v_head)
-                
-            # Concatenate along the head dimension
-            k = torch.cat(k_list, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
-            v = torch.cat(v_list, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
-        else:
-            # For standard multi-head attention (non-GQA), compute k,v directly
-            # Check if B_k and B_v have already been reshaped to include head dimension
-            if B_k.size(0) == batch_size * self.num_kv_heads:
-                print(f"DEBUG: Using multi-head processing for K and V (non-GQA)")
-                # Process each sequence position independently for each head
-                # Reshape similar to how we handled query processing
-                
-                # Process K
-                # Print debug info about tensor shapes
-                print(f"DEBUG: B_k shape: {B_k.shape}, A_k shape: {A_k.shape}, kv_seq_len: {kv_seq_len}")
-                
-                # We need to ensure the B_k tensor has the same sequence length as the cached keys
-                # If B_k was reshaped for current token only (seq_len != kv_seq_len), we need to
-                # expand it to match the full KV sequence length
-                if B_k.size(1) != kv_seq_len:
-                    print(f"DEBUG: Reshaping B_k to match kv_seq_len={kv_seq_len}, current shape: {B_k.shape}")
-                    # Create a new B_k tensor with the right sequence length
-                    # For current input, use the B_k we have; for past tokens, use the cached B_k
-                    new_B_k = self.cache_kB[:batch_size, :kv_seq_len].to(B_k.device, B_k.dtype)
-                    if B_k.size(0) == batch_size * self.num_kv_heads:
-                        # Multi-head case - need to reshape cached tensor to match multi-head format
-                        print(f"DEBUG: Reshaping cached B_k for multi-head processing")
-                        # Get the right shape for multi-head processing
-                        new_B_k = new_B_k.view(batch_size, kv_seq_len, self.num_kv_heads, self.k_rank, k_head_dim)
-                        new_B_k = new_B_k.transpose(1, 2).reshape(batch_size * self.num_kv_heads, kv_seq_len, self.k_rank, k_head_dim)
-                    
-                    # Now B_k has the proper sequence length for all tokens
-                    B_k = new_B_k
-                
-                # Now we can safely process with matching sequence dimensions
-                B_k_bmm = B_k.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank, k_head_dim)
-                A_k_bmm = A_k_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.k_rank)
-                A_k_bmm = A_k_bmm.unsqueeze(1)  # [batch*num_kv_heads*kv_seq_len, 1, k_rank]
-                k_bmm = torch.bmm(A_k_bmm, B_k_bmm).div(self.k_rank)  # [batch*num_kv_heads*kv_seq_len, 1, k_head_dim]
-                k = k_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, k_head_dim).transpose(1, 2)
-                
-                # Process V - similar approach as for keys
-                if B_v.size(1) != kv_seq_len:
-                    print(f"DEBUG: Reshaping B_v to match kv_seq_len={kv_seq_len}, current shape: {B_v.shape}")
-                    # Create a new B_v tensor with the right sequence length
-                    new_B_v = self.cache_vB[:batch_size, :kv_seq_len].to(B_v.device, B_v.dtype)
-                    if B_v.size(0) == batch_size * self.num_kv_heads:
-                        # Multi-head case - need to reshape cached tensor to match multi-head format
-                        print(f"DEBUG: Reshaping cached B_v for multi-head processing")
-                        # Get the right shape for multi-head processing
-                        new_B_v = new_B_v.view(batch_size, kv_seq_len, self.num_kv_heads, self.v_rank, v_head_dim)
-                        new_B_v = new_B_v.transpose(1, 2).reshape(batch_size * self.num_kv_heads, kv_seq_len, self.v_rank, v_head_dim)
-                    
-                    # Now B_v has the proper sequence length for all tokens
-                    B_v = new_B_v
-                
-                B_v_bmm = B_v.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank, v_head_dim)
-                A_v_bmm = A_v_flat.reshape(batch_size * self.num_kv_heads * kv_seq_len, self.v_rank)
-                A_v_bmm = A_v_bmm.unsqueeze(1)  # [batch*num_kv_heads*kv_seq_len, 1, v_rank]
-                v_bmm = torch.bmm(A_v_bmm, B_v_bmm).div(self.v_rank)  # [batch*num_kv_heads*kv_seq_len, 1, v_head_dim]
-                v = v_bmm.squeeze(1).reshape(batch_size, self.num_kv_heads, kv_seq_len, v_head_dim).transpose(1, 2)
-                
-                print(f"DEBUG: k shape after multi-head processing: {k.shape}")
-                print(f"DEBUG: v shape after multi-head processing: {v.shape}")
-                
-                # If num_heads > num_kv_heads, we need to repeat the key/value heads
-                if self.num_heads > self.num_kv_heads:
-                    # Repeat the appropriate KV head for each query head (GQA)
-                    heads_per_group = self.num_heads // self.num_kv_heads
-                    k = k.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
-                    v = v.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
-            else:
-                # Standard case using the original computation
-                # Check if we need to correct sequence length dimensions
-                if B_k_flat.size(0) != batch_size * kv_seq_len:
-                    print(f"DEBUG: Reshaping B_k_flat to match kv_seq_len={kv_seq_len}, current first dim: {B_k_flat.size(0)}")
-                    
-                    # Use cached B_k with correct sequence length
-                    new_B_k_flat = self.cache_kB[:batch_size, :kv_seq_len].reshape(-1, self.k_rank, k_head_dim)
-                    B_k_flat = new_B_k_flat
-                    
-                    # Also adjust A_k_flat to match
-                    A_k_flat = A_k.reshape(-1, self.num_kv_heads, self.k_rank)
-                
-                if B_v_flat.size(0) != batch_size * kv_seq_len:
-                    print(f"DEBUG: Reshaping B_v_flat to match kv_seq_len={kv_seq_len}, current first dim: {B_v_flat.size(0)}")
-                    
-                    # Use cached B_v with correct sequence length
-                    new_B_v_flat = self.cache_vB[:batch_size, :kv_seq_len].reshape(-1, self.v_rank, v_head_dim)
-                    B_v_flat = new_B_v_flat
-                    
-                    # Also adjust A_v_flat to match
-                    A_v_flat = A_v.reshape(-1, self.num_kv_heads, self.v_rank)
-                
-                # Now proceed with computation using corrected dimensions
-                k_flat = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)  # [batch*kv_seq_len, num_kv_heads, k_head_dim]
-                v_flat = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)  # [batch*kv_seq_len, num_kv_heads, v_head_dim]
-                
-                # Reshape to match q's shape 
-                k = k_flat.view(batch_size, kv_seq_len, self.num_kv_heads, k_head_dim)  # [batch, kv_seq_len, num_kv_heads, k_head_dim]
-                v = v_flat.view(batch_size, kv_seq_len, self.num_kv_heads, v_head_dim)  # [batch, kv_seq_len, num_kv_heads, v_head_dim]
-                
-                # If num_heads > num_kv_heads, we need to repeat the key/value heads
-                if self.num_heads > self.num_kv_heads:
-                    # Repeat the appropriate KV head for each query head (GQA)
-                    heads_per_group = self.num_heads // self.num_kv_heads
-                    k = k.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, k_head_dim]
-                    v = v.repeat_interleave(heads_per_group, dim=2)  # [batch, kv_seq_len, num_heads, v_head_dim]
+        # Compute Q, K, V using tensor product with factorization
+        q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         
-        # Transpose for attention computation
-        q = q.transpose(1, 2)  # [batch, num_heads, seq_len, q_head_dim]
-        k = k.transpose(1, 2)  # [batch, num_heads, kv_seq_len, k_head_dim]
-        v = v.transpose(1, 2)  # [batch, num_heads, kv_seq_len, v_head_dim]
+        k = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)
+        k = k.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
         
-        # Apply QK normalization if enabled
+        v = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)
+        v = v.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
+        
+        # Apply query/key normalization if needed
         if self.query_norm is not None and self.key_norm is not None:
             q = self.query_norm(q)
             k = self.key_norm(k)
+            
+        # Transpose Q, K, V for attention computation
+        # [batch, seq, num_heads, head_dim] -> [batch, num_heads, seq, head_dim]
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         
-        # Scale q
+        # Apply attention scaling
         q = q * self.scaling
         
-        # Compute attention scores - possibly need to handle k_head_dim != q_head_dim
-        if q_head_dim != k_head_dim:
-            # Project one to match the other, or use a different approach
-            # For simplicity, we'll project k to match q's dimension using a linear layer
-            # In practice, you might want to add a proper projection layer
-            print(f"WARNING: Query head dim {q_head_dim} != Key head dim {k_head_dim}")
-            print(f"Using a simple projection for compatibility")
-            k_projected = torch.zeros(batch_size, self.num_heads, kv_seq_len, q_head_dim, 
-                                   device=k.device, dtype=k.dtype)
-            
-            # Apply a simple projection (resize via interpolate or just take subset)
-            for b in range(batch_size):
-                for h in range(self.num_heads):
-                    k_head = k[b, h]  # [kv_seq_len, k_head_dim]
-                    if k_head_dim > q_head_dim:
-                        # Take subset
-                        k_projected[b, h] = k_head[:, :q_head_dim]
-                    else:
-                        # Pad with zeros
-                        k_proj = torch.zeros(kv_seq_len, q_head_dim, device=k.device, dtype=k.dtype)
-                        k_proj[:, :k_head_dim] = k_head
-                        k_projected[b, h] = k_proj
-            
-            # Use projected k for attention computation
-            scores = torch.matmul(q, k_projected.transpose(2, 3))  # [batch, num_heads, seq_len, kv_seq_len]
-        else:
-            # Standard case where dimensions match
-            scores = torch.matmul(q, k.transpose(2, 3))  # [batch, num_heads, seq_len, kv_seq_len]
+        # Compute attention scores
+        # [batch, num_heads, seq, head_dim] x [batch, num_heads, head_dim, kv_seq]
+        # -> [batch, num_heads, seq, kv_seq]
+        attn_weights = torch.matmul(q, k.transpose(-2, -1))
         
-        # Apply attention logit softcapping if enabled
+        # Apply softcapping if configured
         if self.attn_logit_softcapping is not None:
-            scores = scores / self.attn_logit_softcapping
-            scores = torch.tanh(scores)
-            scores = scores * self.attn_logit_softcapping
+            attn_weights = attn_weights / self.attn_logit_softcapping
+            attn_weights = torch.tanh(attn_weights)
+            attn_weights = attn_weights * self.attn_logit_softcapping
         
-        # Get the dimensions for proper masking
-        batch_size, num_heads, seq_len, kv_seq_len = scores.shape
-        
-        # SIMPLIFIED MASK HANDLING
-        # Always ensure masks match scores dimensions exactly
-        
-        # Main attention mask
-        if mask is not None:
-            # Slice the mask to match scores dimensions if needed
-            if mask.size(-1) != kv_seq_len or mask.size(-2) != seq_len:
-                try:
-                    # Extract exactly the portion we need based on scores dimensions
-                    # For generation with KV cache: typically mask is [batch, 1, max_seq, max_seq]
-                    # and we need [batch, 1, seq_len, kv_seq_len]
-                    mask_compatible = mask[:, :, -seq_len:, :kv_seq_len]
-                    
-                    # Debug dimension check
-                    if mask_compatible.size(-1) != kv_seq_len or mask_compatible.size(-2) != seq_len:
-                        print(f"WARNING: After slicing, mask still has incorrect dimensions: "
-                              f"{mask_compatible.shape}, expected last 2 dims to be [{seq_len}, {kv_seq_len}]")
-                except Exception as e:
-                    # If extraction fails, create a compatible causal mask
-                    min_dtype = torch.finfo(scores.dtype).min
-                    mask_compatible = torch.zeros_like(scores)
-                    # Apply causal masking pattern if multi-token
-                    if seq_len > 1:
-                        for i in range(seq_len):
-                            mask_compatible[:, :, i, i+1:] = min_dtype
-                    print(f"Created compatible mask with shape {mask_compatible.shape}")
-            else:
-                # Mask already has compatible dimensions
-                mask_compatible = mask
-                
-            # Now guaranteed to have compatible dimensions
-            scores = scores + mask_compatible
-        
-        # Sliding window mask (similar simplification)
+        # Apply sliding window mask if needed
         if (
             self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
             and self.sliding_window_size is not None
             and local_mask is not None
         ):
-            # Ensure local_mask has compatible dimensions
-            if local_mask.size(-1) != kv_seq_len or local_mask.size(-2) != seq_len:
-                try:
-                    # Extract the compatible portion
-                    local_mask_compatible = local_mask[:, :, -seq_len:, :kv_seq_len]
-                except:
-                    # Create simple sliding window constraint if extraction fails
-                    min_dtype = torch.finfo(scores.dtype).min
-                    local_mask_compatible = torch.zeros_like(scores)
-                    if self.sliding_window_size < kv_seq_len:
-                        # Apply sliding window constraint - block attention to tokens beyond window
-                        local_mask_compatible[:, :, :, :-self.sliding_window_size] = min_dtype
-            else:
-                local_mask_compatible = local_mask
-                
-            # Apply compatible sliding window mask
-            scores = scores + local_mask_compatible
+            mask = local_mask
         
-        # Compute attention weights
-        attn_weights = F.softmax(scores.float(), dim=-1).type_as(q)
+        # Apply attention mask
+        attn_weights = attn_weights + mask
+        
+        # Apply softmax
+        attn_probs = F.softmax(attn_weights.float(), dim=-1).type_as(q)
         
         # Apply attention to values
-        output = torch.matmul(attn_weights, v)  # [batch, num_heads, seq_len, head_dim]
+        # [batch, num_heads, seq, kv_seq] x [batch, num_heads, kv_seq, head_dim]
+        # -> [batch, num_heads, seq, head_dim]
+        attn_output = torch.matmul(attn_probs, v)
         
-        # Transpose and reshape
-        output = output.transpose(1, 2).contiguous()  # [batch, seq_len, num_heads, head_dim]
-        output = output.reshape(batch_size, seq_len, -1)  # [batch, seq_len, num_heads*head_dim]
+        # Reshape to [batch, seq, num_heads*head_dim]
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         
         # Apply output projection
-        output = self.o_proj(output)
+        output = self.o_proj(attn_output)
         
         return output
 
 
-class TPADecoderLayer(nn.Module):
-    """Decoder layer using TPA attention for Gemma 3."""
-    def __init__(self, config: gemma_config.GemmaConfig, attn_type: gemma_config.AttentionType):
+class Gemma3TPADecoderLayer(nn.Module):
+    """Gemma3 decoder layer using TPA attention."""
+    
+    def __init__(
+        self,
+        config: gemma_config.GemmaConfig,
+        attn_type: gemma_config.AttentionType,
+    ):
         super().__init__()
         self.attn_type = attn_type
-        self.self_attn = TPAAttention(config=config, attn_type=self.attn_type)
-        
-        # MLP components
+        self.self_attn = TPAAttention(
+            config=config,
+            attn_type=self.attn_type,
+        )
         self.mlp = gemma_model.GemmaMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant=config.quant,
         )
-        
-        # Normalization components
-        self.input_layernorm = gemma_model.RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = gemma_model.RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
         self.pre_feedforward_layernorm = (
-            gemma_model.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if getattr(config, 'use_pre_ffw_norm', False)
             else None
         )
         self.post_feedforward_layernorm = (
-            gemma_model.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if getattr(config, 'use_post_ffw_norm', False)
             else None
         )
@@ -818,7 +390,7 @@ class TPADecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         # MLP
         residual = hidden_states
         if self.pre_feedforward_layernorm is not None:
@@ -827,29 +399,33 @@ class TPADecoderLayer(nn.Module):
         if self.post_feedforward_layernorm is not None:
             hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         return hidden_states
 
 
-class TPAGemmaModel(nn.Module):
-    """Gemma model using TPA modules."""
+class Gemma3TPAModel(nn.Module):
+    """Gemma3 model with TPA attention."""
+    
     def __init__(self, config: gemma_config.GemmaConfig):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
-        
-        # Create TPA layers
+
         self.layers = nn.ModuleList()
         for i in range(config.num_hidden_layers):
-            attn_type = (
-                config.attn_types[i % len(config.attn_types)]
-                if config.attn_types is not None
-                else gemma_config.AttentionType.GLOBAL
-            )
-            self.layers.append(TPADecoderLayer(config, attn_type))
-        
-        # Final normalization
-        self.norm = gemma_model.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if config.architecture in (
+                gemma_config.Architecture.GEMMA_2,
+                gemma_config.Architecture.GEMMA_3,
+            ):
+                attn_type = (
+                    config.attn_types[i % len(config.attn_types)]
+                    if config.attn_types is not None
+                    else gemma_config.AttentionType.GLOBAL
+                )
+                self.layers.append(Gemma3TPADecoderLayer(config, attn_type))
+            else:
+                raise ValueError(f'Unsupported architecture: {config.architecture}')
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -875,7 +451,7 @@ class TPAGemmaModel(nn.Module):
 
 
 class Gemma3ForMultimodalLMwithTPA(nn.Module):
-    """Gemma3 model for multimodal causal LM with TPA."""
+    """Gemma3 model for multimodal causal LM with TPA attention."""
     def __init__(
         self,
         config: gemma_config.GemmaConfig,
@@ -887,126 +463,76 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         max_seq_len = config.max_position_embeddings
         head_dim = config.head_dim
         vocab_size = config.vocab_size
-        
-        # TPA specific parameters
-        self.q_rank = getattr(config, 'q_rank', 6)
-        self.k_rank = getattr(config, 'k_rank', 2)
-        self.v_rank = getattr(config, 'v_rank', 2)
-        
-        # Initialize tokenizer if path is provided
-        self.tokenizer = tokenizer.Tokenizer(config.tokenizer) if hasattr(config, 'tokenizer') else None
-        
-        # Text token embedder
+        self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
         self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
         
-        # Initialize TPA model
-        self.model = TPAGemmaModel(config)
+        # Use our TPA model instead of standard GemmaModel
+        self.model = Gemma3TPAModel(config)
         
-        # Initialize sampler
         self.sampler = gemma_model.Sampler(vocab_size, config)
-        
-        # Initialize vision components if vision config is provided
-        if getattr(config, 'vision_config', None) is not None:
+
+        if config.vision_config is None:
+            print("Creating text-only TPA model - no vision embedding")
+        else:
+            # Vision embeddings setup for multimodal model
             self.siglip_vision_model = siglip_vision_model.SiglipVisionModel(config.vision_config)
-            # Vision normalization
-            self.mm_soft_embedding_norm = gemma_model.RMSNorm(
-                config.vision_config.embedding_dim, eps=config.rms_norm_eps
-            )
-            # Vision projection
-            self.mm_input_projection = gemma_model.Linear(
-                config.vision_config.embedding_dim, config.hidden_size, config.quant
-            )
-        
-        # Check for rope_wave_length
-        if not hasattr(config, 'rope_wave_length') or config.rope_wave_length is None:
+            # transformer/embedder/mm_soft_embedding_norm
+            self.mm_soft_embedding_norm = RMSNorm(config.vision_config.embedding_dim,
+                                                  eps=config.rms_norm_eps)
+            # transformer/embedder/mm_input_projection
+            self.mm_input_projection = gemma_model.Linear(config.vision_config.embedding_dim, 
+                                                        config.hidden_size, config.quant)
+
+        if config.rope_wave_length is None:
             raise ValueError('rope_wave_length must be provided for Gemma3.')
-        
-        # Precompute rotary embeddings
         rope_lengths = config.rope_wave_length
         defaults = {
-            gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
-            gemma_config.AttentionType.GLOBAL: 10_000,
-        }
-        
-        # Register rotary embeddings for different attention types
-        self._register_freqs_cis(
-            'local_freqs_cis', 
-            head_dim, 
-            max_seq_len, 
-            theta=rope_lengths.get(
-                gemma_config.AttentionType.LOCAL_SLIDING, 
-                defaults[gemma_config.AttentionType.LOCAL_SLIDING]
-            )
-        )
-        
-        self._register_freqs_cis(
-            'global_freqs_cis', 
-            head_dim, 
-            max_seq_len, 
-            theta=rope_lengths.get(
-                gemma_config.AttentionType.GLOBAL, 
-                defaults[gemma_config.AttentionType.GLOBAL]
-            ),
-            rope_scaling_factor=getattr(config, 'rope_scaling_factor', 1)
-        )
-        
-        # Flag indicating whether to use factorized weights
-        self.use_factorized_weights = False
+                gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
+                gemma_config.AttentionType.GLOBAL: 10_000,
+            }
+        self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+                  gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]
+              ))
+        self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+                  gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]
+              ), rope_scaling_factor=config.rope_scaling_factor)
 
     def _register_freqs_cis(
         self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
     ):
         self.register_buffer(
-            name, 
-            gemma_model.precompute_freqs_cis(
-                head_dim, max_seq_len * 2, theta=theta, rope_scaling_factor=rope_scaling_factor
-            )
+            name, gemma_model.precompute_freqs_cis(head_dim, max_seq_len * 2, theta=theta, rope_scaling_factor=rope_scaling_factor)
         )
 
     @torch.no_grad()
-    def forward(
-        self,
-        input_token_ids: torch.Tensor,  # B x L
-        input_positions: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        mask: torch.Tensor,
-        output_positions: torch.Tensor,
-        temperatures: Union[torch.Tensor, None],
-        top_ps: torch.Tensor,
-        top_ks: torch.Tensor,
-        local_mask: torch.Tensor | None = None,
-        image_patches: Optional[torch.Tensor] = None,  # B x N x C x H x W (3x896x896)
-        image_presence_mask: Optional[torch.Tensor] = None,  # B x N
-        **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # DEBUG: Log input tokens
-        print(f"DEBUG: Input token IDs shape: {input_token_ids.shape}")
-        print(f"DEBUG: First few input tokens: {input_token_ids[0, :10].tolist()}")
-        print(f"DEBUG: Input positions: {input_positions.tolist()}")
-        
-        # Prepare rotary embeddings
+    def forward(self,
+              input_token_ids: torch.Tensor, # B x L
+              image_patches: torch.Tensor = None, # B x N x C x H x W (3x896x896)
+              image_presence_mask: torch.Tensor = None, # B x N
+              input_positions: torch.Tensor = None,
+              kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+              mask: torch.Tensor = None,
+              output_positions: torch.Tensor = None,
+              temperatures: Union[torch.Tensor, None] = None,
+              top_ps: torch.Tensor = None,
+              top_ks: torch.Tensor = None,
+              local_mask: torch.Tensor | None = None,
+              **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         freqs_cis = {}
         freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
-            self.local_freqs_cis.index_select(0, input_positions)
-        )
+                self.local_freqs_cis.index_select(0, input_positions)
+            )
         freqs_cis[gemma_config.AttentionType.GLOBAL] = (
-            self.global_freqs_cis.index_select(0, input_positions)
-        )
-        
-        # Get token embeddings
+                self.global_freqs_cis.index_select(0, input_positions)
+            )
         hidden_states = self.text_token_embedder(input_token_ids)
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
         
-        # DEBUG: Log embedding stats
-        print(f"DEBUG: Token embeddings shape: {hidden_states.shape}")
-        print(f"DEBUG: Token embeddings mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
-        print(f"DEBUG: Token embeddings min: {hidden_states.min().item():.6f}, max: {hidden_states.max().item():.6f}")
-        
-        # Process image embeddings if provided
         if image_patches is not None and hasattr(self, 'siglip_vision_model'):
+            # If we have vision capabilities and image input, process it
             B, N, C, H, W = image_patches.shape
-            # Flatten and pass to vision model
+            # Flatten and Pass to SiglipVisionModel, and apply SiglipVisionModel Exit
             flattened_input = image_patches.reshape(B * N, C, H, W)  # (B*N)xCxHxW
             image_embeddings = self.siglip_vision_model(flattened_input)  # (B*N)xUxD
             image_embeddings = self.mm_soft_embedding_norm(image_embeddings)  # (B*N) x U x D
@@ -1017,16 +543,10 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 input_token_ids.clone(),
                 image_presence_mask.clone(),
             )
-        
-        # Get KV write indices
+
         kv_write_indices = input_positions
-        
-        # DEBUG: Log model input state
-        print(f"DEBUG: Hidden states before model: mean={hidden_states.mean().item():.6f}, std={hidden_states.std().item():.6f}")
-        
-        try:
-            # Forward pass through the model
-            hidden_states = self.model(
+
+        hidden_states = self.model(
                 hidden_states=hidden_states,
                 freqs_cis=freqs_cis,
                 kv_write_indices=kv_write_indices,
@@ -1034,137 +554,86 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 mask=mask,
                 local_mask=local_mask,
             )
-        except Exception as e:
-            print(f"ERROR in model forward pass: {e}")
-            import traceback
-            traceback.print_exc()
-            # Create fallback hidden states with similar shape but all zeros
-            # This will help us identify if the issue is in the model forward pass
-            print("DEBUG: Using fallback zero hidden states to continue debugging")
-            hidden_states = torch.zeros_like(hidden_states)
-            # Randomize slightly to avoid numerical issues
-            hidden_states = hidden_states + torch.randn_like(hidden_states) * 1e-2
-        
-        # DEBUG: Log hidden states after model processing
-        print(f"DEBUG: Hidden states after model: shape={hidden_states.shape}")
-        print(f"DEBUG: Hidden states after model: mean={hidden_states.mean().item():.6f}, std={hidden_states.std().item():.6f}")
-        print(f"DEBUG: Hidden states after model: min={hidden_states.min().item():.6f}, max={hidden_states.max().item():.6f}")
-        
-        # Get embedder weight for final projection
         embedder_weight = self.text_token_embedder.weight
         if self.config.quant:
             embedder_weight = (
-                embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
-            )
-        
-        # DEBUG: Log embedding weight stats
-        print(f"DEBUG: Embedding weight shape: {embedder_weight.shape}")
-        print(f"DEBUG: Embedding weight stats: mean={embedder_weight.mean().item():.6f}, std={embedder_weight.std().item():.6f}")
-        
-        # Sample next tokens
+                    embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1))
+
         next_tokens, logits = self.sampler(
-            embedding=embedder_weight,
-            hidden_states=hidden_states,
-            output_positions=output_positions,
-            temperatures=temperatures,
-            top_ps=top_ps,
-            top_ks=top_ks,
-        )
-        
-        # DEBUG: Log logits and sampled token information
-        print(f"DEBUG: Logits shape: {logits.shape}")
-        print(f"DEBUG: Logits stats: mean={logits.mean().item():.6f}, std={logits.std().item():.6f}")
-        print(f"DEBUG: Logits min/max: min={logits.min().item():.6f}, max={logits.max().item():.6f}")
-        
-        # Check for NaN or Inf in logits
-        if torch.isnan(logits).any() or torch.isinf(logits).any():
-            print("WARNING: NaN or Inf values detected in logits!")
-        
-        # Get the top 10 token probabilities for analysis
-        probs = torch.softmax(logits, dim=-1)
-        top_probs, top_indices = torch.topk(probs, 10, dim=-1)
-        print(f"DEBUG: Top 10 token IDs: {top_indices[0].tolist()}")
-        print(f"DEBUG: Top 10 probabilities: {top_probs[0].tolist()}")
-        
-        print(f"DEBUG: Selected next token: {next_tokens[0].item()}")
-        
+                embedding=embedder_weight,
+                hidden_states=hidden_states,
+                output_positions=output_positions,
+                temperatures=temperatures,
+                top_ps=top_ps,
+                top_ks=top_ks,
+            )
         return next_tokens, logits
 
-    def populate_image_embeddings(
-        self,
-        hidden_states: torch.Tensor,  # B x L x model_dim
-        image_embeddings: torch.Tensor,  # (B*N) x U x model_dim
-        input_token_ids: torch.Tensor,  # B x L
-        image_presence_mask: torch.Tensor,  # B x N
-    ):
+    def populate_image_embeddings(self,
+                                hidden_states: torch.Tensor, # B x L x model_dim
+                                image_embeddings: torch.Tensor, # (B*N) x U x model_dim
+                                input_token_ids: torch.Tensor, # B x L
+                                image_presence_mask: torch.Tensor, # B x N
+                                ):
         batch_size, seq_len, model_dim = hidden_states.shape
-        
-        # Step 1: Fetch valid image embeddings
-        # Flatten indices of valid image embeddings
+        # Step 1 of 2: Fetch valid image embeddings
+        # flatten indices of valid image embeddings
         valid_image_embeddings_indices = torch.nonzero(image_presence_mask.flatten(), as_tuple=False).squeeze()
-        
-        # Extract valid image embeddings
+        # num_valid_images x model_dim
         valid_image_embeddings = image_embeddings.index_select(0, valid_image_embeddings_indices)
-        
-        # Step 2: Replace image embeddings at the right places
-        # Identify image placeholder tokens
+
+        # Step 2 of 2: Replace image embeddings at right places.
         image_placeholder_mask = input_token_ids == self.tokenizer.image_token_placeholder_id
         image_placeholder_indices = image_placeholder_mask.flatten().nonzero(as_tuple=False).squeeze()
-        
-        # Reshape hidden states for indexing
+
         hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
-        
-        # Replace image placeholders with image embeddings
         hidden_states[image_placeholder_indices] = valid_image_embeddings.reshape(-1, self.config.hidden_size)
-        
-        # Reshape back to original shape
         return hidden_states.reshape(batch_size, seq_len, model_dim).contiguous()
 
     def create_attention_mask(self, input_ids: torch.Tensor, sequence_length: int):
         batch_size = input_ids.shape[0]
-        
-        # Create causal mask
-        causal_mask = torch.tril(
-            torch.ones((batch_size, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device)
-        )
-        
-        # Check for image tokens
+        causal_mask = torch.tril(torch.ones((batch_size, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device))
         image_token_mask = input_ids == self.tokenizer.image_token_placeholder_id
-        
-        # Pad the mask for boundary detection
+        # Pad the mask to the left with 0. This is to make sure the boundary
+        # detection works correctly. Boundary (starting index of image patch) is
+        # detected when the value changes from 0 to 1.
         padded_mask = nn.functional.pad(image_token_mask, (1, 0), value=0)
-        
-        # Find boundaries of image token patches
+        # Find the boundary (starting index) of the image tokens patch.
         boundary = padded_mask[:, 1:] > padded_mask[:, :-1]
-        
-        # Number the boundaries
+        # Number the boundary.
+        # boundary:
+        # [[False, False,  True, False, False],
+        #  [False,  True, False,  True, False]]
+        # numbered_boundary:
+        # [[0, 0, 1, 1, 1],
+        #  [0, 1, 1, 2, 2]]
         numbered_boundary = torch.cumsum(boundary, dim=-1)
-        
-        # Create block indices for query
+
+        # image_token_mask:
+        # [[False, False,  True,  True, False],
+        #  [True,  True, False,  True, True]]
+        # numbered_boundary:
+        # [[0, 0, 1, 1, 1],
+        #  [1, 1, 1, 2, 2]]
+        # q_block_indices:
+        # [[0, 0, 1, 1, 0],
+        #  [1, 1, 0, 2, 2]]
         q_block_indices = image_token_mask * numbered_boundary
         kv_block_indices = q_block_indices
-        
-        # Create bidirectional mask for image tokens
+        # Test the equality of vertical and horizontal numbered patches
+        # to create the bidirectional mask.
         bidirectional_mask = torch.logical_and(
             kv_block_indices[:, None, :] == q_block_indices.unsqueeze(-1),
             q_block_indices.unsqueeze(-1) > 0,
         )
-        
-        # Combine causal and bidirectional masks
         attention_mask = torch.logical_or(causal_mask, bidirectional_mask.unsqueeze(1))
-        
-        # Create local mask with sliding window if configured
-        if self.config.sliding_window_size is not None:
-            local_mask = torch.logical_and(
+        # The upper triangular matrix's diagonal is shifted by sliding window size
+        # before doing logical 'and' with attention mask. This is to make sure the
+        # local attention is within the sliding window.
+        local_mask = torch.logical_and(
                 attention_mask,
-                torch.triu(
-                    torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device),
-                    diagonal=-(self.config.sliding_window_size-1)
-                )
+                torch.triu(torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device), diagonal=-(self.config.sliding_window_size-1))
             )
-        else:
-            local_mask = attention_mask
-        
         return attention_mask, local_mask
 
     def generate(
@@ -1176,124 +645,78 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
         top_p: float = 0.95,
         top_k: int = 64,
     ) -> Sequence[str]:
-        """Generates responses for given prompts using Gemma model with TPA."""
+        """Generates responses for given prompts using Gemma model."""
+        # For backward compatibility, support both output_len and max_tokens
+        output_len = max_tokens
+        
+        # Determine if device is provided, otherwise use model device
         if device is None:
             device = next(self.parameters()).device
-            
-        # DEBUG: Log generation parameters
-        print(f"DEBUG GENERATE: Prompts: {prompts}")
-        print(f"DEBUG GENERATE: Device: {device}, max_tokens: {max_tokens}")
-        print(f"DEBUG GENERATE: Temperature: {temperature}, top_p: {top_p}, top_k: {top_k}")
-            
-        # Check if we have text-only or multimodal input
-        is_text_only = all(isinstance(p, str) for p in prompts)
         
-        # For text-only models without vision config, use a simpler approach
-        if is_text_only or not hasattr(self.config, 'vision_config') or self.config.vision_config is None:
-            # Convert string prompts to token IDs
-            if isinstance(prompts[0], str):
-                # Handle text-only case
-                batch_size = len(prompts)
-                token_ids_list = [self.tokenizer.encode(p) for p in prompts]
-                max_len = max(len(ids) for ids in token_ids_list)
-                
-                # DEBUG: Show tokenization
-                print(f"DEBUG GENERATE: Tokenized first prompt: {token_ids_list[0]}")
-                print(f"DEBUG GENERATE: Decoded first tokens: {[self.tokenizer.sp_model.IdToPiece(id) for id in token_ids_list[0][:20]]}")
-                
-                # Create padded tensor
-                token_ids_tensor = torch.full(
-                    (batch_size, max_len + max_tokens),
-                    self.tokenizer.pad_id,
-                    dtype=torch.int64,
-                    device=device
-                )
-                
-                # Fill in token IDs
-                for i, ids in enumerate(token_ids_list):
-                    token_ids_tensor[i, :len(ids)] = torch.tensor(ids, dtype=torch.int64, device=device)
-                
-                # Create mask for actual tokens
-                prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
-                
-                # DEBUG: Log token tensor stats
-                print(f"DEBUG GENERATE: Token tensor shape: {token_ids_tensor.shape}")
-                print(f"DEBUG GENERATE: Prompt mask sum (non-pad tokens): {prompt_mask_tensor.sum().item()}")
-                
-                processing_result = {
-                    "user_input_token_ids": token_ids_tensor,
-                    "image_batch": None,
-                    "batch_size": batch_size,
-                    "min_prompt_len": min(len(ids) for ids in token_ids_list),
-                    "max_prompt_len": max_len,
-                    "max_seq_len": max_len + max_tokens,
-                    "image_presence_mask": None
-                }
-                
-                # DEBUG: Log processing result
-                print(f"DEBUG GENERATE: Processing result: min_prompt_len={processing_result['min_prompt_len']}, "
-                      f"max_prompt_len={processing_result['max_prompt_len']}, max_seq_len={processing_result['max_seq_len']}")
-                
-            else:
-                # For potentially multimodal input but without vision config, convert to text-only
-                text_prompts = [[p if isinstance(p, str) else "[IMAGE]" for p in seq] for seq in prompts]
-                text_only_prompts = ["".join(p) for p in text_prompts]
-                return self.generate(text_only_prompts, device, max_tokens, temperature, top_p, top_k)
+        # Handle different prompt formats
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        elif isinstance(prompts, list) and all(isinstance(p, str) for p in prompts):
+            pass
         else:
-            # For multimodal models with vision config, use the full preprocessor
-            processing_result = gemma3_preprocessor.tokenize_raw_input(
-                self.tokenizer, prompts, self.config, max_tokens, device
-            )
+            # Assume we have a sequence of sequences (for multimodal input)
+            prompts = [[p] if isinstance(p, (str, Image.Image)) else p for p in prompts]
+        
+        # For text-only models, convert string prompts to expected format
+        if not hasattr(self, 'siglip_vision_model'):
+            prompts = [[p] if isinstance(p, str) else p for p in prompts]
+        
+        # Process input using gemma3_preprocessor
+        processing_result = gemma3_preprocessor.tokenize_raw_input(
+            self.tokenizer, prompts, self.config, output_len, device
+        )
         
         batch_size = processing_result["batch_size"]
         user_input_token_ids = processing_result["user_input_token_ids"]
-        image_batch = processing_result["image_batch"]
+        image_batch = processing_result.get("image_batch")
+        image_presence_mask = processing_result.get("image_presence_mask")
         min_prompt_len = processing_result["min_prompt_len"]
         max_prompt_len = processing_result["max_prompt_len"]
         total_seq_len = processing_result["max_seq_len"]
-        image_presence_mask = processing_result["image_presence_mask"]
-        
+
         # Create attention mask
         min_dtype = torch.finfo(self.dtype).min
         if self.config.sliding_window_size is None:
             raise ValueError('gemma 3 model requires sliding_window size')
-            
         boolean_mask, local_boolean_mask = self.create_attention_mask(user_input_token_ids, total_seq_len)
         mask_tensor = torch.where(boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
         local_mask_tensor = torch.where(local_boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device)).contiguous()
-        
-        # Initialize KV caches
+
+        # Build KV caches
         kv_caches = []
         for _ in range(self.config.num_hidden_layers):
-            size = (batch_size, total_seq_len, self.config.num_key_value_heads, self.config.head_dim)
+            size = (batch_size, total_seq_len, self.config.num_attention_heads,
+                    self.config.head_dim)
             dtype = self.config.get_dtype()
             k_cache = torch.zeros(size=size, dtype=dtype, device=device)
             v_cache = torch.zeros(size=size, dtype=dtype, device=device)
             kv_caches.append((k_cache, v_cache))
-        
+
         # Prepare input tensors
-        input_token_ids_tensor = torch.full(
-            (batch_size, min_prompt_len),
-            self.tokenizer.pad_id,
-            dtype=torch.int64, 
-            device=device
-        )
-        
+        input_token_ids_tensor = torch.full((batch_size, min_prompt_len),
+                                           self.tokenizer.pad_id,
+                                           dtype=torch.int64, device=device)
         token_ids_tensor = user_input_token_ids.to(device)
         for i in range(batch_size):
             p = user_input_token_ids[i]
             input_token_ids_tensor[i, :min_prompt_len] = p[:min_prompt_len]
-        
+
         input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
         prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
         curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
         curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor)
         output_positions_tensor = torch.LongTensor([min_prompt_len - 1]).to(device)
-        temperatures_tensor = None if not temperature else torch.FloatTensor([temperature] * batch_size).to(device)
+        temperatures_tensor = None if not temperature else torch.FloatTensor(
+                [temperature] * batch_size).to(device)
         top_ps_tensor = torch.FloatTensor([top_p] * batch_size).to(device)
         top_ks_tensor = torch.LongTensor([top_k] * batch_size).to(device)
         output_index = torch.tensor(min_prompt_len, dtype=torch.int64, device=device)
-        
+
         # Generate tokens
         for i in range(total_seq_len - min_prompt_len):
             next_token_ids, _ = self(
@@ -1309,43 +732,41 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 top_ks=top_ks_tensor,
                 local_mask=curr_local_mask_tensor,
             )
-            
-            curr_prompt_mask = prompt_mask_tensor.index_select(1, output_index).squeeze(dim=1)
-            curr_token_ids = token_ids_tensor.index_select(1, output_index).squeeze(dim=1)
-            output_token_ids = torch.where(curr_prompt_mask, curr_token_ids, next_token_ids).unsqueeze(dim=1)
+            curr_prompt_mask = prompt_mask_tensor.index_select(
+                1, output_index).squeeze(dim=1)
+            curr_token_ids = token_ids_tensor.index_select(
+                1, output_index).squeeze(dim=1)
+            output_token_ids = torch.where(curr_prompt_mask, curr_token_ids,
+                                         next_token_ids).unsqueeze(dim=1)
             token_ids_tensor.index_copy_(1, output_index, output_token_ids)
-            
+
             input_token_ids_tensor = output_token_ids
             input_positions_tensor = output_index.unsqueeze(dim=-1)
-            curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
-            curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor) if local_mask_tensor is not None else None
+            curr_mask_tensor = mask_tensor.index_select(2,
+                                                     input_positions_tensor)
+            curr_local_mask_tensor = local_mask_tensor.index_select(
+                2, input_positions_tensor
+            ) if local_mask_tensor is not None else None
             output_positions_tensor = torch.tensor(0, dtype=torch.int64, device=device)
             output_index = output_index + 1
-            
-            # Clear image data after first iteration to avoid reprocessing
+            # We only need image data for the first token generation
             image_batch = None
             image_presence_mask = None
-        
-        # Decode generated tokens - only return the generated part (not the prompt)
+
+        # Detokenize output
         token_ids = token_ids_tensor.tolist()
         results = []
         for i, tokens in enumerate(token_ids):
-            # Extract only the generated tokens, excluding the prompt
-            prompt_len = len(token_ids_list[i]) if 'token_ids_list' in locals() else min_prompt_len
-            generated_tokens = tokens[prompt_len:prompt_len + max_tokens]
-            
-            # Truncate at eos token if present
-            if self.tokenizer.eos_id in generated_tokens:
-                eos_index = generated_tokens.index(self.tokenizer.eos_id)
-                generated_tokens = generated_tokens[:eos_index]
-                
-            # Decode only the generated response
-            results.append(self.tokenizer.decode(generated_tokens))
-        
-        return results
+            output = tokens
+            if self.tokenizer.eos_id in output:
+                eos_index = output.index(self.tokenizer.eos_id)
+                output = output[:eos_index]
+            results.append(self.tokenizer.decode(output))
+
+        # Return single string if single prompt was provided
+        return results[0] if isinstance(prompts, str) else results
 
     def load_weights(self, model_path: str):
-        """Load model weights from a checkpoint."""
         if os.path.isfile(model_path):
             self.load_state_dict(
                 torch.load(
@@ -1364,73 +785,3 @@ class Gemma3ForMultimodalLMwithTPA(nn.Module):
                 self.load_state_dict(state_dict, strict=False)
                 del state_dict  # Save memory.
                 gc.collect()
-
-    def convert_from_standard_weights(self, standard_model):
-        """
-        Convert from a standard Gemma model to TPA format.
-        This is a placeholder method that delegates to modules.gqa_to_tpa.create_tpa_model_from_standard
-        """
-        try:
-            from .modules.gqa_to_tpa import create_tpa_model_from_standard
-            
-            device = next(self.parameters()).device
-            dtype = next(self.parameters()).dtype
-            
-            # Get ranks from config
-            q_rank = getattr(self, 'q_rank', 6)
-            k_rank = getattr(self, 'k_rank', 2)
-            v_rank = getattr(self, 'v_rank', 2)
-            
-            # Use target_ranks if specified (typically from Tucker decomposition parameters)
-            use_dynamic_ranks = True
-            if hasattr(self, 'target_ranks'):
-                if self.target_ranks.get('use_tensorly', False):
-                    # Direct TensorLy mode
-                    print("Using direct TensorLy Tucker decomposition")
-                    q_rank = self.target_ranks.get('q_rank', q_rank)
-                    k_rank = self.target_ranks.get('k_rank', k_rank)
-                    v_rank = self.target_ranks.get('v_rank', v_rank)
-                elif self.target_ranks.get('use_shared_factors', False):
-                    # Shared factors mode
-                    print("Using shared factors approach for Tucker decomposition")
-                    q_rank = self.target_ranks.get('q_rank', q_rank)
-                    k_rank = self.target_ranks.get('k_rank', k_rank)
-                    v_rank = self.target_ranks.get('v_rank', v_rank)
-                
-                # Allow dynamic_ranks override
-                if 'use_dynamic_ranks' in self.target_ranks:
-                    use_dynamic_ranks = self.target_ranks['use_dynamic_ranks']
-            
-            print(f"Converting to TPA with ranks: q_rank={q_rank}, k_rank={k_rank}, v_rank={v_rank}")
-            print(f"Using dynamic ranks: {use_dynamic_ranks}")
-            
-            # Create a new TPA model from the standard model
-            tpa_model = create_tpa_model_from_standard(
-                standard_model,
-                q_rank=q_rank,
-                k_rank=k_rank,
-                v_rank=v_rank,
-                dtype=dtype,
-                device=device,
-                use_dynamic_ranks=use_dynamic_ranks
-            )
-            
-            # Replace self with the converted TPA model
-            # Since we can't directly replace self, we'll copy all parameters
-            # from the converted model to self
-            self.load_state_dict(tpa_model.state_dict())
-            
-            # Copy any additional attributes
-            for attr_name in dir(tpa_model):
-                if not attr_name.startswith('_') and attr_name not in ['convert_from_standard_weights', 'parameters']:
-                    if hasattr(tpa_model, attr_name) and not callable(getattr(tpa_model, attr_name)):
-                        setattr(self, attr_name, getattr(tpa_model, attr_name))
-            
-            # Set factorized flag
-            self.use_factorized_weights = True
-            
-            return self
-            
-        except ImportError:
-            print("Error: Could not import gqa_to_tpa module. Conversion failed.")
-            return self
