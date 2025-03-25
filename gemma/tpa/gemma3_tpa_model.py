@@ -628,7 +628,7 @@ class Gemma3ForCausalLMwithTPA(nn.Module):
         # We'll do simple loop up to max_tokens
         for _ in range(max_tokens):
             # Build a small input_positions for the new token
-            positions_tensor = torch.tensor([curr_idx], dtype=torch.int64, device=device)
+            positions_tensor = torch.arange(curr_idx, dtype=torch.int64, device=device)
 
             output_positions_tensor = torch.tensor([curr_idx - 1], dtype=torch.int64, device=device)
 
