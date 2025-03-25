@@ -927,7 +927,7 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
     Returns:
         A new Gemma3ForMultimodalLMwithTPA model with TPA weights
     """
-    from ..gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
+    from ..gemma3_tpa_model import GemmaForCausalLMwithTPA
     
     # Start timing
     start_time = time.time()
@@ -970,7 +970,7 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
         config.v_rank = v_rank
     
     # Create a new TPA model with this config
-    tpa_model = Gemma3ForMultimodalLMwithTPA(config)
+    tpa_model = GemmaForCausalLMwithTPA(config)
     
     # Set the data type to match
     tpa_model = tpa_model.to(dtype)
