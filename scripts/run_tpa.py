@@ -68,7 +68,7 @@ from gemma.tpa.modules.gqa_to_tpa import (
 )
 
 # The new TPA-based class (text-only):
-from gemma.tpa.gemma3_tpa_model import Gemma3ForCausalLMwithTPA
+from gemma.tpa.gemma3_tpa_model import GemmaForCausalLMwithTPA
 
 # ------------------------------------------------------------
 # ABSL Flags
@@ -195,7 +195,7 @@ def main(_):
         #  (a) Create TPA model instance
         #  (b) Factorize weights with either gqa_to_tpa or "create_tpa_model_from_standard"
 
-        tpa_model = Gemma3ForCausalLMwithTPA(model_config).to(device).eval()
+        tpa_model = GemmaForCausalLMwithTPA(model_config).to(device).eval()
 
         # For GQA -> TPA specifically, we can do more specialized factorization
         try:
@@ -278,7 +278,7 @@ def main(_):
             model_config = checkpoint['config']
             print("Using config from checkpoint for TPA model.")
         # Create TPA model
-        model = Gemma3ForCausalLMwithTPA(model_config)
+        model = GemmaForCausalLMwithTPA(model_config)
         if 'model_state_dict' in checkpoint:
             sd = checkpoint['model_state_dict']
         else:
