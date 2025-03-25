@@ -27,7 +27,7 @@ import tqdm
 from gemma import config as gemma_config
 from gemma import model as gemma_model
 from gemma import tokenizer as gemma_tokenizer
-from gemma.tpa.gemma3_tpa_model import Gemma3ForMultimodalLMwithTPA
+from gemma.tpa.gemma3_tpa_model import Gemma3ForCausalLMwithTPA
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -257,7 +257,7 @@ def main(_):
           
           # Use the existing TPA model and conversion method from our codebase
           # This model class handles multimodal and non-multimodal models
-          tpa_model = Gemma3ForMultimodalLMwithTPA(model_config)
+          tpa_model = Gemma3ForCausalLMwithTPA(model_config)
           convert_start = time()
           
           # Convert using our existing implementation
@@ -543,7 +543,7 @@ def main(_):
           
           # Create TPA model
           # The Gemma3ForMultimodalLMwithTPA class works for both multimodal and non-multimodal models
-          model = Gemma3ForMultimodalLMwithTPA(model_config)
+          model = Gemma3ForCausalLMwithTPA(model_config)
           
           # Store tokenizer in the model for convenience
           model.tokenizer = gemma_tok
@@ -584,7 +584,7 @@ def main(_):
       
       if hasattr(model, 'generate'):
           # Check which class the model is and use appropriate parameter names
-          if isinstance(model, Gemma3ForMultimodalLMwithTPA):
+          if isinstance(model, Gemma3ForCausalLMwithTPA):
               # For the TPA modular model which takes max_tokens
               print("Using Gemma3ForMultimodalLMwithTPA generate() interface")
               outputs = model.generate(
