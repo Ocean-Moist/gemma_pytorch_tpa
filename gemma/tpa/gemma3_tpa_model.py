@@ -580,6 +580,14 @@ class GemmaForCausalLMwithTPA(nn.Module):
         hidden_states = self.text_token_embedder(input_token_ids)
         print(f"DEBUG TPA FORWARD: After embedding, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
         
+        # Ensure the entire model is on the correct device
+        input_device = input_token_ids.device
+        if next(self.model.parameters()).device != input_device:
+            print(f"Moving model from {next(self.model.parameters()).device} to {input_device}")
+            self.model = self.model.to(input_device)
+            # Also move the sampler to ensure the final output is on the right device
+            self.sampler = self.sampler.to(input_device)
+        
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
         print(f"DEBUG TPA FORWARD: After normalization, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
