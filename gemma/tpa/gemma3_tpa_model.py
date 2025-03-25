@@ -12,10 +12,16 @@ Classes:
   - Gemma3ForCausalLMwithTPA
 """
 
+from typing import Any, List, Sequence, Tuple, Union, Mapping
+
 import torch
 import torch.nn.functional as F
 from torch import nn
-from typing import Any, List, Optional, Sequence, Tuple, Union, Mapping
+
+from .. import config as gemma_config
+from .. import model as gemma_model
+from .. import tokenizer
+
 
 # We assume the user has a config module similar to gemma_config
 # that contains definitions for:
@@ -24,13 +30,8 @@ from typing import Any, List, Optional, Sequence, Tuple, Union, Mapping
 #  - GemmaConfig
 # or you may import them from gemma.config if needed:
 # from .. import config as gemma_config
-
 # For demonstration, we assume gemma_config is accessible
 # and can be used similarly to the standard Gemma code.
-
-from .. import model as gemma_model
-from .. import config as gemma_config
-from .. import tokenizer
 
 
 class RMSNorm(nn.Module):
@@ -431,6 +432,7 @@ class Gemma3ForCausalLMwithTPA(nn.Module):
 
         # Tokenizer reference (if needed externally)
         self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
+        self.head_dim = config.head_dim
 
         # Text embedder
         self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
