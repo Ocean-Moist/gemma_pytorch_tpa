@@ -314,6 +314,17 @@ class TPAAttention(nn.Module):
             mask = local_mask
 
         # Apply attention mask
+        # First ensure mask has the right shape to match attn_weights
+        if mask is not None:
+            # Get shapes
+            attn_shape = attn_weights.shape
+            mask_shape = mask.shape
+            
+            # Check if shapes don't match in the last dimension
+            if mask_shape[3] != attn_shape[3]:
+                # Slice the mask to match the KV sequence length
+                mask = mask[:, :, :attn_shape[2], :attn_shape[3]]
+        
         attn_weights = attn_weights + mask
 
         # Apply softmax
