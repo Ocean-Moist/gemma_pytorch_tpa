@@ -429,13 +429,45 @@ def gqa_to_tpa_conversion(
         v_weight, actual_v_rank, "V", v_head_dim, num_kv_heads)
     
     # Add all factorized weights to the result dictionary
-    result["W_A_q"] = W_A_q.to(dtype=dtype, device=device)
-    result["W_A_k"] = W_A_k.to(dtype=dtype, device=device)
-    result["W_A_v"] = W_A_v.to(dtype=dtype, device=device)
+    # Convert to target dtype and device, checking for zeros
+    W_A_q_final = W_A_q.to(dtype=dtype, device=device)
+    W_A_k_final = W_A_k.to(dtype=dtype, device=device)
+    W_A_v_final = W_A_v.to(dtype=dtype, device=device)
     
-    result["W_B_q"] = W_B_q.to(dtype=dtype, device=device)
-    result["W_B_k"] = W_B_k.to(dtype=dtype, device=device)
-    result["W_B_v"] = W_B_v.to(dtype=dtype, device=device)
+    W_B_q_final = W_B_q.to(dtype=dtype, device=device)
+    W_B_k_final = W_B_k.to(dtype=dtype, device=device)
+    W_B_v_final = W_B_v.to(dtype=dtype, device=device)
+    
+    # Check for zeros in the converted weights and log detailed stats
+    print("\n============ WEIGHT DEBUG STATS AFTER CONVERSION ============")
+    print(f"W_A_q stats: shape={W_A_q_final.shape}, mean={W_A_q_final.abs().mean().item():.8f}, "
+          f"std={W_A_q_final.std().item():.8f}, zero_percent={(W_A_q_final == 0).float().mean().item()*100:.2f}%")
+    print(f"W_A_k stats: shape={W_A_k_final.shape}, mean={W_A_k_final.abs().mean().item():.8f}, "
+          f"std={W_A_k_final.std().item():.8f}, zero_percent={(W_A_k_final == 0).float().mean().item()*100:.2f}%")
+    print(f"W_A_v stats: shape={W_A_v_final.shape}, mean={W_A_v_final.abs().mean().item():.8f}, "
+          f"std={W_A_v_final.std().item():.8f}, zero_percent={(W_A_v_final == 0).float().mean().item()*100:.2f}%")
+    
+    print(f"W_B_q stats: shape={W_B_q_final.shape}, mean={W_B_q_final.abs().mean().item():.8f}, "
+          f"std={W_B_q_final.std().item():.8f}, zero_percent={(W_B_q_final == 0).float().mean().item()*100:.2f}%")
+    print(f"W_B_k stats: shape={W_B_k_final.shape}, mean={W_B_k_final.abs().mean().item():.8f}, "
+          f"std={W_B_k_final.std().item():.8f}, zero_percent={(W_B_k_final == 0).float().mean().item()*100:.2f}%")
+    print(f"W_B_v stats: shape={W_B_v_final.shape}, mean={W_B_v_final.abs().mean().item():.8f}, "
+          f"std={W_B_v_final.std().item():.8f}, zero_percent={(W_B_v_final == 0).float().mean().item()*100:.2f}%")
+    
+    # Check if weights are all zeros and add fallback initialization if needed
+    for name, weight in [('W_A_q', W_A_q_final), ('W_A_k', W_A_k_final), ('W_A_v', W_A_v_final),
+                         ('W_B_q', W_B_q_final), ('W_B_k', W_B_k_final), ('W_B_v', W_B_v_final)]:
+        if weight.abs().sum().item() == 0:
+            print(f"WARNING: {name} contains all zeros! This will cause degenerate model behavior.")
+            print(f"  Would need fallback initialization for {name}")
+    
+    result["W_A_q"] = W_A_q_final
+    result["W_A_k"] = W_A_k_final
+    result["W_A_v"] = W_A_v_final
+    
+    result["W_B_q"] = W_B_q_final
+    result["W_B_k"] = W_B_k_final
+    result["W_B_v"] = W_B_v_final
     
     # Store the per-head ranks and offsets for Q (critical for correct inference)
     result["q_per_head_ranks"] = per_head_max_ranks
@@ -1214,6 +1246,17 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
                     print(f"  Created {tpa_key} with shape {linear.weight.shape}")
+                    
+                    # Check for zeros in the weights
+                    is_all_zeros = linear.weight.abs().sum().item() == 0
+                    if is_all_zeros:
+                        print(f"  CRITICAL WARNING: {tpa_key} contains ALL ZEROS - model will not work correctly!")
+                    
+                    # Log weight statistics
+                    w_mean = linear.weight.abs().mean().item()
+                    w_std = linear.weight.std().item() 
+                    w_zero_percent = (linear.weight == 0).float().mean().item() * 100
+                    print(f"  {tpa_key} stats: mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
             
             # Mark the TPA module as using factorized weights
             tpa_module.use_factorized_weights = True

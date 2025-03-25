@@ -188,6 +188,20 @@ def main(_):
         standard_model = standard_model.to(device).eval()
         print("Standard model loaded & on device.")
 
+        # Debug: Check standard model weights
+        print("\n====== STANDARD MODEL WEIGHTS STATS BEFORE CONVERSION ======")
+        for name, param in standard_model.named_parameters():
+            # Only check a few key weights to avoid overwhelming logs
+            if any(x in name for x in ['qkv_proj', 'o_proj']):
+                # Check for zeros and calculate stats
+                is_all_zeros = param.data.abs().sum().item() == 0
+                w_mean = param.data.abs().mean().item()
+                w_std = param.data.std().item()
+                w_zero_percent = (param.data == 0).float().mean().item() * 100
+                print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
+                if is_all_zeros:
+                    print(f"WARNING: {name} contains ALL ZEROS!")
+
         # Convert to TPA
         convert_start = time()
 
@@ -251,6 +265,25 @@ def main(_):
 
         convert_end = time()
         print(f"Conversion to TPA took {convert_end - convert_start:.2f} seconds")
+
+        # Debug: Check TPA model weights after conversion
+        print("\n====== TPA MODEL WEIGHTS STATS AFTER CONVERSION ======")
+        tpa_weight_issues = False
+        for name, param in tpa_model.named_parameters():
+            if any(x in name for x in ['W_A_', 'W_B_']):
+                # Check for zeros and calculate stats
+                is_all_zeros = param.data.abs().sum().item() == 0
+                w_mean = param.data.abs().mean().item()
+                w_std = param.data.std().item()
+                w_zero_percent = (param.data == 0).float().mean().item() * 100
+                print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
+                if is_all_zeros:
+                    print(f"CRITICAL WARNING: {name} contains ALL ZEROS! This will cause degenerate behavior.")
+                    tpa_weight_issues = True
+        
+        if tpa_weight_issues:
+            print("\nWARNING: Some TPA weights contain all zeros. The model will likely not work correctly.")
+            print("This issue may require fixing the weight initialization in the conversion process.")
 
         # Save TPA if needed
         if FLAGS.save_tpa:
