@@ -255,11 +255,11 @@ def main(_):
         # Save TPA if needed
         if FLAGS.save_tpa:
             print(f"Saving TPA model to {FLAGS.save_tpa} ...")
-            os.makedirs(os.path.dirname(FLAGS.save_tpa), exist_ok=True)
-            torch.save(
-                {'model_state_dict': tpa_model.state_dict(), 'config': model_config},
-                FLAGS.save_tpa
-            )
+            save_dir = os.path.dirname(FLAGS.save_tpa)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
+            torch.save({'model_state_dict': tpa_model.state_dict(), 'config': model_config}, FLAGS.save_tpa)
+
             print("TPA model saved successfully.")
 
         # Free the standard model from memory
