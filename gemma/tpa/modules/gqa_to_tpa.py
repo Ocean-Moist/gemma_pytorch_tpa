@@ -1248,6 +1248,6 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                     # print(f"  {key} weight distribution: {weight_data.abs().mean().item():.4f} mean, {weight_data.abs().std().item():.4f} std")
 
     end_time = time.time()
-    print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
+    print(f"TPA model creation co5mplete in {end_time - start_time:.2f} seconds")
     
     return tpa_model
