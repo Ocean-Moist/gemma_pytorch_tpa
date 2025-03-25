@@ -180,16 +180,25 @@ class TPAAttention(nn.Module):
             local_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
-
+        print(f"DEBUG TPA ATTENTION: Input hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+        
         # A projections
         A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
         A_k = self.W_A_k(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.k_rank)
         A_v = self.W_A_v(hidden_states).view(batch_size, seq_len, self.num_kv_heads, self.v_rank)
+        
+        print(f"DEBUG TPA ATTENTION: After A projections - A_q: {A_q.shape}, mean: {A_q.mean().item():.6f}, std: {A_q.std().item():.6f}")
+        print(f"DEBUG TPA ATTENTION: After A projections - A_k: {A_k.shape}, mean: {A_k.mean().item():.6f}, std: {A_k.std().item():.6f}")
+        print(f"DEBUG TPA ATTENTION: After A projections - A_v: {A_v.shape}, mean: {A_v.mean().item():.6f}, std: {A_v.std().item():.6f}")
 
         # B projections
         B_q = self.W_B_q(hidden_states).reshape(batch_size, seq_len, self.q_rank, self.head_dim)
         B_k = self.W_B_k(hidden_states).reshape(batch_size, seq_len, self.k_rank, self.head_dim)
         B_v = self.W_B_v(hidden_states).reshape(batch_size, seq_len, self.v_rank, self.head_dim)
+        
+        print(f"DEBUG TPA ATTENTION: After B projections - B_q: {B_q.shape}, mean: {B_q.mean().item():.6f}, std: {B_q.std().item():.6f}")
+        print(f"DEBUG TPA ATTENTION: After B projections - B_k: {B_k.shape}, mean: {B_k.mean().item():.6f}, std: {B_k.std().item():.6f}")
+        print(f"DEBUG TPA ATTENTION: After B projections - B_v: {B_v.shape}, mean: {B_v.mean().item():.6f}, std: {B_v.std().item():.6f}")
 
         # Apply rotary positional embedding to B_q and B_k
         def apply_rotary_emb_to_B(x, freqs_cis):
@@ -273,31 +282,40 @@ class TPAAttention(nn.Module):
         # Compute Q, K, V using tensor product with factorization
         q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        print(f"DEBUG TPA ATTENTION: After tensor product - q: {q.shape}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
 
         k = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)
         k = k.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
+        print(f"DEBUG TPA ATTENTION: After tensor product - k: {k.shape}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}")
 
         v = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)
         v = v.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
+        print(f"DEBUG TPA ATTENTION: After tensor product - v: {v.shape}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}")
 
         # Apply query/key normalization if needed
         if self.query_norm is not None and self.key_norm is not None:
+            print("DEBUG TPA ATTENTION: Applying query/key normalization")
             q = self.query_norm(q)
             k = self.key_norm(k)
+            print(f"DEBUG TPA ATTENTION: After normalization - q: mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
+            print(f"DEBUG TPA ATTENTION: After normalization - k: mean: {k.mean().item():.6f}, std: {k.std().item():.6f}")
 
         # Transpose Q, K, V for attention computation
         # [batch, seq, num_heads, head_dim] -> [batch, num_heads, seq, head_dim]
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        print(f"DEBUG TPA ATTENTION: After transpose - q: {q.shape}, k: {k.shape}, v: {v.shape}")
 
         # Apply attention scaling
         q = q * self.scaling
+        print(f"DEBUG TPA ATTENTION: After scaling (x{self.scaling:.6f}) - q mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
 
         # Compute attention scores
         # [batch, num_heads, seq, head_dim] x [batch, num_heads, head_dim, kv_seq]
         # -> [batch, num_heads, seq, kv_seq]
         attn_weights = torch.matmul(q, k.transpose(-2, -1))
+        print(f"DEBUG TPA ATTENTION: attn_weights: {attn_weights.shape}, mean: {attn_weights.mean().item():.6f}, std: {attn_weights.std().item():.6f}")
 
         # Apply softcapping if configured
         if self.attn_logit_softcapping is not None:
@@ -329,17 +347,38 @@ class TPAAttention(nn.Module):
 
         # Apply softmax
         attn_probs = F.softmax(attn_weights.float(), dim=-1).type_as(q)
+        print(f"DEBUG TPA ATTENTION: attn_probs: {attn_probs.shape}, mean: {attn_probs.mean().item():.6f}, std: {attn_probs.std().item():.6f}")
+        
+        # Check if there are NaN values in attention probs (which would propagate through)
+        has_nan = torch.isnan(attn_probs).any().item()
+        print(f"DEBUG TPA ATTENTION: NaN values in attn_probs: {has_nan}")
+        
+        if has_nan:
+            print("WARNING: Found NaN values in attention probabilities! Replacing with zeros...")
+            attn_probs = torch.nan_to_num(attn_probs, nan=0.0)
+            # Renormalize
+            attn_probs = attn_probs / (attn_probs.sum(dim=-1, keepdim=True) + 1e-6)
 
         # Apply attention to values
         # [batch, num_heads, seq, kv_seq] x [batch, num_heads, kv_seq, head_dim]
         # -> [batch, num_heads, seq, head_dim]
         attn_output = torch.matmul(attn_probs, v)
+        print(f"DEBUG TPA ATTENTION: attn_output: {attn_output.shape}, mean: {attn_output.mean().item():.6f}, std: {attn_output.std().item():.6f}")
 
         # Reshape to [batch, seq, num_heads*head_dim]
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        print(f"DEBUG TPA ATTENTION: reshaped attn_output: {attn_output.shape}, mean: {attn_output.mean().item():.6f}, std: {attn_output.std().item():.6f}")
 
         # Apply output projection
         output = self.o_proj(attn_output)
+        print(f"DEBUG TPA ATTENTION: final output: {output.shape}, mean: {output.mean().item():.6f}, std: {output.std().item():.6f}")
+
+        # Check if NaN values appeared in the output
+        has_nan = torch.isnan(output).any().item()
+        if has_nan:
+            print("CRITICAL ERROR: NaN values in attention output!")
+            # Replace NaN values with zeros as a fallback
+            output = torch.nan_to_num(output, nan=0.0)
 
         return output
 
@@ -513,6 +552,9 @@ class GemmaForCausalLMwithTPA(nn.Module):
                 top_ks: torch.Tensor = None,
                 local_mask: torch.Tensor = None,
                 **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        print(f"DEBUG TPA FORWARD: input_token_ids shape: {input_token_ids.shape}, device: {input_token_ids.device}")
+        print(f"DEBUG TPA FORWARD: input_positions: {input_positions}, device: {input_positions.device}")
+        
         freqs_cis = {}
         freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
             self.local_freqs_cis.index_select(0, input_positions)
@@ -520,12 +562,25 @@ class GemmaForCausalLMwithTPA(nn.Module):
         freqs_cis[gemma_config.AttentionType.GLOBAL] = (
             self.global_freqs_cis.index_select(0, input_positions)
         )
+        
+        print(f"DEBUG TPA FORWARD: freqs_cis shapes - LOCAL: {freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING].shape}, GLOBAL: {freqs_cis[gemma_config.AttentionType.GLOBAL].shape}")
+        
         hidden_states = self.text_token_embedder(input_token_ids)
+        print(f"DEBUG TPA FORWARD: After embedding, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+        
         normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
         hidden_states = hidden_states * normalizer
+        print(f"DEBUG TPA FORWARD: After normalization, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
 
         kv_write_indices = input_positions
-
+        
+        if kv_caches:
+            print(f"DEBUG TPA FORWARD: kv_caches length: {len(kv_caches)}")
+            print(f"DEBUG TPA FORWARD: First KV cache shapes: k={kv_caches[0][0].shape}, v={kv_caches[0][1].shape}")
+        
+        if mask is not None:
+            print(f"DEBUG TPA FORWARD: mask shape: {mask.shape}, device: {mask.device}")
+        
         hidden_states = self.model(
             hidden_states=hidden_states,
             freqs_cis=freqs_cis,
@@ -534,11 +589,19 @@ class GemmaForCausalLMwithTPA(nn.Module):
             mask=mask,
             local_mask=local_mask,
         )
+        
+        print(f"DEBUG TPA FORWARD: After model forward, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+        
         embedder_weight = self.text_token_embedder.weight
+        print(f"DEBUG TPA FORWARD: embedder_weight shape: {embedder_weight.shape}, mean: {embedder_weight.mean().item():.6f}, std: {embedder_weight.std().item():.6f}")
+        
         if self.config.quant:
             embedder_weight = (
                     embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1))
+            print(f"DEBUG TPA FORWARD: After quant, embedder_weight shape: {embedder_weight.shape}, mean: {embedder_weight.mean().item():.6f}, std: {embedder_weight.std().item():.6f}")
 
+        print(f"DEBUG TPA FORWARD: output_positions: {output_positions}")
+        
         next_tokens, logits = self.sampler(
             embedding=embedder_weight,
             hidden_states=hidden_states,
@@ -547,6 +610,10 @@ class GemmaForCausalLMwithTPA(nn.Module):
             top_ps=top_ps,
             top_ks=top_ks,
         )
+        
+        print(f"DEBUG TPA FORWARD: logits shape: {logits.shape}, mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}")
+        print(f"DEBUG TPA FORWARD: Top 10 logits: {torch.topk(logits, min(10, logits.shape[-1]), dim=-1).values[0].tolist()}")
+        
         return next_tokens, logits
 
     def create_attention_mask(self, input_ids, sequence_length):
