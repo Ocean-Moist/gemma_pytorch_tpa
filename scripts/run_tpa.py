@@ -188,20 +188,20 @@ def main(_):
         standard_model = standard_model.to(device).eval()
         print("Standard model loaded & on device.")
 
-        # Debug: Check standard model weights
-        print("\n====== STANDARD MODEL WEIGHTS STATS BEFORE CONVERSION ======")
-        for name, param in standard_model.named_parameters():
-            # Only check a few key weights to avoid overwhelming logs
-            if any(x in name for x in ['qkv_proj', 'o_proj']):
-                # Check for zeros and calculate stats
-                is_all_zeros = param.data.abs().sum().item() == 0
-                w_mean = param.data.abs().mean().item()
-                w_std = param.data.std().item()
-                w_zero_percent = (param.data == 0).float().mean().item() * 100
-                print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
-                if is_all_zeros:
-                    print(f"WARNING: {name} contains ALL ZEROS!")
-
+        # # Debug: Check standard model weights
+        # print("\n====== STANDARD MODEL WEIGHTS STATS BEFORE CONVERSION ======")
+        # for name, param in standard_model.named_parameters():
+        #     # Only check a few key weights to avoid overwhelming logs
+        #     if any(x in name for x in ['qkv_proj', 'o_proj']):
+        #         # Check for zeros and calculate stats
+        #         is_all_zeros = param.data.abs().sum().item() == 0
+        #         w_mean = param.data.abs().mean().item()
+        #         w_std = param.data.std().item()
+        #         w_zero_percent = (param.data == 0).float().mean().item() * 100
+        #         print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
+        #         if is_all_zeros:
+        #             print(f"WARNING: {name} contains ALL ZEROS!")
+        #
         # Convert to TPA
         convert_start = time()
 
@@ -212,79 +212,58 @@ def main(_):
         tpa_model = GemmaForCausalLMwithTPA(model_config).to(device).eval()
 
         # For GQA -> TPA specifically, we can do more specialized factorization
-        try:
-            # If we want a specialized GQA to TPA approach, we do so:
-            # We'll leverage create_tpa_model_from_standard(...) from gqa_to_tpa
-            # Possibly with or without dynamic ranks
-            import json
-            extra_conf = {}
-            if FLAGS.extra_config:
-                try:
-                    extra_conf = json.loads(FLAGS.extra_config)
-                except Exception as e:
-                    print(f"Warning: could not parse extra_config: {e}")
+        # If we want a specialized GQA to TPA approach, we do so:
+        # We'll leverage create_tpa_model_from_standard(...) from gqa_to_tpa
+        # Possibly with or without dynamic ranks
+        import json
+        extra_conf = {}
+        if FLAGS.extra_config:
+            try:
+                extra_conf = json.loads(FLAGS.extra_config)
+            except Exception as e:
+                print(f"Warning: could not parse extra_config: {e}")
 
-            use_dynamic_ranks = extra_conf.get('use_dynamic_ranks', True)
-            fat_ranks = FLAGS.fat_ranks
+        use_dynamic_ranks = extra_conf.get('use_dynamic_ranks', True)
+        fat_ranks = FLAGS.fat_ranks
 
-            # Actually create new TPA model that copies over non-attention weights & does factorization
-            new_tpa_model = create_tpa_model_from_standard(
-                standard_model,
-                q_rank=FLAGS.q_rank,
-                k_rank=FLAGS.k_rank,
-                v_rank=FLAGS.v_rank,
-                dtype=tpa_model.dtype,
-                device=device,
-                use_dynamic_ranks=use_dynamic_ranks,
-                fat_ranks=fat_ranks,
-            )
-            del tpa_model
-            torch.cuda.empty_cache()
-            tpa_model = new_tpa_model
-            print("Converted GQA -> TPA successfully.")
-        except Exception as e:
-            print(f"Error in specialized GQA->TPA conversion: {e}")
-            print("Falling back to direct gqa_to_tpa.convert_gqa_model_to_tpa(...)")
-            tpa_model = tpa_model.to(device)
-            tpa_model.eval()
-            # We can attempt a simpler approach, but if we have partial conflicts, the user might handle them.
-
-            convert_gqa_model_to_tpa(
-                model=standard_model,
-                q_rank=FLAGS.q_rank,
-                k_rank=FLAGS.k_rank,
-                v_rank=FLAGS.v_rank,
-                dtype=tpa_model.dtype,
-                device=str(device),
-                use_dynamic_ranks=True,
-                fat_ranks=FLAGS.fat_ranks,
-            )
-            # copy over final weights
-            # This step depends on how the function modifies the standard_model in-place
-            # so we can also do a manual copy if needed.
+        # Actually create new TPA model that copies over non-attention weights & does factorization
+        new_tpa_model = create_tpa_model_from_standard(
+            standard_model,
+            q_rank=FLAGS.q_rank,
+            k_rank=FLAGS.k_rank,
+            v_rank=FLAGS.v_rank,
+            dtype=tpa_model.dtype,
+            device=device,
+            use_dynamic_ranks=use_dynamic_ranks,
+            fat_ranks=fat_ranks,
+        )
+        del tpa_model
+        torch.cuda.empty_cache()
+        tpa_model = new_tpa_model
+        print("Converted GQA -> TPA successfully.")
 
         convert_end = time()
         print(f"Conversion to TPA took {convert_end - convert_start:.2f} seconds")
 
-        # Debug: Check TPA model weights after conversion
-        print("\n====== TPA MODEL WEIGHTS STATS AFTER CONVERSION ======")
-        tpa_weight_issues = False
-        for name, param in tpa_model.named_parameters():
-            if any(x in name for x in ['W_A_', 'W_B_']):
-                # Check for zeros and calculate stats
-                is_all_zeros = param.data.abs().sum().item() == 0
-                w_mean = param.data.abs().mean().item()
-                w_std = param.data.std().item()
-                w_zero_percent = (param.data == 0).float().mean().item() * 100
-                print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
-                if is_all_zeros:
-                    print(f"CRITICAL WARNING: {name} contains ALL ZEROS! This will cause degenerate behavior.")
-                    tpa_weight_issues = True
-        
-        if tpa_weight_issues:
-            print("\nWARNING: Some TPA weights contain all zeros. The model will likely not work correctly.")
-            print("This issue may require fixing the weight initialization in the conversion process.")
-
+        # # Debug: Check TPA model weights after conversion
+        # print("\n====== TPA MODEL WEIGHTS STATS AFTER CONVERSION ======")
+        # tpa_weight_issues = False
+        # for name, param in tpa_model.named_parameters():
+        #     if any(x in name for x in ['W_A_', 'W_B_']):
+        #         # Check for zeros and calculate stats
+        #         is_all_zeros = param.data.abs().sum().item() == 0
+        #         w_mean = param.data.abs().mean().item()
+        #         w_std = param.data.std().item()
+        #         w_zero_percent = (param.data == 0).float().mean().item() * 100
+        #         print(f"{name}: shape={param.shape}, mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
+        #         if is_all_zeros:
+        #             print(f"CRITICAL WARNING: {name} contains ALL ZEROS! This will cause degenerate behavior.")
+        #             tpa_weight_issues = True
+        #
+        # if tpa_weight_issues:
+        #     print("\nWARNING: Some TPA weights contain all zeros. The model will likely not work correctly.")
+        #     print("This issue may require fixing the weight initialization in the conversion process.")
+        #
         # Save TPA if needed
         if FLAGS.save_tpa:
             print(f"Saving TPA model to {FLAGS.save_tpa} ...")

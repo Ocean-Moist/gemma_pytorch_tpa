@@ -439,28 +439,28 @@ def gqa_to_tpa_conversion(
     W_B_v_final = W_B_v.to(dtype=dtype, device=device)
     
     # Check for zeros in the converted weights and log detailed stats
-    print("\n============ WEIGHT DEBUG STATS AFTER CONVERSION ============")
-    print(f"W_A_q stats: shape={W_A_q_final.shape}, mean={W_A_q_final.abs().mean().item():.8f}, "
-          f"std={W_A_q_final.std().item():.8f}, zero_percent={(W_A_q_final == 0).float().mean().item()*100:.2f}%")
-    print(f"W_A_k stats: shape={W_A_k_final.shape}, mean={W_A_k_final.abs().mean().item():.8f}, "
-          f"std={W_A_k_final.std().item():.8f}, zero_percent={(W_A_k_final == 0).float().mean().item()*100:.2f}%")
-    print(f"W_A_v stats: shape={W_A_v_final.shape}, mean={W_A_v_final.abs().mean().item():.8f}, "
-          f"std={W_A_v_final.std().item():.8f}, zero_percent={(W_A_v_final == 0).float().mean().item()*100:.2f}%")
-    
-    print(f"W_B_q stats: shape={W_B_q_final.shape}, mean={W_B_q_final.abs().mean().item():.8f}, "
-          f"std={W_B_q_final.std().item():.8f}, zero_percent={(W_B_q_final == 0).float().mean().item()*100:.2f}%")
-    print(f"W_B_k stats: shape={W_B_k_final.shape}, mean={W_B_k_final.abs().mean().item():.8f}, "
-          f"std={W_B_k_final.std().item():.8f}, zero_percent={(W_B_k_final == 0).float().mean().item()*100:.2f}%")
-    print(f"W_B_v stats: shape={W_B_v_final.shape}, mean={W_B_v_final.abs().mean().item():.8f}, "
-          f"std={W_B_v_final.std().item():.8f}, zero_percent={(W_B_v_final == 0).float().mean().item()*100:.2f}%")
-    
-    # Check if weights are all zeros and add fallback initialization if needed
-    for name, weight in [('W_A_q', W_A_q_final), ('W_A_k', W_A_k_final), ('W_A_v', W_A_v_final),
-                         ('W_B_q', W_B_q_final), ('W_B_k', W_B_k_final), ('W_B_v', W_B_v_final)]:
-        if weight.abs().sum().item() == 0:
-            print(f"WARNING: {name} contains all zeros! This will cause degenerate model behavior.")
-            print(f"  Would need fallback initialization for {name}")
-    
+    # print("\n============ WEIGHT DEBUG STATS AFTER CONVERSION ============")
+    # print(f"W_A_q stats: shape={W_A_q_final.shape}, mean={W_A_q_final.abs().mean().item():.8f}, "
+    #       f"std={W_A_q_final.std().item():.8f}, zero_percent={(W_A_q_final == 0).float().mean().item()*100:.2f}%")
+    # print(f"W_A_k stats: shape={W_A_k_final.shape}, mean={W_A_k_final.abs().mean().item():.8f}, "
+    #       f"std={W_A_k_final.std().item():.8f}, zero_percent={(W_A_k_final == 0).float().mean().item()*100:.2f}%")
+    # print(f"W_A_v stats: shape={W_A_v_final.shape}, mean={W_A_v_final.abs().mean().item():.8f}, "
+    #       f"std={W_A_v_final.std().item():.8f}, zero_percent={(W_A_v_final == 0).float().mean().item()*100:.2f}%")
+    #
+    # print(f"W_B_q stats: shape={W_B_q_final.shape}, mean={W_B_q_final.abs().mean().item():.8f}, "
+    #       f"std={W_B_q_final.std().item():.8f}, zero_percent={(W_B_q_final == 0).float().mean().item()*100:.2f}%")
+    # print(f"W_B_k stats: shape={W_B_k_final.shape}, mean={W_B_k_final.abs().mean().item():.8f}, "
+    #       f"std={W_B_k_final.std().item():.8f}, zero_percent={(W_B_k_final == 0).float().mean().item()*100:.2f}%")
+    # print(f"W_B_v stats: shape={W_B_v_final.shape}, mean={W_B_v_final.abs().mean().item():.8f}, "
+    #       f"std={W_B_v_final.std().item():.8f}, zero_percent={(W_B_v_final == 0).float().mean().item()*100:.2f}%")
+    #
+    # # Check if weights are all zeros and add fallback initialization if needed
+    # for name, weight in [('W_A_q', W_A_q_final), ('W_A_k', W_A_k_final), ('W_A_v', W_A_v_final),
+    #                      ('W_B_q', W_B_q_final), ('W_B_k', W_B_k_final), ('W_B_v', W_B_v_final)]:
+    #     if weight.abs().sum().item() == 0:
+    #         print(f"WARNING: {name} contains all zeros! This will cause degenerate model behavior.")
+    #         print(f"  Would need fallback initialization for {name}")
+    #
     result["W_A_q"] = W_A_q_final
     result["W_A_k"] = W_A_k_final
     result["W_A_v"] = W_A_v_final

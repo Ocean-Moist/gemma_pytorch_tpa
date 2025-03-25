@@ -555,6 +555,12 @@ class GemmaForCausalLMwithTPA(nn.Module):
         print(f"DEBUG TPA FORWARD: input_token_ids shape: {input_token_ids.shape}, device: {input_token_ids.device}")
         print(f"DEBUG TPA FORWARD: input_positions: {input_positions}, device: {input_positions.device}")
         
+        # Ensure freqs_cis buffers are on the same device as input_positions
+        if self.local_freqs_cis.device != input_positions.device:
+            print(f"Moving freqs_cis from {self.local_freqs_cis.device} to {input_positions.device}")
+            self.local_freqs_cis = self.local_freqs_cis.to(input_positions.device)
+            self.global_freqs_cis = self.global_freqs_cis.to(input_positions.device)
+        
         freqs_cis = {}
         freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
             self.local_freqs_cis.index_select(0, input_positions)
