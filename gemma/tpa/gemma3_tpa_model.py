@@ -571,6 +571,12 @@ class GemmaForCausalLMwithTPA(nn.Module):
         
         print(f"DEBUG TPA FORWARD: freqs_cis shapes - LOCAL: {freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING].shape}, GLOBAL: {freqs_cis[gemma_config.AttentionType.GLOBAL].shape}")
         
+        # Ensure the embedder is on the same device as input_token_ids
+        if hasattr(self.text_token_embedder, 'weight') and self.text_token_embedder.weight.device != input_token_ids.device:
+            print(f"Moving embedding weights from {self.text_token_embedder.weight.device} to {input_token_ids.device}")
+            # Move the entire embedder module to the target device
+            self.text_token_embedder = self.text_token_embedder.to(input_token_ids.device)
+        
         hidden_states = self.text_token_embedder(input_token_ids)
         print(f"DEBUG TPA FORWARD: After embedding, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
         
