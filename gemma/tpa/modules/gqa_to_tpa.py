@@ -873,13 +873,6 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
         try:
             # Handle different module types
             if module_type == "combined_qkv":
-                # For combined QKV projection, we need to extract the separate weights
-                qkv_weight = module.qkv_proj.weight
-                
-                head_dim = module.head_dim
-                print(f"  Using head_dim={head_dim} from module attribute")
-
-
                 # Normal case - dimensions match expectations
                 # New code: slice + transpose carefully
                 combined_qkv = module.qkv_proj.weight  # shape [1536, 1152] for GQA 4+1 heads
@@ -902,21 +895,6 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
             # Apply GQA to TPA conversion
             print(f"  Starting tensor decomposition for layer {name}...")
             decomp_start = time.time()
-            
-            q_head_dim = q_weight.shape[1] // num_heads
-            kv_head_dim = k_weight.shape[1] // num_kv_heads
-
-            print(f"  Calculated dimensions: q_head_dim={q_head_dim}, kv_head_dim={kv_head_dim}")
-            print(f"  Heads: q={num_heads}, kv={num_kv_heads}")
-
-            if q_head_dim != kv_head_dim:
-                print(f"  WARNING: Different head dimensions for Q ({q_head_dim}) and KV ({kv_head_dim})")
-                # For combined QKV with GQA, we'll use the query head dimension
-                head_dim = q_head_dim
-            else:
-                head_dim = q_head_dim
-
-            print(f"  Using head_dim={head_dim} for tensor decomposition")
             
             # Pass the model config to ensure consistent dimensions
             factorized_weights = gqa_to_tpa_conversion(
