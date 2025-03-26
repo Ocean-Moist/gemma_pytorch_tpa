@@ -1,12 +1,24 @@
-import torch
-from torch import nn
-import torch.nn.functional as F
+"""Inference-only Gemma model implementation with Tensor Product Attention (TPA)."""
 
-from .. import config as gemma_config
+import gc
+import json
+import os
+from typing import List, Sequence, Tuple, Union, Mapping, Any
+
+from torch import nn
+
+from .. import model as gemma_model
+from .. import tokenizer
+
 
 class RMSNorm(nn.Module):
     """RMS Normalization module."""
-    def __init__(self, dim: int, eps: float = 1e-6, add_unit_offset: bool = True):
+    def __init__(
+            self,
+            dim: int,
+            eps: float = 1e-6,
+            add_unit_offset: bool = True,
+    ):
         super().__init__()
         self.eps = eps
         self.add_unit_offset = add_unit_offset
@@ -16,14 +28,19 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        # cast to float32 for stability, then back
-        out = self._norm(x.float())
+        output = self._norm(x.float())
         if self.add_unit_offset:
-            out = out * (1.0 + self.weight.float())
+            output = output * (1 + self.weight.float())
         else:
-            out = out * self.weight.float()
-        return out.type_as(x)
+            output = output * self.weight.float()
+        return output.type_as(x)
 
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+from .. import config as gemma_config
 
 class TPAAttention(nn.Module):
     """
@@ -328,3 +345,436 @@ class TPAAttention(nn.Module):
                 B_out[:, t, r, :] = b_rotated.type_as(B)
 
         return B_out
+
+
+class TPADecoderLayer(nn.Module):
+    """Gemma decoder layer using TPA attention."""
+
+    def __init__(
+            self,
+            config: gemma_config.GemmaConfig,
+            attn_type: gemma_config.AttentionType,
+    ):
+        super().__init__()
+        self.attn_type = attn_type
+        self.self_attn = TPAAttention(
+            config=config,
+            attn_type=self.attn_type,
+        )
+        self.mlp = gemma_model.GemmaMLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            quant=config.quant,
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = (
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if getattr(config, 'use_pre_ffw_norm', False)
+            else None
+        )
+        self.post_feedforward_layernorm = (
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            if getattr(config, 'use_post_ffw_norm', False)
+            else None
+        )
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            freqs_cis: torch.Tensor,
+            kv_write_indices: torch.Tensor,
+            kv_cache: Tuple[torch.Tensor, torch.Tensor],
+            mask: torch.Tensor,
+            local_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        # Self Attention
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            freqs_cis=freqs_cis,
+            kv_write_indices=kv_write_indices,
+            kv_cache=kv_cache,
+            mask=mask,
+            local_mask=local_mask,
+        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        # MLP
+        residual = hidden_states
+        if self.pre_feedforward_layernorm is not None:
+            hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        if self.post_feedforward_layernorm is not None:
+            hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states
+
+
+class TPAModel(nn.Module):
+    """Gemma model with TPA attention."""
+
+    def __init__(self, config: gemma_config.GemmaConfig):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+
+        self.layers = nn.ModuleList()
+        for i in range(config.num_hidden_layers):
+            if config.architecture in (
+                    gemma_config.Architecture.GEMMA_2,
+                    gemma_config.Architecture.GEMMA_3,
+            ):
+                attn_type = (
+                    config.attn_types[i % len(config.attn_types)]
+                    if config.attn_types is not None
+                    else gemma_config.AttentionType.GLOBAL
+                )
+                self.layers.append(TPADecoderLayer(config, attn_type))
+            else:
+                raise ValueError(f'Unsupported architecture: {config.architecture}')
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            freqs_cis: Mapping[gemma_config.AttentionType, torch.Tensor],
+            kv_write_indices: torch.Tensor,
+            kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+            mask: torch.Tensor,
+            local_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            hidden_states = layer(
+                hidden_states=hidden_states,
+                freqs_cis=freqs_cis.get(layer.attn_type),
+                kv_write_indices=kv_write_indices,
+                kv_cache=kv_caches[i],
+                mask=mask,
+                local_mask=local_mask,
+            )
+        hidden_states = self.norm(hidden_states)
+        return hidden_states
+
+
+class GemmaForCausalLMwithTPA(nn.Module):
+    """Gemma model for causal language modeling with TPA attention."""
+    def __init__(
+            self,
+            config: gemma_config.GemmaConfig,
+    ):
+        super().__init__()
+        self.dtype = config.get_dtype()
+        self.config = config
+        max_seq_len = config.max_position_embeddings
+        head_dim = config.head_dim
+        vocab_size = config.vocab_size
+        self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
+        self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
+
+        # Use our TPA model instead of standard GemmaModel
+        self.model = TPAModel(config)
+
+        self.sampler = gemma_model.Sampler(vocab_size, config)
+
+        if config.rope_wave_length is None:
+            raise ValueError('rope_wave_length must be provided for Gemma3.')
+        rope_lengths = config.rope_wave_length
+        defaults = {
+            gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
+            gemma_config.AttentionType.GLOBAL: 10_000,
+        }
+        self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+            gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]
+        ))
+        self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len, theta=rope_lengths.get(
+            gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]
+        ), rope_scaling_factor=config.rope_scaling_factor)
+
+    def _register_freqs_cis(
+            self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
+    ):
+        self.register_buffer(
+            name, gemma_model.precompute_freqs_cis(head_dim, max_seq_len * 2, theta=theta, rope_scaling_factor=rope_scaling_factor)
+        )
+
+    @torch.no_grad()
+    def forward(self,
+                input_token_ids: torch.Tensor,
+                input_positions: torch.Tensor = None,
+                kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = None,
+                mask: torch.Tensor = None,
+                output_positions: torch.Tensor = None,
+                temperatures: Union[torch.Tensor, None] = None,
+                top_ps: torch.Tensor = None,
+                top_ks: torch.Tensor = None,
+                local_mask: torch.Tensor = None,
+                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        print(f"DEBUG TPA FORWARD: input_token_ids shape: {input_token_ids.shape}, device: {input_token_ids.device}")
+        print(f"DEBUG TPA FORWARD: input_positions: {input_positions}, device: {input_positions.device}")
+
+        # Ensure freqs_cis buffers are on the same device as input_positions
+        if self.local_freqs_cis.device != input_positions.device:
+            print(f"Moving freqs_cis from {self.local_freqs_cis.device} to {input_positions.device}")
+            self.local_freqs_cis = self.local_freqs_cis.to(input_positions.device)
+            self.global_freqs_cis = self.global_freqs_cis.to(input_positions.device)
+
+        freqs_cis = {}
+        freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = (
+            self.local_freqs_cis.index_select(0, input_positions)
+        )
+        freqs_cis[gemma_config.AttentionType.GLOBAL] = (
+            self.global_freqs_cis.index_select(0, input_positions)
+        )
+
+        print(f"DEBUG TPA FORWARD: freqs_cis shapes - LOCAL: {freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING].shape}, GLOBAL: {freqs_cis[gemma_config.AttentionType.GLOBAL].shape}")
+
+        # Ensure the embedder is on the same device as input_token_ids
+        if hasattr(self.text_token_embedder, 'weight') and self.text_token_embedder.weight.device != input_token_ids.device:
+            print(f"Moving embedding weights from {self.text_token_embedder.weight.device} to {input_token_ids.device}")
+            # Move the entire embedder module to the target device
+            self.text_token_embedder = self.text_token_embedder.to(input_token_ids.device)
+
+        hidden_states = self.text_token_embedder(input_token_ids)
+        print(f"DEBUG TPA FORWARD: After embedding, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+
+        # Ensure the entire model is on the correct device
+        input_device = input_token_ids.device
+        if next(self.model.parameters()).device != input_device:
+            print(f"Moving model from {next(self.model.parameters()).device} to {input_device}")
+            self.model = self.model.to(input_device)
+            # Also move the sampler to ensure the final output is on the right device
+            self.sampler = self.sampler.to(input_device)
+
+        normalizer = torch.tensor(self.config.hidden_size**0.5, dtype=hidden_states.dtype, device=hidden_states.device)
+        hidden_states = hidden_states * normalizer
+        print(f"DEBUG TPA FORWARD: After normalization, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+
+        kv_write_indices = input_positions
+
+        if kv_caches:
+            print(f"DEBUG TPA FORWARD: kv_caches length: {len(kv_caches)}")
+            print(f"DEBUG TPA FORWARD: First KV cache shapes: k={kv_caches[0][0].shape}, v={kv_caches[0][1].shape}")
+
+        if mask is not None:
+            print(f"DEBUG TPA FORWARD: mask shape: {mask.shape}, device: {mask.device}")
+
+        hidden_states = self.model(
+            hidden_states=hidden_states,
+            freqs_cis=freqs_cis,
+            kv_write_indices=kv_write_indices,
+            kv_caches=kv_caches,
+            mask=mask,
+            local_mask=local_mask,
+        )
+
+        # print(f"DEBUG TPA FORWARD: After model forward, hidden_states shape: {hidden_states.shape}, mean: {hidden_states.mean().item():.6f}, std: {hidden_states.std().item():.6f}")
+
+        embedder_weight = self.text_token_embedder.weight
+        # print(f"DEBUG TPA FORWARD: embedder_weight shape: {embedder_weight.shape}, mean: {embedder_weight.mean().item():.6f}, std: {embedder_weight.std().item():.6f}")
+
+        if self.config.quant:
+            embedder_weight = (
+                    embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1))
+            # print(f"DEBUG TPA FORWARD: After quant, embedder_weight shape: {embedder_weight.shape}, mean: {embedder_weight.mean().item():.6f}, std: {embedder_weight.std().item():.6f}")
+
+        print(f"DEBUG TPA FORWARD: output_positions: {output_positions}")
+
+        next_tokens, logits = self.sampler(
+            embedding=embedder_weight,
+            hidden_states=hidden_states,
+            output_positions=output_positions,
+            temperatures=temperatures,
+            top_ps=top_ps,
+            top_ks=top_ks,
+        )
+
+        # print(f"DEBUG TPA FORWARD: logits shape: {logits.shape}, mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}")
+        # print(f"DEBUG TPA FORWARD: Top 10 logits: {torch.topk(logits, min(10, logits.shape[-1]), dim=-1).values[0].tolist()}")
+
+        return next_tokens, logits
+
+    def create_attention_mask(self, input_ids, sequence_length):
+        """
+        Creates a causal attention mask (standard for auto-regressive models).
+        """
+        batch_size = input_ids.shape[0]
+        # Create causal mask
+        # [batch_size, 1, sequence_length, sequence_length]
+        mask = torch.tril(torch.ones((batch_size, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device))
+
+        # Create local mask for sliding window attention if needed
+        if self.config.sliding_window_size is not None:
+            # Create mask for local sliding window attention
+            # Logical AND between causal mask and sliding window mask
+            local_mask = torch.logical_and(
+                mask,
+                torch.triu(
+                    torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device),
+                    diagonal=-(self.config.sliding_window_size-1)
+                )
+            )
+        else:
+            local_mask = None
+
+        return mask, local_mask
+
+    def generate(
+            self,
+            prompts: Union[str, Sequence[str]],
+            device: Any = None,
+            max_tokens: int = 100,
+            temperature: Union[float, None] = 1.0,
+            top_p: float = 0.95,
+            top_k: int = 64,
+    ) -> Union[str, Sequence[str]]:
+        """Generates responses for given prompts using Gemma model."""
+
+        # Determine if device is provided, otherwise use model device
+        if device is None:
+            device = next(self.parameters()).device
+
+        # Handle different prompt formats
+        if isinstance(prompts, str):
+            prompts = [prompts]
+            single_prompt = True
+        else:
+            single_prompt = False
+
+        batch_size = len(prompts)
+
+        # Tokenize prompts
+        prompt_tokens = [self.tokenizer.encode(prompt) for prompt in prompts]
+        min_prompt_len = min(len(p) for p in prompt_tokens)
+        max_prompt_len = max(len(p) for p in prompt_tokens)
+        total_seq_len = max_prompt_len + max_tokens
+
+        # Ensure total sequence length doesn't exceed model limits
+        if total_seq_len > self.config.max_position_embeddings:
+            total_seq_len = self.config.max_position_embeddings
+            max_tokens = total_seq_len - max_prompt_len
+            print(f"Warning: Reduced generation length to {max_tokens} tokens due to model context limit.")
+
+        # Create attention mask
+        min_dtype = torch.finfo(self.dtype).min
+        boolean_mask, local_boolean_mask = self.create_attention_mask(
+            torch.zeros((batch_size, total_seq_len), dtype=torch.long, device=device),
+            total_seq_len
+        )
+        mask_tensor = torch.where(boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device))
+        if local_boolean_mask is not None:
+            local_mask_tensor = torch.where(local_boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device))
+        else:
+            local_mask_tensor = None
+
+        # Build KV caches
+        kv_caches = []
+        for _ in range(self.config.num_hidden_layers):
+            size = (batch_size, total_seq_len, self.config.num_attention_heads,
+                    self.config.head_dim)
+            dtype = self.config.get_dtype()
+            k_cache = torch.zeros(size=size, dtype=dtype, device=device)
+            v_cache = torch.zeros(size=size, dtype=dtype, device=device)
+            kv_caches.append((k_cache, v_cache))
+
+        # Prepare input tensors
+        input_token_ids_tensor = torch.full((batch_size, min_prompt_len),
+                                            self.tokenizer.pad_id,
+                                            dtype=torch.int64, device=device)
+        token_ids_tensor = torch.full((batch_size, total_seq_len),
+                                      self.tokenizer.pad_id,
+                                      dtype=torch.int64, device=device)
+
+        # Fill in prompt tokens
+        for i, p in enumerate(prompt_tokens):
+            token_ids_tensor[i, :len(p)] = torch.tensor(p, dtype=torch.long, device=device)
+            input_token_ids_tensor[i, :min_prompt_len] = token_ids_tensor[i, :min_prompt_len]
+
+        input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
+        prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
+        curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
+        curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor) if local_mask_tensor is not None else None
+        output_positions_tensor = torch.LongTensor([min_prompt_len - 1]).to(device)
+        temperatures_tensor = None if temperature is None else torch.FloatTensor([temperature] * batch_size).to(device)
+        top_ps_tensor = torch.FloatTensor([top_p] * batch_size).to(device)
+        top_ks_tensor = torch.LongTensor([top_k] * batch_size).to(device)
+        output_index = torch.tensor(min_prompt_len, dtype=torch.int64, device=device)
+
+        # Generate tokens
+        for i in range(max_tokens):
+            next_token_ids, _ = self(
+                input_token_ids=input_token_ids_tensor,
+                input_positions=input_positions_tensor,
+                kv_caches=kv_caches,
+                mask=curr_mask_tensor,
+                output_positions=output_positions_tensor,
+                temperatures=temperatures_tensor,
+                top_ps=top_ps_tensor,
+                top_ks=top_ks_tensor,
+                local_mask=curr_local_mask_tensor,
+            )
+
+            # Determine whether to use prompt tokens or generated tokens
+            curr_prompt_mask = prompt_mask_tensor.index_select(1, output_index).squeeze(dim=1)
+            curr_token_ids = token_ids_tensor.index_select(1, output_index).squeeze(dim=1)
+            output_token_ids = torch.where(curr_prompt_mask, curr_token_ids, next_token_ids).unsqueeze(dim=1)
+            token_ids_tensor.index_copy_(1, output_index, output_token_ids)
+
+            # Check if all sequences have reached EOS
+            if (output_token_ids == self.tokenizer.eos_id).all():
+                break
+
+            # Prepare for next token
+            input_token_ids_tensor = output_token_ids
+            input_positions_tensor = output_index.unsqueeze(dim=-1)
+            curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
+            curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor) if local_mask_tensor is not None else None
+            output_positions_tensor = torch.tensor(0, dtype=torch.int64, device=device)
+            output_index = output_index + 1
+
+        # Detokenize output
+        token_ids = token_ids_tensor.tolist()
+        results = []
+        for i, tokens in enumerate(token_ids):
+            # Extract the prompt length for this sequence
+            prompt_len = len(prompt_tokens[i])
+
+            # Extract generated tokens (after the prompt)
+            output = tokens[prompt_len:prompt_len + max_tokens]
+
+            # Truncate at EOS if present
+            if self.tokenizer.eos_id in output:
+                eos_index = output.index(self.tokenizer.eos_id)
+                output = output[:eos_index]
+
+            results.append(self.tokenizer.decode(output))
+
+        # Return single string if single prompt was provided
+        return results[0] if single_prompt else results
+
+    def load_weights(self, model_path: str):
+        """Load weights from checkpoint file or directory."""
+        if os.path.isfile(model_path):
+            self.load_state_dict(
+                torch.load(
+                    model_path, mmap=True, weights_only=True,
+                )['model_state_dict'],
+                strict=False,
+            )
+        else:
+            index_path = os.path.join(model_path, 'pytorch_model.bin.index.json')
+            with open(index_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            shard_files = list(set(index["weight_map"].values()))
+            for shard_file in shard_files:
+                shard_path = os.path.join(model_path, shard_file)
+                state_dict = torch.load(shard_path, map_location="cpu", weights_only=True)
+                self.load_state_dict(state_dict, strict=False)
+                del state_dict  # Save memory.
+                gc.collect()
