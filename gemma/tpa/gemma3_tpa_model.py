@@ -69,7 +69,7 @@ class TPAAttention(nn.Module):
 
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = getattr(config, "num_key_value_heads", self.num_heads)
-
+        self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
         if hasattr(config, 'head_dim'):
             self.head_dim = config.head_dim
