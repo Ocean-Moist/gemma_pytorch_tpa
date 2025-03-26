@@ -1124,24 +1124,30 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
 
                     if std_key == 'W_B_q':
                         in_features = hidden_dim
-                        # Use actual dimensions from weight tensor instead of q_rank
-                        actual_q_dim = weight.shape[1]  # Get actual dimension from tensor
-                        out_features = actual_q_dim  # Use this instead of q_rank*head_dim
-                        print(f"  W_B_q Linear using actual tensor dimensions: {out_features}")
+                        # Use explicitly calculated dimensions based on expected ranks and head_dim
+                        out_features = q_rank * head_dim  # Explicit calculation to ensure correct dimensions
+                        print(f"  W_B_q Linear using explicit dimensions: {out_features} = {q_rank} * {head_dim}")
+                        # Log original tensor dimensions for debugging
+                        actual_q_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
+                        print(f"  (Original tensor dimension was: {actual_q_dim})")
 
                     elif std_key == 'W_B_k':
                         in_features = hidden_dim
-                        # Use actual dimensions from weight tensor instead of k_rank
-                        actual_k_dim = weight.shape[1]  # Get actual dimension from tensor
-                        out_features = actual_k_dim  # Use this instead of k_rank*head_dim
-                        print(f"  W_B_k Linear using actual tensor dimensions: {out_features}")
+                        # Use explicitly calculated dimensions based on expected ranks and head_dim
+                        out_features = k_rank * head_dim  # Explicit calculation to ensure correct dimensions
+                        print(f"  W_B_k Linear using explicit dimensions: {out_features} = {k_rank} * {head_dim}")
+                        # Log original tensor dimensions for debugging
+                        actual_k_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
+                        print(f"  (Original tensor dimension was: {actual_k_dim})")
 
                     elif std_key == 'W_B_v':
                         in_features = hidden_dim
-                        # Use actual dimensions from weight tensor instead of v_rank
-                        actual_v_dim = weight.shape[1]  # Get actual dimension from tensor
-                        out_features = actual_v_dim  # Use this instead of v_rank*head_dim
-                        print(f"  W_B_v Linear using actual tensor dimensions: {out_features}")
+                        # Use explicitly calculated dimensions based on expected ranks and head_dim
+                        out_features = v_rank * head_dim  # Explicit calculation to ensure correct dimensions
+                        print(f"  W_B_v Linear using explicit dimensions: {out_features} = {v_rank} * {head_dim}")
+                        # Log original tensor dimensions for debugging
+                        actual_v_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
+                        print(f"  (Original tensor dimension was: {actual_v_dim})")
                     else:
                         # Fallback for unknown keys - use dimensions from weight
                         in_features = hidden_dim
