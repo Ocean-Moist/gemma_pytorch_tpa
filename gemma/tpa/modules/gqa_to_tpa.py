@@ -189,9 +189,9 @@ def gqa_to_tpa_conversion(
     max_practical_rank = 320  # Standard cap to avoid excessive computation
     
     # Calculate maximum possible ranks based on matrix dimensions
-    max_q_rank = min(hidden_dim, q_proj_dim)
-    max_k_rank = min(hidden_dim, k_proj_dim)
-    max_v_rank = min(hidden_dim, v_proj_dim)
+    max_q_rank = min(hidden_dim, q_proj_dim, 24 * num_heads)
+    max_k_rank = min(hidden_dim, k_proj_dim, 24)
+    max_v_rank = min(hidden_dim, v_proj_dim, 24)
     
     print(f"\nMaximum possible ranks based on matrix dimensions: Q={max_q_rank}, K={max_k_rank}, V={max_v_rank}")
     
@@ -1252,12 +1252,12 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                     if is_all_zeros:
                         print(f"  CRITICAL WARNING: {tpa_key} contains ALL ZEROS - model will not work correctly!")
                     
-                    # Log weight statistics
-                    w_mean = linear.weight.abs().mean().item()
-                    w_std = linear.weight.std().item() 
-                    w_zero_percent = (linear.weight == 0).float().mean().item() * 100
-                    print(f"  {tpa_key} stats: mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
-            
+                    # # Log weight statistics
+                    # w_mean = linear.weight.abs().mean().item()
+                    # w_std = linear.weight.std().item()
+                    # w_zero_percent = (linear.weight == 0).float().mean().item() * 100
+                    # print(f"  {tpa_key} stats: mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
+                    #
             # Mark the TPA module as using factorized weights
             tpa_module.use_factorized_weights = True
     
