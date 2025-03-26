@@ -74,10 +74,14 @@ def gqa_to_tpa_conversion(
     # For Gemma models, weights need to be transposed
     # In PyTorch Linear layers, weights have shape [out_features, in_features]
     # But for our factorization, we need them in [hidden_dim, projection_dim] format
-    hidden_dim = config_hidden_size if config_hidden_size is not None else q_weight.shape[1]
+
+    # First transpose the weights
     q_weight = q_weight.transpose(0, 1)
     k_weight = k_weight.transpose(0, 1)
     v_weight = v_weight.transpose(0, 1)
+    
+    # Now use the first dimension after transposition, which is the hidden_dim
+    hidden_dim = config_hidden_size if config_hidden_size is not None else q_weight.shape[0]
 
     print(f"After transposition: q=[{q_weight.shape}], k=[{k_weight.shape}], v=[{v_weight.shape}]")
 
@@ -189,9 +193,9 @@ def gqa_to_tpa_conversion(
     max_practical_rank = 320  # Standard cap to avoid excessive computation
     
     # Calculate maximum possible ranks based on matrix dimensions
-    max_q_rank = min(hidden_dim, q_proj_dim, 24 * num_heads)
-    max_k_rank = min(hidden_dim, k_proj_dim, 24)
-    max_v_rank = min(hidden_dim, v_proj_dim, 24)
+    max_q_rank = min(hidden_dim, q_proj_dim)
+    max_k_rank = min(hidden_dim, k_proj_dim)
+    max_v_rank = min(hidden_dim, v_proj_dim)
     
     print(f"\nMaximum possible ranks based on matrix dimensions: Q={max_q_rank}, K={max_k_rank}, V={max_v_rank}")
     
@@ -945,6 +949,14 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
         # For non-MQA/GQA models, ensure num_key_value_heads is set
         if not hasattr(config, 'num_key_value_heads'):
             config.num_key_value_heads = config.num_attention_heads
+            
+        # Extract Q, K, V head dimensions from factorized weights
+        if hasattr(standard_model_converted, 'q_head_dim'):
+            config.q_head_dim = standard_model_converted.q_head_dim
+        if hasattr(standard_model_converted, 'k_head_dim'):
+            config.k_head_dim = standard_model_converted.k_head_dim
+        if hasattr(standard_model_converted, 'v_head_dim'):
+            config.v_head_dim = standard_model_converted.v_head_dim
     else:
         print("Standard model has no config, creating a default one")
         from ...config import GemmaConfig
@@ -1124,27 +1136,30 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
 
                     if std_key == 'W_B_q':
                         in_features = hidden_dim
-                        # Use explicitly calculated dimensions based on expected ranks and head_dim
-                        out_features = q_rank * head_dim  # Explicit calculation to ensure correct dimensions
-                        print(f"  W_B_q Linear using explicit dimensions: {out_features} = {q_rank} * {head_dim}")
+                        # Use the actual q_head_dim that was calculated and stored in factorized_weights
+                        q_head_dim = factorized_weights.get('q_head_dim', head_dim)
+                        out_features = q_rank * q_head_dim  # Use q_head_dim to respect the real model dimensions
+                        print(f"  W_B_q Linear using explicit dimensions: {out_features} = {q_rank} * {q_head_dim} (actual q_head_dim)")
                         # Log original tensor dimensions for debugging
                         actual_q_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
                         print(f"  (Original tensor dimension was: {actual_q_dim})")
 
                     elif std_key == 'W_B_k':
                         in_features = hidden_dim
-                        # Use explicitly calculated dimensions based on expected ranks and head_dim
-                        out_features = k_rank * head_dim  # Explicit calculation to ensure correct dimensions
-                        print(f"  W_B_k Linear using explicit dimensions: {out_features} = {k_rank} * {head_dim}")
+                        # Use the actual k_head_dim that was calculated and stored in factorized_weights
+                        k_head_dim = factorized_weights.get('k_head_dim', head_dim)
+                        out_features = k_rank * k_head_dim  # Use k_head_dim to respect the real model dimensions
+                        print(f"  W_B_k Linear using explicit dimensions: {out_features} = {k_rank} * {k_head_dim} (actual k_head_dim)")
                         # Log original tensor dimensions for debugging
                         actual_k_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
                         print(f"  (Original tensor dimension was: {actual_k_dim})")
 
                     elif std_key == 'W_B_v':
                         in_features = hidden_dim
-                        # Use explicitly calculated dimensions based on expected ranks and head_dim
-                        out_features = v_rank * head_dim  # Explicit calculation to ensure correct dimensions
-                        print(f"  W_B_v Linear using explicit dimensions: {out_features} = {v_rank} * {head_dim}")
+                        # Use the actual v_head_dim that was calculated and stored in factorized_weights
+                        v_head_dim = factorized_weights.get('v_head_dim', head_dim)
+                        out_features = v_rank * v_head_dim  # Use v_head_dim to respect the real model dimensions
+                        print(f"  W_B_v Linear using explicit dimensions: {out_features} = {v_rank} * {v_head_dim} (actual v_head_dim)")
                         # Log original tensor dimensions for debugging
                         actual_v_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
                         print(f"  (Original tensor dimension was: {actual_v_dim})")

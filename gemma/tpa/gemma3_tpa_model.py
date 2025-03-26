@@ -49,7 +49,26 @@ class TPAAttention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads if hasattr(config, 'num_key_value_heads') else self.num_heads
 
         self.hidden_size = config.hidden_size
-        self.head_dim = config.head_dim
+        
+        # Derive head_dim from hidden_size and num_heads if not explicitly provided
+        # This is critical for models with non-standard head dimensions
+        if hasattr(config, 'head_dim'):
+            self.head_dim = config.head_dim
+        else:
+            # For most models, head_dim = hidden_size / num_heads
+            # But some models might have different proportions
+            if hasattr(config, 'q_head_dim'):
+                # If q_head_dim is explicitly provided, use it
+                self.head_dim = config.q_head_dim
+            else:
+                # Default calculation
+                self.head_dim = self.hidden_size // self.num_heads
+        
+        # Note: The true head dimension might vary between Q, K, and V in some models
+        # So we'll store them separately if provided
+        self.q_head_dim = getattr(config, 'q_head_dim', self.head_dim)
+        self.k_head_dim = getattr(config, 'k_head_dim', self.head_dim)
+        self.v_head_dim = getattr(config, 'v_head_dim', self.head_dim)
 
         # TPA specific parameters
         self.q_rank = getattr(config, 'q_rank', 6)
@@ -59,7 +78,7 @@ class TPAAttention(nn.Module):
         # Debug info about dimensions
         print(f"TPAAttention: hidden_size={self.hidden_size}")
         print(f"TPAAttention: num_heads={self.num_heads}, num_kv_heads={self.num_kv_heads}")
-        print(f"TPAAttention: head_dim={self.head_dim}")
+        print(f"TPAAttention: head_dims: q={self.q_head_dim}, k={self.k_head_dim}, v={self.v_head_dim} (default={self.head_dim})")
         print(f"TPAAttention: ranks: q={self.q_rank}, k={self.k_rank}, v={self.v_rank}")
 
         # Scaling for attention
@@ -270,52 +289,92 @@ class TPAAttention(nn.Module):
             A_k = A_k.repeat_interleave(heads_per_kv, dim=2)
             A_v = A_v.repeat_interleave(heads_per_kv, dim=2)
 
-        # Reshape for tensor product computation
-        A_q_flat = A_q.reshape(batch_size * seq_len, self.num_heads, self.q_rank)
-        A_k_flat = A_k.reshape(batch_size * kv_seq_len, self.num_heads, self.k_rank)
-        A_v_flat = A_v.reshape(batch_size * kv_seq_len, self.num_heads, self.v_rank)
-
-        B_q_flat = B_q.reshape(batch_size * seq_len, self.q_rank, self.head_dim)
-        B_k_flat = B_k.reshape(batch_size * kv_seq_len, self.k_rank, self.head_dim)
-        B_v_flat = B_v.reshape(batch_size * kv_seq_len, self.v_rank, self.head_dim)
-
-        # Compute Q, K, V using tensor product with factorization
-        q = torch.bmm(A_q_flat, B_q_flat).div(self.q_rank)
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        print(f"DEBUG TPA ATTENTION: After tensor product - q: {q.shape}, mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
-
-        k = torch.bmm(A_k_flat, B_k_flat).div(self.k_rank)
-        k = k.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
-        print(f"DEBUG TPA ATTENTION: After tensor product - k: {k.shape}, mean: {k.mean().item():.6f}, std: {k.std().item():.6f}")
-
-        v = torch.bmm(A_v_flat, B_v_flat).div(self.v_rank)
-        v = v.view(batch_size, kv_seq_len, self.num_heads, self.head_dim)
-        print(f"DEBUG TPA ATTENTION: After tensor product - v: {v.shape}, mean: {v.mean().item():.6f}, std: {v.std().item():.6f}")
-
-        # Apply query/key normalization if needed
+        # Factor-only approach: compute attention scores directly without materializing full Q, K, V
+        print("DEBUG TPA ATTENTION: Using factor-only computation to reduce memory usage")
+        
+        # 1. Ensure factors are properly shaped for direct computation
+        # [batch, seq, num_heads, rank] for A factors
+        # [batch, seq, rank, head_dim] for B factors
+        A_q = A_q.view(batch_size, seq_len, self.num_heads, self.q_rank)
+        A_k = A_k.view(batch_size, kv_seq_len, self.num_heads, self.k_rank)
+        A_v = A_v.view(batch_size, kv_seq_len, self.num_heads, self.v_rank)
+        
+        B_q = B_q.view(batch_size, seq_len, self.q_rank, self.head_dim)
+        B_k = B_k.view(batch_size, kv_seq_len, self.k_rank, self.head_dim)
+        B_v = B_v.view(batch_size, kv_seq_len, self.v_rank, self.head_dim)
+        
+        # 2. Apply query/key normalization to B factors if needed
+        # Note: In factor-only approach, we apply normalization to B factors directly
         if self.query_norm is not None and self.key_norm is not None:
-            print("DEBUG TPA ATTENTION: Applying query/key normalization")
-            q = self.query_norm(q)
-            k = self.key_norm(k)
-            print(f"DEBUG TPA ATTENTION: After normalization - q: mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
-            print(f"DEBUG TPA ATTENTION: After normalization - k: mean: {k.mean().item():.6f}, std: {k.std().item():.6f}")
-
-        # Transpose Q, K, V for attention computation
-        # [batch, seq, num_heads, head_dim] -> [batch, num_heads, seq, head_dim]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        print(f"DEBUG TPA ATTENTION: After transpose - q: {q.shape}, k: {k.shape}, v: {v.shape}")
-
-        # Apply attention scaling
-        q = q * self.scaling
-        print(f"DEBUG TPA ATTENTION: After scaling (x{self.scaling:.6f}) - q mean: {q.mean().item():.6f}, std: {q.std().item():.6f}")
-
-        # Compute attention scores
-        # [batch, num_heads, seq, head_dim] x [batch, num_heads, head_dim, kv_seq]
-        # -> [batch, num_heads, seq, kv_seq]
-        attn_weights = torch.matmul(q, k.transpose(-2, -1))
-        print(f"DEBUG TPA ATTENTION: attn_weights: {attn_weights.shape}, mean: {attn_weights.mean().item():.6f}, std: {attn_weights.std().item():.6f}")
+            print("DEBUG TPA ATTENTION: Applying query/key normalization to B factors")
+            for r in range(self.q_rank):
+                B_q[:, :, r, :] = self.query_norm(B_q[:, :, r, :])
+            for r in range(self.k_rank):
+                B_k[:, :, r, :] = self.key_norm(B_k[:, :, r, :])
+        
+        # 3. Create storage for attention weights
+        attn_weights = torch.zeros(
+            (batch_size, self.num_heads, seq_len, kv_seq_len),
+            device=hidden_states.device, 
+            dtype=hidden_states.dtype
+        )
+        
+        # 4. Precompute all B dot products between query and key factors
+        # This is the key optimization - compute once and reuse across heads
+        print("DEBUG TPA ATTENTION: Precomputing B factor dot products...")
+        
+        # Einsum for efficient B dot products computation: [batch, q_len, q_rank, head_dim] x [batch, kv_len, k_rank, head_dim]
+        # Resulting shape: [batch, q_len, kv_len, q_rank, k_rank]
+        B_dots = torch.zeros(
+            (batch_size, seq_len, kv_seq_len, self.q_rank, self.k_rank),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype
+        )
+        
+        # Compute dot products for all rank combinations
+        for r in range(self.q_rank):
+            for s in range(self.k_rank):
+                # Extract B factors for this rank pair
+                # B_q_r: [batch, seq_len, head_dim]
+                # B_k_s: [batch, kv_seq_len, head_dim]
+                B_q_r = B_q[:, :, r, :]
+                B_k_s = B_k[:, :, s, :]
+                
+                # Compute dot product using einsum for all query-key pairs
+                # Result: [batch, seq_len, kv_seq_len]
+                B_dots[:, :, :, r, s] = torch.einsum('bqd,bkd->bqk', B_q_r, B_k_s)
+        
+        # Apply scaling to B_dots 
+        B_dots = B_dots * (self.scaling / (self.q_rank * self.k_rank))
+                
+        # 5. Compute attention weights for each head using factorized form
+        print("DEBUG TPA ATTENTION: Computing attention scores from factorized representation...")
+        for h in range(self.num_heads):
+            # Initialize per-head attention weights
+            head_weights = torch.zeros(
+                (batch_size, seq_len, kv_seq_len),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype
+            )
+            
+            # Sum over all rank combinations
+            for r in range(self.q_rank):
+                for s in range(self.k_rank):
+                    # A_q_h_r: [batch, seq_len]
+                    # A_k_h_s: [batch, kv_seq_len]
+                    A_q_h_r = A_q[:, :, h, r]
+                    A_k_h_s = A_k[:, :, h, s]
+                    
+                    # Compute outer product of A factors: [batch, seq_len, kv_seq_len]
+                    A_product = torch.einsum('bq,bk->bqk', A_q_h_r, A_k_h_s)
+                    
+                    # Multiply with precomputed B dot products and accumulate
+                    head_weights += A_product * B_dots[:, :, :, r, s]
+            
+            # Store result for this head
+            attn_weights[:, h, :, :] = head_weights
+            
+        print(f"DEBUG TPA ATTENTION: factor-only attn_weights: {attn_weights.shape}, mean: {attn_weights.mean().item():.6f}, std: {attn_weights.std().item():.6f}")
 
         # Apply softcapping if configured
         if self.attn_logit_softcapping is not None:
@@ -346,7 +405,7 @@ class TPAAttention(nn.Module):
         attn_weights = attn_weights + mask
 
         # Apply softmax
-        attn_probs = F.softmax(attn_weights.float(), dim=-1).type_as(q)
+        attn_probs = F.softmax(attn_weights.float(), dim=-1).type_as(hidden_states)
         print(f"DEBUG TPA ATTENTION: attn_probs: {attn_probs.shape}, mean: {attn_probs.mean().item():.6f}, std: {attn_probs.std().item():.6f}")
         
         # Check if there are NaN values in attention probs (which would propagate through)
@@ -359,11 +418,49 @@ class TPAAttention(nn.Module):
             # Renormalize
             attn_probs = attn_probs / (attn_probs.sum(dim=-1, keepdim=True) + 1e-6)
 
-        # Apply attention to values
-        # [batch, num_heads, seq, kv_seq] x [batch, num_heads, kv_seq, head_dim]
-        # -> [batch, num_heads, seq, head_dim]
-        attn_output = torch.matmul(attn_probs, v)
-        print(f"DEBUG TPA ATTENTION: attn_output: {attn_output.shape}, mean: {attn_output.mean().item():.6f}, std: {attn_output.std().item():.6f}")
+        # 6. Compute the attention output directly from factorized V
+        # Create output container
+        attn_output = torch.zeros(
+            (batch_size, self.num_heads, seq_len, self.head_dim),
+            device=hidden_states.device, 
+            dtype=hidden_states.dtype
+        )
+        
+        print("DEBUG TPA ATTENTION: Computing attention output using factorized values...")
+        
+        # For each head
+        for h in range(self.num_heads):
+            # For each output position
+            for t in range(seq_len):
+                # For each rank of V
+                for u in range(self.v_rank):
+                    # Compute weighted sum of A_v factors for this rank and head
+                    # attn_probs[b, h, t, τ] * A_v[b, τ, h, u]
+                    weighted_A_v = torch.einsum(
+                        'bhtk,bkhu->bht', 
+                        attn_probs[:, h:h+1, t:t+1, :], 
+                        A_v
+                    )  # [batch, 1, 1]
+                    
+                    # Compute weighted sum of V vectors for this rank
+                    # We need to compute: sum_τ( attn_probs[t,τ] * A_v[τ,u] * B_v[τ,u] )
+                    weighted_sum = torch.zeros(
+                        (batch_size, self.head_dim),
+                        device=hidden_states.device, 
+                        dtype=hidden_states.dtype
+                    )
+                    
+                    # This computes the weighted sum across all tokens
+                    for k in range(kv_seq_len):
+                        # Weight for this token: attn_probs[b, h, t, k] * A_v[b, k, h, u]
+                        weight = attn_probs[:, h, t, k].unsqueeze(-1) * A_v[:, k, h, u].unsqueeze(-1)
+                        # Accumulate B_v[b, k, u, d] weighted by above
+                        weighted_sum += weight * B_v[:, k, u, :]
+                    
+                    # Add to output for this head and position
+                    attn_output[:, h, t, :] += weighted_sum / self.v_rank
+        
+        print(f"DEBUG TPA ATTENTION: factor-based attn_output: {attn_output.shape}, mean: {attn_output.mean().item():.6f}, std: {attn_output.std().item():.6f}")
 
         # Reshape to [batch, seq, num_heads*head_dim]
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
