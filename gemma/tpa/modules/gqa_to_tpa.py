@@ -949,14 +949,6 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
         # For non-MQA/GQA models, ensure num_key_value_heads is set
         if not hasattr(config, 'num_key_value_heads'):
             config.num_key_value_heads = config.num_attention_heads
-            
-        # Extract Q, K, V head dimensions from factorized weights
-        if hasattr(standard_model_converted, 'q_head_dim'):
-            config.q_head_dim = standard_model_converted.q_head_dim
-        if hasattr(standard_model_converted, 'k_head_dim'):
-            config.k_head_dim = standard_model_converted.k_head_dim
-        if hasattr(standard_model_converted, 'v_head_dim'):
-            config.v_head_dim = standard_model_converted.v_head_dim
     else:
         print("Standard model has no config, creating a default one")
         from ...config import GemmaConfig
