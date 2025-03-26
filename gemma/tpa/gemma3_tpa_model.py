@@ -425,6 +425,7 @@ class GemmaForCausalLMwithTPA(nn.Module):
 
         # Use our TPA model instead of standard GemmaModel
         self.model = TPAModel(config)
+        self.head_dim = config.head_dim
 
         self.sampler = gemma_model.Sampler(vocab_size, config)
 
