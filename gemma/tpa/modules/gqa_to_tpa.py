@@ -1185,8 +1185,32 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                                     print(f"  Using optimally derived W_B_q projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
                                     if "W_B_q" in factorized_weights:
-                                        resized_weight = factorized_weights["W_B_q"].t()
-                                        print(f"  Using derived W_B_q from factorized_weights with shape {resized_weight.shape}")
+                                        orig_weight = factorized_weights["W_B_q"].t()
+                                        print(f"  Original derived W_B_q from factorized_weights has shape {orig_weight.shape}")
+                                        
+                                        # Check if we need to resize/restructure the weights
+                                        if orig_weight.shape[0] != out_features:
+                                            print(f"  Need to resize W_B_q from {orig_weight.shape[0]} to {out_features}")
+                                            
+                                            # Special case: if original is 4x larger (4 heads) and we need just one head's worth
+                                            if orig_weight.shape[0] == 4 * out_features:
+                                                print(f"  Detected 4 heads worth of weights, extracting first head portion")
+                                                # Extract just the first head's portion
+                                                resized_weight = orig_weight[:out_features, :]
+                                                print(f"  Extracted weights with shape {resized_weight.shape}")
+                                            # If different proportion, slice to fit
+                                            elif orig_weight.shape[0] > out_features:
+                                                print(f"  Slicing original weight to match required dimensions")
+                                                resized_weight = orig_weight[:out_features, :]
+                                                print(f"  Sliced weight to shape {resized_weight.shape}")
+                                            else:
+                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
+                                                # Create a new properly sized weight
+                                                resized_weight = torch.randn((out_features, in_features), 
+                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
+                                        else:
+                                            resized_weight = orig_weight
+                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
                                     else:
                                         print(f"  ERROR: W_B_q not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
@@ -1197,8 +1221,26 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                                     print(f"  Using optimally derived W_B_k projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
                                     if "W_B_k" in factorized_weights:
-                                        resized_weight = factorized_weights["W_B_k"].t()
-                                        print(f"  Using derived W_B_k from factorized_weights with shape {resized_weight.shape}")
+                                        orig_weight = factorized_weights["W_B_k"].t()
+                                        print(f"  Original derived W_B_k from factorized_weights has shape {orig_weight.shape}")
+                                        
+                                        # Check if we need to resize/restructure the weights
+                                        if orig_weight.shape[0] != out_features:
+                                            print(f"  Need to resize W_B_k from {orig_weight.shape[0]} to {out_features}")
+                                            
+                                            # Handle case where original is larger
+                                            if orig_weight.shape[0] > out_features:
+                                                print(f"  Slicing original weight to match required dimensions")
+                                                resized_weight = orig_weight[:out_features, :]
+                                                print(f"  Sliced weight to shape {resized_weight.shape}")
+                                            else:
+                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
+                                                # Create a new properly sized weight
+                                                resized_weight = torch.randn((out_features, in_features), 
+                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
+                                        else:
+                                            resized_weight = orig_weight
+                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
                                     else:
                                         print(f"  ERROR: W_B_k not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
@@ -1209,8 +1251,26 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                                     print(f"  Using optimally derived W_B_v projection weights from Tucker decomposition")
                                     # Check if the weight is in the result dictionary
                                     if "W_B_v" in factorized_weights:
-                                        resized_weight = factorized_weights["W_B_v"].t()
-                                        print(f"  Using derived W_B_v from factorized_weights with shape {resized_weight.shape}")
+                                        orig_weight = factorized_weights["W_B_v"].t()
+                                        print(f"  Original derived W_B_v from factorized_weights has shape {orig_weight.shape}")
+                                        
+                                        # Check if we need to resize/restructure the weights
+                                        if orig_weight.shape[0] != out_features:
+                                            print(f"  Need to resize W_B_v from {orig_weight.shape[0]} to {out_features}")
+                                            
+                                            # Handle case where original is larger
+                                            if orig_weight.shape[0] > out_features:
+                                                print(f"  Slicing original weight to match required dimensions")
+                                                resized_weight = orig_weight[:out_features, :]
+                                                print(f"  Sliced weight to shape {resized_weight.shape}")
+                                            else:
+                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
+                                                # Create a new properly sized weight
+                                                resized_weight = torch.randn((out_features, in_features), 
+                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
+                                        else:
+                                            resized_weight = orig_weight
+                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
                                     else:
                                         print(f"  ERROR: W_B_v not found in factorized_weights, creating appropriate projection matrix")
                                         # Create appropriately sized weight matrix
