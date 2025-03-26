@@ -71,15 +71,6 @@ def gqa_to_tpa_conversion(
     # Get dimensions - use config.hidden_size if provided, otherwise infer from weights
     config_hidden_size = getattr(config, 'hidden_size', None) if config is not None else None
     
-    # For Gemma models, weights need to be transposed
-    # In PyTorch Linear layers, weights have shape [out_features, in_features]
-    # But for our factorization, we need them in [hidden_dim, projection_dim] format
-
-    # First transpose the weights
-    q_weight = q_weight.transpose(0, 1)
-    k_weight = k_weight.transpose(0, 1)
-    v_weight = v_weight.transpose(0, 1)
-    
     # Now use the first dimension after transposition, which is the hidden_dim
     hidden_dim = config_hidden_size if config_hidden_size is not None else q_weight.shape[0]
 
