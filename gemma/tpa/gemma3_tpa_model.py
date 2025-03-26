@@ -221,12 +221,11 @@ class TPAAttention(nn.Module):
             for r in range(self.k_rank):
                 B_k[:, :, r, :] = self.key_norm(B_k[:, :, r, :])
 
-        # --------------
-        # 1) Build all pairwise dot-products among B-factors
-        # B_q: [b, q_len, q_rank, d], B_k: [b, kv_len, k_rank, d]
-        # => B_dots: [b, q_len, kv_len, q_rank, k_rank]
-        # using an einsum for all query-key pairs
-        B_dots = torch.einsum('bqrd,bkrd->bqkrs', B_q, B_k)  # shape [b, q_len, kv_len, q_rank, k_rank]
+        # --- Factorized QK Dot-Product ---
+        # Compute B_dots = einsum('bqrd,bksd->bqkrs')
+        # B_q: [b, q_len, q_rank, head_dim]
+        # B_k: [b, kv_seq, k_rank, head_dim] => note: use 's' for key rank.
+        B_dots = torch.einsum('bqrd,bksd->bqkrs', B_q, B_k)  # [b, q_len, kv_seq, q_rank, k_rank]
 
         # 2) scale by 1/sqrt(head_dim)
         B_dots = B_dots * self.scaling
