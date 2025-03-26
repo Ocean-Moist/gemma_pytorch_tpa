@@ -1243,6 +1243,10 @@ def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_ran
                         # Initialize with small random values instead of zeros
                         nn.init.xavier_normal_(linear.weight)
                     
+                    # Convert the linear layer to the correct dtype before setting it on the module
+                    linear = linear.to(dtype)
+                    print(f"  Converted {tpa_key} to dtype {dtype}")
+                    
                     # Set the Linear module on the TPA module
                     setattr(tpa_module, tpa_key, linear)
                     print(f"  Created {tpa_key} with shape {linear.weight.shape}")
