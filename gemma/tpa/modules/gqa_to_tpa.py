@@ -108,11 +108,12 @@ def gqa_to_tpa_conversion(
         raise ValueError(f"K projection dimension {k_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
     if v_proj_dim % num_kv_heads != 0:
         raise ValueError(f"V projection dimension {v_proj_dim} not divisible by num_kv_heads {num_kv_heads}")
-    
-    # Calculate actual head dimensions from the weights - keeping them separate
-    q_head_dim = q_proj_dim // num_heads
-    k_head_dim = k_proj_dim // num_kv_heads
-    v_head_dim = v_proj_dim // num_kv_heads
+
+    num_heads = config.num_attention_heads       # e.g. 4
+    num_kv_heads = getattr(config, "num_key_value_heads", num_heads)  # e.g. 1
+    q_head_dim = config.head_dim  # e.g. 256
+    k_head_dim = config.head_dim  # e.g. 256
+    v_head_dim = config.head_dim  # e.g. 256
     
     print(f"\nDIMENSION CALCULATION: Using separate head dimensions for Q and K/V")
     print(f"  Q weights: {q_weight.shape} → {q_head_dim} = {q_proj_dim} / {num_heads} heads")
@@ -694,6 +695,74 @@ def gqa_to_tpa_conversion(
     return result
 
 
+def split_combined_qkv_weights(combined_qkv: torch.Tensor, config) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    combined_qkv : shape [ (Q_dim + K_dim + V_dim), hidden_size ]
+        - Q_dim = num_heads * q_head_dim
+        - K_dim = num_kv_heads * kv_head_dim
+        - V_dim = num_kv_heads * kv_head_dim
+      For Gemma's GQA with 4 query heads, 1 KV head, and head_dim=256:
+        Q_dim = 4 * 256 = 1024
+        K_dim = 1 * 256 = 256
+        V_dim = 1 * 256 = 256
+      so total rows = 1024 + 256 + 256 = 1536, and hidden_size might be 1152.
+
+    config:
+      - config.num_attention_heads (e.g. 4)
+      - config.num_key_value_heads (e.g. 1)
+      - config.hidden_size         (1152)
+      - config.head_dim           (256)  # or something else
+
+    Returns:
+      q_weight : torch.Tensor [hidden_size, Q_dim]  = [1152, 1024]
+      k_weight : torch.Tensor [hidden_size, K_dim]  = [1152, 256]
+      v_weight : torch.Tensor [hidden_size, V_dim]  = [1152, 256]
+
+    These shapes are correct for factorizing Q, K, V.
+    """
+
+    num_heads = config.num_attention_heads
+    num_kv_heads = getattr(config, "num_key_value_heads", num_heads)
+    head_dim = getattr(config, "head_dim", config.hidden_size // num_heads)
+
+    # Compute how many rows belong to Q, K, V
+    Q_dim = num_heads * head_dim
+    K_dim = num_kv_heads * head_dim
+    V_dim = num_kv_heads * head_dim  # same in standard GQA
+
+    # Sanity-check combined_qkv shape
+    expected_rows = Q_dim + K_dim + V_dim  # e.g. 1024+256+256=1536
+    if combined_qkv.shape[0] != expected_rows:
+        raise ValueError(
+            f"Combined QKV has shape {combined_qkv.shape} but expected first "
+            f"dim=Q_dim+K_dim+V_dim={expected_rows} based on config. "
+            f"(Q_dim={Q_dim}, K_dim={K_dim}, V_dim={V_dim})"
+        )
+    hidden_size = config.hidden_size
+    if combined_qkv.shape[1] != hidden_size:
+        raise ValueError(
+            f"Combined QKV has shape {combined_qkv.shape} but expected second "
+            f"dim={hidden_size} from config."
+        )
+
+    # Slice out Q, K, V from the rows
+    q_rows = Q_dim
+    k_rows = K_dim
+    v_rows = V_dim
+
+    q_block = combined_qkv[0 : q_rows, :]                      # shape [1024, 1152] if Q_dim=1024
+    k_block = combined_qkv[q_rows : q_rows + k_rows, :]        # shape [256, 1152]
+    v_block = combined_qkv[q_rows + k_rows : q_rows + k_rows + v_rows, :]
+
+    # Transpose each, to get [ hidden_size, X_dim ]
+    # e.g. q_weight => [1152, 1024], k_weight => [1152, 256], v_weight => [1152, 256]
+    q_weight = q_block.transpose(0, 1).contiguous()
+    k_weight = k_block.transpose(0, 1).contiguous()
+    v_weight = v_block.transpose(0, 1).contiguous()
+
+    return q_weight, k_weight, v_weight
+
+
 def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=torch.float16, device="cuda", use_dynamic_ranks=True, fat_ranks=False):
     """
     Convert a GQA model to TPA format by applying the conversion to each attention layer.
@@ -810,13 +879,19 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
                 head_dim = module.head_dim
                 print(f"  Using head_dim={head_dim} from module attribute")
 
-                # Calculate sizes for splitting
-                q_size = num_heads * head_dim
-                kv_size = num_kv_heads * head_dim
-                
+
                 # Normal case - dimensions match expectations
-                q_weight, k_weight, v_weight = qkv_weight.split([q_size, kv_size, kv_size], dim=0)
-                
+                # New code: slice + transpose carefully
+                combined_qkv = module.qkv_proj.weight  # shape [1536, 1152] for GQA 4+1 heads
+                q_weight, k_weight, v_weight = split_combined_qkv_weights(combined_qkv, model.config)
+
+                # Now we do NOT guess rank from shape; we know:
+                #   q_weight is [1152, 1024] => hidden_size=1152, Q_dim=4*256=1024
+                #   k_weight is [1152, 256]  => hidden_size=1152, K_dim=1*256=256
+                #   v_weight is [1152, 256]
+                #
+                # Next, call your factorization method with known q_head_dim=256, etc.
+
                 o_weight = module.o_proj.weight
                 
                 print(f"  Split combined QKV projection: Q: {q_weight.shape}, K: {k_weight.shape}, V: {v_weight.shape}")

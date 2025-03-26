@@ -92,7 +92,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 134 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 134...
   Q-head-0 SVD reconstruction error: 0.465907
-  Q-head-0 SVD factorization completed in 0.08 seconds
+  Q-head-0 SVD factorization completed in 0.07 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.465907
   Factorizing query head 1/4...
@@ -133,7 +133,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0036 seconds
+  Completed 4 head verifications in 0.0037 seconds
   Head 0 reconstruction error: 0.465907 (46.59%)
   Head 1 reconstruction error: 0.392020 (39.20%)
   Head 2 reconstruction error: 0.313727 (31.37%)
@@ -223,7 +223,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 129 for head 2 (limited by head dimensions)
   Computing SVD factorization for Q-head-2 with rank 129...
   Q-head-2 SVD reconstruction error: 0.326143
-  Q-head-2 SVD factorization completed in 0.02 seconds
+  Q-head-2 SVD factorization completed in 0.03 seconds
   Using head offset 66048 for head 2 in W_B_q
   Query head 2 factorization error: 0.326143
   Factorizing query head 3/4...
@@ -243,7 +243,7 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 228...
   V SVD reconstruction error: 0.220064
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -360,7 +360,7 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 229...
   V SVD reconstruction error: 0.218653
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -484,7 +484,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0036 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.414190 (41.42%)
   Head 1 reconstruction error: 0.335854 (33.59%)
   Head 2 reconstruction error: 0.361550 (36.16%)
@@ -498,7 +498,7 @@ Q combined reconstruction error: 0.375590 (37.56%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.218667 (21.87%)
 
-GQA to TPA conversion complete in 0.34 seconds
+GQA to TPA conversion complete in 0.33 seconds
 Final reconstruction errors:
   Q combined: 37.56%
   Q per-head average: 37.20%
@@ -508,10 +508,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [132, 132, 132, 132]
 Used ranks: Q max=132, K=192, V=233
 Total Q rank used: 528 (sum of per-head ranks)
-  Decomposition completed in 0.34 seconds
+  Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.34 seconds
+  Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.4.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -594,14 +594,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 230...
   V SVD reconstruction error: 0.222124
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0033 seconds
+  Completed 4 head verifications in 0.0034 seconds
   Head 0 reconstruction error: 0.399196 (39.92%)
   Head 1 reconstruction error: 0.385567 (38.56%)
   Head 2 reconstruction error: 0.360195 (36.02%)
@@ -835,7 +835,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0032 seconds
+  Completed 4 head verifications in 0.0033 seconds
   Head 0 reconstruction error: 0.382386 (38.24%)
   Head 1 reconstruction error: 0.335373 (33.54%)
   Head 2 reconstruction error: 0.394190 (39.42%)
@@ -849,7 +849,7 @@ Q combined reconstruction error: 0.380159 (38.02%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.217838 (21.78%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 38.02%
   Q per-head average: 37.93%
@@ -859,7 +859,7 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [128, 128, 128, 128]
 Used ranks: Q max=128, K=188, V=235
 Total Q rank used: 512 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
   Layer conversion took 0.34 seconds
@@ -945,14 +945,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 230...
   V SVD reconstruction error: 0.223215
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0033 seconds
+  Completed 4 head verifications in 0.0034 seconds
   Head 0 reconstruction error: 0.375156 (37.52%)
   Head 1 reconstruction error: 0.393758 (39.38%)
   Head 2 reconstruction error: 0.416077 (41.61%)
@@ -979,7 +979,7 @@ Total Q rank used: 476 (sum of per-head ranks)
   Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.8.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -1062,7 +1062,7 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 231...
   V SVD reconstruction error: 0.220046
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -1186,7 +1186,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0036 seconds
+  Completed 4 head verifications in 0.0037 seconds
   Head 0 reconstruction error: 0.369715 (36.97%)
   Head 1 reconstruction error: 0.402235 (40.22%)
   Head 2 reconstruction error: 0.391415 (39.14%)
@@ -1296,14 +1296,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 229...
   V SVD reconstruction error: 0.218634
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0037 seconds
   Head 0 reconstruction error: 0.438564 (43.86%)
   Head 1 reconstruction error: 0.332497 (33.25%)
   Head 2 reconstruction error: 0.369723 (36.97%)
@@ -1317,7 +1317,7 @@ Q combined reconstruction error: 0.374076 (37.41%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.218634 (21.86%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 37.41%
   Q per-head average: 37.53%
@@ -1327,10 +1327,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [119, 119, 119, 119]
 Used ranks: Q max=119, K=178, V=229
 Total Q rank used: 476 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.11.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -1413,14 +1413,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 223...
   V SVD reconstruction error: 0.222065
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0026 seconds
+  Completed 4 head verifications in 0.0027 seconds
   Head 0 reconstruction error: 0.342373 (34.24%)
   Head 1 reconstruction error: 0.374880 (37.49%)
   Head 2 reconstruction error: 0.395894 (39.59%)
@@ -1434,7 +1434,7 @@ Q combined reconstruction error: 0.350162 (35.02%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222065 (22.21%)
 
-GQA to TPA conversion complete in 0.31 seconds
+GQA to TPA conversion complete in 0.32 seconds
 Final reconstruction errors:
   Q combined: 35.02%
   Q per-head average: 35.08%
@@ -1444,10 +1444,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [85, 85, 85, 85]
 Used ranks: Q max=85, K=147, V=223
 Total Q rank used: 340 (sum of per-head ranks)
-  Decomposition completed in 0.31 seconds
+  Decomposition completed in 0.32 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.31 seconds
+  Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.12.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -1503,21 +1503,21 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 111 for head 1 (limited by head dimensions)
   Computing SVD factorization for Q-head-1 with rank 111...
   Q-head-1 SVD reconstruction error: 0.370812
-  Q-head-1 SVD factorization completed in 0.02 seconds
+  Q-head-1 SVD factorization completed in 0.03 seconds
   Using head offset 28416 for head 1 in W_B_q
   Query head 1 factorization error: 0.370812
   Factorizing query head 2/4...
   Using rank 111 for head 2 (limited by head dimensions)
   Computing SVD factorization for Q-head-2 with rank 111...
   Q-head-2 SVD reconstruction error: 0.381902
-  Q-head-2 SVD factorization completed in 0.02 seconds
+  Q-head-2 SVD factorization completed in 0.03 seconds
   Using head offset 56832 for head 2 in W_B_q
   Query head 2 factorization error: 0.381902
   Factorizing query head 3/4...
   Using rank 111 for head 3 (limited by head dimensions)
   Computing SVD factorization for Q-head-3 with rank 111...
   Q-head-3 SVD reconstruction error: 0.379387
-  Q-head-3 SVD factorization completed in 0.02 seconds
+  Q-head-3 SVD factorization completed in 0.03 seconds
   Using head offset 85248 for head 3 in W_B_q
   Query head 3 factorization error: 0.379387
   Average query head factorization error: 0.373643 (37.36%)
@@ -1537,7 +1537,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0029 seconds
+  Completed 4 head verifications in 0.0030 seconds
   Head 0 reconstruction error: 0.362469 (36.25%)
   Head 1 reconstruction error: 0.370812 (37.08%)
   Head 2 reconstruction error: 0.381902 (38.19%)
@@ -1613,14 +1613,14 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 109 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 109...
   Q-head-0 SVD reconstruction error: 0.373550
-  Q-head-0 SVD factorization completed in 0.02 seconds
+  Q-head-0 SVD factorization completed in 0.03 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.373550
   Factorizing query head 1/4...
   Using rank 109 for head 1 (limited by head dimensions)
   Computing SVD factorization for Q-head-1 with rank 109...
   Q-head-1 SVD reconstruction error: 0.370412
-  Q-head-1 SVD factorization completed in 0.02 seconds
+  Q-head-1 SVD factorization completed in 0.03 seconds
   Using head offset 27904 for head 1 in W_B_q
   Query head 1 factorization error: 0.370412
   Factorizing query head 2/4...
@@ -1634,7 +1634,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 109 for head 3 (limited by head dimensions)
   Computing SVD factorization for Q-head-3 with rank 109...
   Q-head-3 SVD reconstruction error: 0.382724
-  Q-head-3 SVD factorization completed in 0.02 seconds
+  Q-head-3 SVD factorization completed in 0.03 seconds
   Using head offset 83712 for head 3 in W_B_q
   Query head 3 factorization error: 0.382724
   Average query head factorization error: 0.380966 (38.10%)
@@ -1647,14 +1647,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 230...
   V SVD reconstruction error: 0.220350
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.373550 (37.36%)
   Head 1 reconstruction error: 0.370412 (37.04%)
   Head 2 reconstruction error: 0.397177 (39.72%)
@@ -1668,7 +1668,7 @@ Q combined reconstruction error: 0.380605 (38.06%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.220350 (22.04%)
 
-GQA to TPA conversion complete in 0.32 seconds
+GQA to TPA conversion complete in 0.33 seconds
 Final reconstruction errors:
   Q combined: 38.06%
   Q per-head average: 38.10%
@@ -1678,10 +1678,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [109, 109, 109, 109]
 Used ranks: Q max=109, K=167, V=230
 Total Q rank used: 436 (sum of per-head ranks)
-  Decomposition completed in 0.32 seconds
+  Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.32 seconds
+  Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.14.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -1764,14 +1764,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 226...
   V SVD reconstruction error: 0.219388
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0030 seconds
+  Completed 4 head verifications in 0.0032 seconds
   Head 0 reconstruction error: 0.421517 (42.15%)
   Head 1 reconstruction error: 0.410400 (41.04%)
   Head 2 reconstruction error: 0.410542 (41.05%)
@@ -1785,7 +1785,7 @@ Q combined reconstruction error: 0.408389 (40.84%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.219388 (21.94%)
 
-GQA to TPA conversion complete in 0.31 seconds
+GQA to TPA conversion complete in 0.32 seconds
 Final reconstruction errors:
   Q combined: 40.84%
   Q per-head average: 40.90%
@@ -1795,10 +1795,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [93, 93, 93, 93]
 Used ranks: Q max=93, K=160, V=226
 Total Q rank used: 372 (sum of per-head ranks)
-  Decomposition completed in 0.31 seconds
+  Decomposition completed in 0.32 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.31 seconds
+  Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.15.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -1847,7 +1847,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 113 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 113...
   Q-head-0 SVD reconstruction error: 0.368003
-  Q-head-0 SVD factorization completed in 0.02 seconds
+  Q-head-0 SVD factorization completed in 0.03 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.368003
   Factorizing query head 1/4...
@@ -1861,14 +1861,14 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 113 for head 2 (limited by head dimensions)
   Computing SVD factorization for Q-head-2 with rank 113...
   Q-head-2 SVD reconstruction error: 0.397216
-  Q-head-2 SVD factorization completed in 0.02 seconds
+  Q-head-2 SVD factorization completed in 0.03 seconds
   Using head offset 57856 for head 2 in W_B_q
   Query head 2 factorization error: 0.397216
   Factorizing query head 3/4...
   Using rank 113 for head 3 (limited by head dimensions)
   Computing SVD factorization for Q-head-3 with rank 113...
   Q-head-3 SVD reconstruction error: 0.307412
-  Q-head-3 SVD factorization completed in 0.02 seconds
+  Q-head-3 SVD factorization completed in 0.03 seconds
   Using head offset 86784 for head 3 in W_B_q
   Query head 3 factorization error: 0.307412
   Average query head factorization error: 0.350226 (35.02%)
@@ -1888,7 +1888,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.368003 (36.80%)
   Head 1 reconstruction error: 0.328271 (32.83%)
   Head 2 reconstruction error: 0.397216 (39.72%)
@@ -2005,7 +2005,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0038 seconds
   Head 0 reconstruction error: 0.407897 (40.79%)
   Head 1 reconstruction error: 0.359582 (35.96%)
   Head 2 reconstruction error: 0.364651 (36.47%)
@@ -2019,7 +2019,7 @@ Q combined reconstruction error: 0.379433 (37.94%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.221194 (22.12%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.35 seconds
 Final reconstruction errors:
   Q combined: 37.94%
   Q per-head average: 37.95%
@@ -2029,10 +2029,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [122, 122, 122, 122]
 Used ranks: Q max=122, K=186, V=229
 Total Q rank used: 488 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.35 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.35 seconds
 Converting attention layer: model.layers.17.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -2232,14 +2232,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 226...
   V SVD reconstruction error: 0.222407
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0027 seconds
+  Completed 4 head verifications in 0.0028 seconds
   Head 0 reconstruction error: 0.383030 (38.30%)
   Head 1 reconstruction error: 0.424163 (42.42%)
   Head 2 reconstruction error: 0.367057 (36.71%)
@@ -2253,7 +2253,7 @@ Q combined reconstruction error: 0.388698 (38.87%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222407 (22.24%)
 
-GQA to TPA conversion complete in 0.32 seconds
+GQA to TPA conversion complete in 0.31 seconds
 Final reconstruction errors:
   Q combined: 38.87%
   Q per-head average: 38.74%
@@ -2263,10 +2263,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [92, 92, 92, 92]
 Used ranks: Q max=92, K=152, V=226
 Total Q rank used: 368 (sum of per-head ranks)
-  Decomposition completed in 0.32 seconds
+  Decomposition completed in 0.31 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.32 seconds
+  Layer conversion took 0.31 seconds
 Converting attention layer: model.layers.19.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -2349,14 +2349,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 227...
   V SVD reconstruction error: 0.222872
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.435647 (43.56%)
   Head 1 reconstruction error: 0.423971 (42.40%)
   Head 2 reconstruction error: 0.388609 (38.86%)
@@ -2370,7 +2370,7 @@ Q combined reconstruction error: 0.412336 (41.23%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222872 (22.29%)
 
-GQA to TPA conversion complete in 0.34 seconds
+GQA to TPA conversion complete in 0.35 seconds
 Final reconstruction errors:
   Q combined: 41.23%
   Q per-head average: 41.30%
@@ -2380,10 +2380,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [138, 138, 138, 138]
 Used ranks: Q max=138, K=206, V=227
 Total Q rank used: 552 (sum of per-head ranks)
-  Decomposition completed in 0.34 seconds
+  Decomposition completed in 0.35 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.34 seconds
+  Layer conversion took 0.35 seconds
 Converting attention layer: model.layers.20.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -2473,7 +2473,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0037 seconds
+  Completed 4 head verifications in 0.0039 seconds
   Head 0 reconstruction error: 0.407930 (40.79%)
   Head 1 reconstruction error: 0.388603 (38.86%)
   Head 2 reconstruction error: 0.366414 (36.64%)
@@ -2500,7 +2500,7 @@ Total Q rank used: 492 (sum of per-head ranks)
   Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.21.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -2590,7 +2590,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0038 seconds
+  Completed 4 head verifications in 0.0034 seconds
   Head 0 reconstruction error: 0.362847 (36.28%)
   Head 1 reconstruction error: 0.330760 (33.08%)
   Head 2 reconstruction error: 0.411263 (41.13%)
@@ -2700,14 +2700,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 233...
   V SVD reconstruction error: 0.220961
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.289955 (29.00%)
   Head 1 reconstruction error: 0.405205 (40.52%)
   Head 2 reconstruction error: 0.407301 (40.73%)
@@ -2721,7 +2721,7 @@ Q combined reconstruction error: 0.367053 (36.71%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.220961 (22.10%)
 
-GQA to TPA conversion complete in 0.34 seconds
+GQA to TPA conversion complete in 0.35 seconds
 Final reconstruction errors:
   Q combined: 36.71%
   Q per-head average: 35.99%
@@ -2731,10 +2731,10 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [130, 130, 130, 130]
 Used ranks: Q max=130, K=205, V=233
 Total Q rank used: 520 (sum of per-head ranks)
-  Decomposition completed in 0.34 seconds
+  Decomposition completed in 0.35 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.34 seconds
+  Layer conversion took 0.35 seconds
 Converting attention layer: model.layers.23.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
   Using head_dim=256 from module attribute
@@ -2824,7 +2824,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0032 seconds
+  Completed 4 head verifications in 0.0033 seconds
   Head 0 reconstruction error: 0.361047 (36.10%)
   Head 1 reconstruction error: 0.355981 (35.60%)
   Head 2 reconstruction error: 0.458179 (45.82%)
@@ -2934,14 +2934,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 229...
   V SVD reconstruction error: 0.219000
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0031 seconds
+  Completed 4 head verifications in 0.0032 seconds
   Head 0 reconstruction error: 0.366061 (36.61%)
   Head 1 reconstruction error: 0.374483 (37.45%)
   Head 2 reconstruction error: 0.440481 (44.05%)
@@ -3017,7 +3017,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 116 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 116...
   Q-head-0 SVD reconstruction error: 0.375908
-  Q-head-0 SVD factorization completed in 0.02 seconds
+  Q-head-0 SVD factorization completed in 0.03 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.375908
   Factorizing query head 1/4...
@@ -3051,14 +3051,14 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 225...
   V SVD reconstruction error: 0.220694
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.375908 (37.59%)
   Head 1 reconstruction error: 0.353168 (35.32%)
   Head 2 reconstruction error: 0.311528 (31.15%)
@@ -3086,7 +3086,7 @@ Total Q rank used: 464 (sum of per-head ranks)
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
   Layer conversion took 0.33 seconds
-GQA to TPA conversion complete: 26/26 layers converted in 8.78 seconds
+GQA to TPA conversion complete: 26/26 layers converted in 8.89 seconds
 Copying factorized TPA weights...
   Found factorized module: model.layers.0.self_attn
   Layer index: 0
@@ -4597,75 +4597,1018 @@ Storing layer-specific ranks in model config: [{'q_rank': 134, 'k_rank': 202, 'v
   Found factorized module: model.layers.23.self_attn
   Found factorized module: model.layers.24.self_attn
   Found factorized module: model.layers.25.self_attn
-TPA model creation co5mplete in 54.37 seconds
+TPA model creation co5mplete in 51.56 seconds
 Converted GQA -> TPA successfully.
-Conversion to TPA took 57.11 seconds
+Conversion to TPA took 54.29 seconds
 Saving TPA model to tpa_model.pt ...
 TPA model saved successfully.
-Model is on device=cuda and ready (load time 69.53s).
+Model is on device=cuda and ready (load time 66.74s).
 Inference with temperature=0.9, top_p=0.95, top_k=64 ...
-DEBUG TPA FORWARD: input_token_ids shape: torch.Size([1, 2]), device: cuda:0
-DEBUG TPA FORWARD: input_positions: tensor([0, 1], device='cuda:0'), device: cuda:0
-Moving freqs_cis from cpu to cuda:0
-DEBUG TPA FORWARD: freqs_cis shapes - LOCAL: torch.Size([2, 128]), GLOBAL: torch.Size([2, 128])
-Moving embedding weights from cpu to cuda:0
-DEBUG TPA FORWARD: After embedding, hidden_states shape: torch.Size([1, 2, 1152]), mean: 0.000923, std: 0.029297
-Moving model from cpu to cuda:0
-DEBUG TPA FORWARD: After normalization, hidden_states shape: torch.Size([1, 2, 1152]), mean: 0.031250, std: 0.996094
-DEBUG TPA FORWARD: kv_caches length: 26
-DEBUG TPA FORWARD: First KV cache shapes: k=torch.Size([1, 102, 4, 256]), v=torch.Size([1, 102, 4, 256])
-DEBUG TPA FORWARD: mask shape: torch.Size([1, 1, 2, 102]), device: cuda:0
-Traceback (most recent call last):
-  File "/workspace/gemma_pytorch_tpa/scripts/run_tpa.py", line 352, in <module>
-    app.run(main)
-  File "/venv/py312/lib/python3.12/site-packages/absl/app.py", line 308, in run
-    _run_main(main, args)
-  File "/venv/py312/lib/python3.12/site-packages/absl/app.py", line 254, in _run_main
-    sys.exit(main(argv))
-             ^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/scripts/run_tpa.py", line 316, in main
-    output_text = model.generate(
-                  ^^^^^^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 711, in generate
-    next_token_ids, _ = self(
-                        ^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 568, in forward
-    hidden_states = self.model(
-                    ^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 454, in forward
-    hidden_states = layer(
-                    ^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 396, in forward
-    hidden_states = self.self_attn(
-                    ^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/venv/py312/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1750, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/workspace/gemma_pytorch_tpa/gemma/tpa/gemma3_tpa_model.py", line 268, in forward
-    attn_weights = attn_weights + mask
-                   ~~~~~~~~~~~~~^~~~~~
-RuntimeError: The size of tensor a (2) must match the size of tensor b (102) at non-singleton dimension 3
+DEBUG SAMPLER: Logits after temperature: mean=-0.453125, std=5.125000
+DEBUG SAMPLER: Top 10 logits: [20.375, 19.875, 19.75, 19.25, 19.25, 19.125, 19.125, 19.0, 18.75, 18.625]
+DEBUG SAMPLER: Top 10 indices: [93127, 40117, 79140, 190135, 114308, 16764, 161811, 205580, 185295, 6822]
+DEBUG SAMPLER: Top 10 probs: [0.07385677099227905, 0.04479639604687691, 0.039532680064439774, 0.02397778257727623, 0.02397778257727623, 0.021160319447517395, 0.021160319447517395, 0.018673915416002274, 0.014543258585035801, 0.012834380380809307]
+DEBUG SAMPLER: Top 10 token indices: [93127, 40117, 79140, 114308, 190135, 16764, 161811, 205580, 185295, 6822]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 6.6225378046042e-13, 1: 7.119898854518469e-12, 2: 6.080811854047852e-09, 3: 4.845152057342261e-13, 4: 5.82332237986094e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.12380967289209366, 0.07509436458349228, 0.06627054512500763, 0.04019511491060257, 0.04019511491060257]
+DEBUG SAMPLER: Final top 5 indices: [93127, 40117, 79140, 114308, 190135]
+DEBUG SAMPLER: Sampled token: 215814
+DEBUG SAMPLER: Logits after temperature: mean=-1.453125, std=5.312500
+DEBUG SAMPLER: Top 10 logits: [24.625, 22.25, 21.25, 21.125, 20.875, 20.375, 20.25, 20.125, 20.125, 20.0]
+DEBUG SAMPLER: Top 10 indices: [558, 1549, 111351, 111095, 90168, 173702, 79831, 197060, 29953, 494]
+DEBUG SAMPLER: Top 10 probs: [0.6826214790344238, 0.06349369138479233, 0.023358022794127464, 0.020613383501768112, 0.01605371944606304, 0.009737072512507439, 0.008592937141656876, 0.007583240512758493, 0.007583240512758493, 0.006692185997962952]
+DEBUG SAMPLER: Top 10 token indices: [558, 1549, 111351, 111095, 90168, 173702, 79831, 29953, 197060, 494]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 1.7363608923078033e-13, 1: 3.170695928034206e-09, 2: 8.644832659237493e-15, 3: 1.053156043276382e-13, 4: 8.681257752593541e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.7225029468536377, 0.06720324605703354, 0.024722691625356674, 0.021817699074745178, 0.016991641372442245]
+DEBUG SAMPLER: Final top 5 indices: [558, 1549, 111351, 111095, 90168]
+DEBUG SAMPLER: Sampled token: 1549
+DEBUG SAMPLER: Logits after temperature: mean=-0.392578, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [20.875, 20.75, 20.375, 20.25, 20.0, 19.0, 18.75, 18.625, 18.625, 18.375]
+DEBUG SAMPLER: Top 10 indices: [81028, 194062, 6470, 56410, 198194, 45284, 139049, 237242, 100594, 147443]
+DEBUG SAMPLER: Top 10 probs: [0.13298381865024567, 0.11735781282186508, 0.08065877109766006, 0.07118111848831177, 0.0554359033703804, 0.02039373107254505, 0.01588265411555767, 0.014016391709446907, 0.014016391709446907, 0.010915976949036121]
+DEBUG SAMPLER: Top 10 token indices: [81028, 194062, 6470, 56410, 198194, 45284, 139049, 100594, 237242, 147443]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.9221755766008217e-13, 1: 4.227531952977204e-12, 2: 4.1085405655394425e-07, 3: 2.2057739478258814e-13, 4: 2.450393683331464e-15}
+DEBUG SAMPLER: Final top 5 probs: [0.1775638908147812, 0.15669958293437958, 0.10769795626401901, 0.0950431153178215, 0.07401964068412781]
+DEBUG SAMPLER: Final top 5 indices: [81028, 194062, 6470, 56410, 198194]
+DEBUG SAMPLER: Sampled token: 198194
+DEBUG SAMPLER: Logits after temperature: mean=0.085449, std=4.343750
+DEBUG SAMPLER: Top 10 logits: [19.625, 19.0, 18.625, 18.5, 17.75, 17.75, 17.75, 17.25, 17.25, 17.25]
+DEBUG SAMPLER: Top 10 indices: [54776, 227804, 123870, 4334, 220499, 203387, 237127, 96781, 20854, 6010]
+DEBUG SAMPLER: Top 10 probs: [0.1330600380897522, 0.07122190296649933, 0.04895005747675896, 0.04319826886057854, 0.020405417308211327, 0.020405417308211327, 0.020405417308211327, 0.012376510538160801, 0.012376510538160801, 0.012376510538160801]
+DEBUG SAMPLER: Top 10 token indices: [54776, 227804, 123870, 4334, 203387, 220499, 237127, 6010, 20854, 96781]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 3.215798460853847e-10, 1: 2.1084868421894498e-05, 2: 9.387366439739253e-10, 3: 2.2037181801604078e-10, 4: 2.2478536365611035e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.19738395512104034, 0.10565201193094254, 0.07261350750923157, 0.06408118456602097, 0.030269809067249298]
+DEBUG SAMPLER: Final top 5 indices: [54776, 227804, 123870, 4334, 203387]
+DEBUG SAMPLER: Sampled token: 54776
+DEBUG SAMPLER: Logits after temperature: mean=-1.617188, std=5.218750
+DEBUG SAMPLER: Top 10 logits: [20.0, 20.0, 19.875, 19.875, 19.625, 19.25, 19.25, 19.125, 19.0, 19.0]
+DEBUG SAMPLER: Top 10 indices: [237731, 67300, 123817, 236875, 16280, 198793, 237472, 74469, 107849, 117136]
+DEBUG SAMPLER: Top 10 probs: [0.057501111179590225, 0.057501111179590225, 0.05074455216526985, 0.05074455216526985, 0.03951989859342575, 0.027161601930856705, 0.027161601930856705, 0.02397002838551998, 0.02115347795188427, 0.02115347795188427]
+DEBUG SAMPLER: Top 10 token indices: [67300, 237731, 123817, 236875, 16280, 198793, 237472, 74469, 107849, 117136]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.2586730622924387e-12, 1: 1.6738982433223831e-13, 2: 1.489685264033369e-09, 3: 1.2368529594616873e-12, 4: 1.8967751089400686e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.07718876004219055, 0.07718876004219055, 0.06811884045600891, 0.06811884045600891, 0.05305100604891777]
+DEBUG SAMPLER: Final top 5 indices: [67300, 237731, 123817, 236875, 16280]
+DEBUG SAMPLER: Sampled token: 117136
+DEBUG SAMPLER: Logits after temperature: mean=-1.914062, std=4.781250
+DEBUG SAMPLER: Top 10 logits: [20.25, 19.875, 19.125, 19.0, 18.375, 18.25, 17.875, 17.75, 17.375, 17.25]
+DEBUG SAMPLER: Top 10 indices: [82688, 31777, 239401, 43930, 74453, 162894, 237242, 212826, 4944, 38940]
+DEBUG SAMPLER: Top 10 probs: [0.23562030494213104, 0.1619393229484558, 0.0764947161078453, 0.0675063505768776, 0.0361335463821888, 0.03188773989677429, 0.02191610261797905, 0.019340893253684044, 0.013292789459228516, 0.011730844154953957]
+DEBUG SAMPLER: Top 10 token indices: [82688, 31777, 239401, 43930, 74453, 162894, 237242, 212826, 4944, 38940]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 5.289150871836193e-14, 1: 3.117736291358142e-09, 2: 7.207680141618766e-08, 3: 5.289150871836193e-14, 4: 2.798930791997334e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.27290213108062744, 0.1875627189874649, 0.0885983482003212, 0.07818777114152908, 0.041850898414850235]
+DEBUG SAMPLER: Final top 5 indices: [82688, 31777, 239401, 43930, 74453]
+DEBUG SAMPLER: Sampled token: 31777
+DEBUG SAMPLER: Logits after temperature: mean=-3.546875, std=4.125000
+DEBUG SAMPLER: Top 10 logits: [16.5, 15.8125, 15.5, 15.0625, 14.625, 14.25, 14.1875, 13.9375, 13.5, 13.375]
+DEBUG SAMPLER: Top 10 indices: [238280, 33535, 236772, 825, 237218, 55265, 31536, 12086, 27584, 27294]
+DEBUG SAMPLER: Top 10 probs: [0.24489663541316986, 0.12314175814390182, 0.09009244292974472, 0.05816804990172386, 0.03755611553788185, 0.02581191435456276, 0.024248050525784492, 0.01888440176844597, 0.012192685157060623, 0.010760007426142693]
+DEBUG SAMPLER: Top 10 token indices: [238280, 33535, 236772, 825, 237218, 55265, 31536, 12086, 27584, 27294]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 1.6740853495122998e-11, 1: 7.331118823117322e-09, 2: 6.354111681261543e-12, 3: 8.960733197116433e-12, 4: 8.912373061775725e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.30842161178588867, 0.15508411824703217, 0.11346197128295898, 0.07325655221939087, 0.04729798436164856]
+DEBUG SAMPLER: Final top 5 indices: [238280, 33535, 236772, 825, 237218]
+DEBUG SAMPLER: Sampled token: 33535
+DEBUG SAMPLER: Logits after temperature: mean=-2.375000, std=4.062500
+DEBUG SAMPLER: Top 10 logits: [16.0, 15.125, 14.5, 14.375, 14.375, 14.3125, 13.875, 13.8125, 13.75, 13.6875]
+DEBUG SAMPLER: Top 10 indices: [509, 68242, 17598, 236898, 78480, 3950, 10989, 196372, 71914, 238291]
+DEBUG SAMPLER: Top 10 probs: [0.12917254865169525, 0.05384713038802147, 0.028822293505072594, 0.02543558180332184, 0.02543558180332184, 0.023894520476460457, 0.015427461825311184, 0.014492757618427277, 0.013614686205983162, 0.012789814732968807]
+DEBUG SAMPLER: Top 10 token indices: [509, 68242, 17598, 78480, 236898, 3950, 10989, 196372, 71914, 238291]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.3264180512572175e-11, 1: 6.094396653999468e-10, 2: 8.107784310595889e-08, 3: 8.558414393844416e-12, 4: 7.960565800296804e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.21743406355381012, 0.09064000099897385, 0.04851610213518143, 0.042815305292606354, 0.042815305292606354]
+DEBUG SAMPLER: Final top 5 indices: [509, 68242, 17598, 78480, 236898]
+DEBUG SAMPLER: Sampled token: 223832
+DEBUG SAMPLER: Logits after temperature: mean=-0.515625, std=4.625000
+DEBUG SAMPLER: Top 10 logits: [22.375, 22.0, 21.0, 20.75, 20.25, 20.0, 19.625, 19.625, 19.25, 19.0]
+DEBUG SAMPLER: Top 10 indices: [86323, 9487, 47336, 39353, 85141, 34388, 86684, 99398, 10198, 19618]
+DEBUG SAMPLER: Top 10 probs: [0.3315696120262146, 0.22788424789905548, 0.08383392542600632, 0.0652899220585823, 0.039600346237421036, 0.030840778723359108, 0.021196536719799042, 0.021196536719799042, 0.014568152837455273, 0.011345688253641129]
+DEBUG SAMPLER: Top 10 token indices: [86323, 9487, 47336, 39353, 85141, 34388, 86684, 99398, 10198, 19618]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.785482569086061e-13, 1: 3.311738883127191e-09, 2: 1.6048225859321974e-08, 3: 1.1173265139713742e-13, 4: 1.461207776998208e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.3557294011116028, 0.24448901414871216, 0.08994247764348984, 0.07004726678133011, 0.04248582199215889]
+DEBUG SAMPLER: Final top 5 indices: [86323, 9487, 47336, 39353, 85141]
+DEBUG SAMPLER: Sampled token: 9487
+DEBUG SAMPLER: Logits after temperature: mean=-0.738281, std=4.718750
+DEBUG SAMPLER: Top 10 logits: [21.0, 20.75, 19.875, 19.875, 19.0, 18.75, 18.5, 18.375, 18.375, 18.25]
+DEBUG SAMPLER: Top 10 indices: [10865, 38439, 118502, 129983, 136847, 238267, 66456, 98775, 161764, 30997]
+DEBUG SAMPLER: Top 10 probs: [0.21522380411624908, 0.16761647164821625, 0.06987293809652328, 0.06987293809652328, 0.029127374291419983, 0.02268442139029503, 0.017666645348072052, 0.015590760856866837, 0.015590760856866837, 0.013758797198534012]
+DEBUG SAMPLER: Top 10 token indices: [10865, 38439, 118502, 129983, 136847, 238267, 66456, 98775, 161764, 30997]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.0838979373642994e-12, 1: 7.008361535554286e-08, 2: 1.886274958451395e-08, 3: 9.115984876684191e-13, 4: 4.143596576966502e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.2524538040161133, 0.19661124050617218, 0.08195975422859192, 0.08195975422859192, 0.03416590765118599]
+DEBUG SAMPLER: Final top 5 indices: [10865, 38439, 118502, 129983, 136847]
+DEBUG SAMPLER: Sampled token: 216261
+DEBUG SAMPLER: Logits after temperature: mean=-1.437500, std=4.593750
+DEBUG SAMPLER: Top 10 logits: [18.875, 18.25, 17.75, 17.125, 17.0, 17.0, 16.75, 16.625, 16.625, 16.625]
+DEBUG SAMPLER: Top 10 indices: [54628, 11947, 189457, 92079, 237106, 1811, 82430, 237426, 25831, 7886]
+DEBUG SAMPLER: Top 10 probs: [0.18560907244682312, 0.09934937953948975, 0.060258444398641586, 0.032254017889499664, 0.028464075177907944, 0.028464075177907944, 0.022167842835187912, 0.01956305094063282, 0.01956305094063282, 0.01956305094063282]
+DEBUG SAMPLER: Top 10 token indices: [54628, 11947, 189457, 92079, 1811, 237106, 82430, 7886, 25831, 237426]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.4399073906411382e-14, 1: 8.37365732309081e-09, 2: 4.113002383121511e-09, 3: 1.1937250572247905e-14, 4: 2.64997662702271e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.24433034658432007, 0.13078062236309052, 0.079322449862957, 0.042458243668079376, 0.037469275295734406]
+DEBUG SAMPLER: Final top 5 indices: [54628, 11947, 189457, 92079, 1811]
+DEBUG SAMPLER: Sampled token: 11947
+DEBUG SAMPLER: Logits after temperature: mean=-3.046875, std=4.562500
+DEBUG SAMPLER: Top 10 logits: [18.25, 16.5, 16.125, 16.0, 15.8125, 15.625, 15.5625, 15.125, 15.0625, 14.9375]
+DEBUG SAMPLER: Top 10 indices: [47706, 22441, 191716, 93436, 24568, 62092, 40668, 56590, 15813, 24573]
+DEBUG SAMPLER: Top 10 probs: [0.3107287585735321, 0.053996555507183075, 0.03711125627160072, 0.03275056928396225, 0.02715117484331131, 0.022509116679430008, 0.021145356819033623, 0.013652469031512737, 0.012825307436287403, 0.011318294331431389]
+DEBUG SAMPLER: Top 10 token indices: [47706, 22441, 191716, 93436, 24568, 62092, 40668, 56590, 15813, 24573]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 2.0183317907609966e-13, 1: 6.750395381560637e-11, 2: 1.0133543310031357e-10, 3: 4.793957792586026e-14, 4: 4.358382751923351e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.3942326605319977, 0.0685073584318161, 0.047084372490644455, 0.04155181348323822, 0.03444766253232956]
+DEBUG SAMPLER: Final top 5 indices: [47706, 22441, 191716, 93436, 24568]
+DEBUG SAMPLER: Sampled token: 137529
+DEBUG SAMPLER: Logits after temperature: mean=-1.054688, std=4.687500
+DEBUG SAMPLER: Top 10 logits: [20.0, 20.0, 19.75, 18.875, 18.625, 18.5, 18.25, 18.0, 17.875, 17.75]
+DEBUG SAMPLER: Top 10 indices: [238548, 240146, 169645, 116982, 226833, 229059, 191335, 100806, 79100, 138291]
+DEBUG SAMPLER: Top 10 probs: [0.13242772221565247, 0.13242772221565247, 0.10313481837511063, 0.04299298673868179, 0.03348297253251076, 0.02954862080514431, 0.023012487217783928, 0.017922144383192062, 0.015816237777471542, 0.013957779854536057]
+DEBUG SAMPLER: Top 10 token indices: [238548, 240146, 169645, 116982, 226833, 229059, 191335, 100806, 79100, 138291]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 7.176273464359895e-11, 1: 3.8055571138784217e-08, 2: 2.732288839624175e-10, 3: 3.1106846265505084e-11, 4: 6.090424692350993e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.16675393283367157, 0.16675393283367157, 0.12986809015274048, 0.05413707345724106, 0.04216199740767479]
+DEBUG SAMPLER: Final top 5 indices: [238548, 240146, 169645, 116982, 226833]
+DEBUG SAMPLER: Sampled token: 240146
+DEBUG SAMPLER: Logits after temperature: mean=-4.562500, std=4.843750
+DEBUG SAMPLER: Top 10 logits: [16.25, 15.75, 15.4375, 15.125, 15.0, 14.875, 14.75, 14.625, 14.5, 14.4375]
+DEBUG SAMPLER: Top 10 indices: [58727, 90526, 83991, 134166, 236764, 236838, 4225, 176293, 93871, 192337]
+DEBUG SAMPLER: Top 10 probs: [0.09744437038898468, 0.05910300090909004, 0.04324067756533623, 0.03163555637001991, 0.02791828103363514, 0.024637795984745026, 0.02174277976155281, 0.019187932834029198, 0.016933292150497437, 0.01590735651552677]
+DEBUG SAMPLER: Top 10 token indices: [58727, 90526, 83991, 134166, 236764, 236838, 4225, 176293, 93871, 192337]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.194284796925127e-12, 1: 3.27875053496296e-11, 2: 1.876047761584232e-09, 3: 9.301099387210021e-13, 4: 3.3393860121577745e-06}
+DEBUG SAMPLER: Final top 5 probs: [0.14173057675361633, 0.08596394956111908, 0.06289256364107132, 0.046013183891773224, 0.04060649499297142]
+DEBUG SAMPLER: Final top 5 indices: [58727, 90526, 83991, 134166, 236764]
+DEBUG SAMPLER: Sampled token: 9231
+DEBUG SAMPLER: Logits after temperature: mean=-3.468750, std=5.375000
+DEBUG SAMPLER: Top 10 logits: [22.75, 22.125, 21.625, 21.25, 21.0, 20.875, 20.5, 20.25, 20.0, 19.5]
+DEBUG SAMPLER: Top 10 indices: [15581, 25335, 2275, 49919, 59670, 55339, 7127, 124391, 236746, 99792]
+DEBUG SAMPLER: Top 10 probs: [0.31968986988067627, 0.1711176633834839, 0.1037881076335907, 0.07133245468139648, 0.05555376783013344, 0.04902603104710579, 0.03369506448507309, 0.026241742074489594, 0.02043708972632885, 0.012395721860229969]
+DEBUG SAMPLER: Top 10 token indices: [15581, 25335, 2275, 49919, 59670, 55339, 7127, 124391, 236746, 99792]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 5.1985122478427626e-15, 1: 2.5251824936622924e-11, 2: 2.472616422721785e-08, 3: 2.306825833936596e-15, 4: 2.2104636643229675e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.33634793758392334, 0.1800340861082077, 0.10919619351625443, 0.07504937797784805, 0.05844850838184357]
+DEBUG SAMPLER: Final top 5 indices: [15581, 25335, 2275, 49919, 59670]
+DEBUG SAMPLER: Sampled token: 59670
+DEBUG SAMPLER: Logits after temperature: mean=-0.125977, std=5.093750
+DEBUG SAMPLER: Top 10 logits: [25.0, 22.25, 22.0, 21.625, 21.25, 20.75, 20.75, 20.375, 20.25, 19.875]
+DEBUG SAMPLER: Top 10 indices: [8910, 56981, 204439, 789, 144256, 25564, 134427, 60643, 227294, 106091]
+DEBUG SAMPLER: Top 10 probs: [0.7309442758560181, 0.046727702021598816, 0.036391571164131165, 0.025011537596583366, 0.01719016209244728, 0.010426359251141548, 0.010426359251141548, 0.007165925577282906, 0.006323907058686018, 0.004346353467553854]
+DEBUG SAMPLER: Top 10 token indices: [8910, 56981, 204439, 789, 144256, 25564, 134427, 60643, 227294, 106091]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 2.42495531033865e-13, 1: 6.193264651122021e-12, 2: 9.937028283557581e-11, 3: 6.908054315211964e-13, 4: 9.471309153630258e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.7711917161941528, 0.04930063337087631, 0.03839537501335144, 0.026388728991150856, 0.01813669130206108]
+DEBUG SAMPLER: Final top 5 indices: [8910, 56981, 204439, 789, 144256]
+DEBUG SAMPLER: Sampled token: 8910
+DEBUG SAMPLER: Logits after temperature: mean=-2.500000, std=4.875000
+DEBUG SAMPLER: Top 10 logits: [19.0, 18.625, 18.625, 17.625, 17.625, 17.625, 17.5, 17.375, 17.375, 17.125]
+DEBUG SAMPLER: Top 10 indices: [72867, 147869, 36780, 202896, 13440, 97783, 33184, 4245, 38612, 50360]
+DEBUG SAMPLER: Top 10 probs: [0.1225731149315834, 0.08424319326877594, 0.08424319326877594, 0.030991338193416595, 0.030991338193416595, 0.030991338193416595, 0.02734976075589657, 0.024136075749993324, 0.024136075749993324, 0.018797196447849274]
+DEBUG SAMPLER: Top 10 token indices: [72867, 36780, 147869, 13440, 97783, 202896, 33184, 4245, 38612, 50360]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.2631307111377055e-09, 1: 1.0250672310974096e-08, 2: 6.48838344163849e-11, 3: 6.740449864928166e-10, 4: 1.181622508172886e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.15685158967971802, 0.10780242830514908, 0.10780242830514908, 0.03965829685330391, 0.03965829685330391]
+DEBUG SAMPLER: Final top 5 indices: [72867, 36780, 147869, 13440, 97783]
+DEBUG SAMPLER: Sampled token: 38612
+DEBUG SAMPLER: Logits after temperature: mean=-1.242188, std=4.250000
+DEBUG SAMPLER: Top 10 logits: [17.625, 17.375, 16.125, 16.0, 16.0, 16.0, 15.8125, 15.75, 15.6875, 15.6875]
+DEBUG SAMPLER: Top 10 indices: [53597, 15521, 192935, 237635, 76581, 35692, 244457, 7291, 5791, 190600]
+DEBUG SAMPLER: Top 10 probs: [0.11382649093866348, 0.08864816278219223, 0.025398124009370804, 0.022413764148950577, 0.022413764148950577, 0.022413764148950577, 0.018581664189696312, 0.01745585910975933, 0.016398262232542038, 0.016398262232542038]
+DEBUG SAMPLER: Top 10 token indices: [53597, 15521, 192935, 35692, 76581, 237635, 244457, 7291, 5791, 190600]
+DEBUG SAMPLER: Probability sum: 1.0000005960464478
+DEBUG SAMPLER: Special token probabilities: {0: 9.683671399474125e-12, 1: 3.999315989489105e-09, 2: 7.518980055465363e-06, 3: 1.0308215218912675e-11, 4: 7.648892186296052e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.18778157234191895, 0.14624443650245667, 0.04189973324537277, 0.03697638213634491, 0.03697638213634491]
+DEBUG SAMPLER: Final top 5 indices: [53597, 15521, 192935, 35692, 76581]
+DEBUG SAMPLER: Sampled token: 62070
+DEBUG SAMPLER: Logits after temperature: mean=2.125000, std=4.718750
+DEBUG SAMPLER: Top 10 logits: [25.375, 23.625, 23.25, 21.75, 21.75, 21.5, 21.5, 21.375, 21.0, 20.5]
+DEBUG SAMPLER: Top 10 indices: [154905, 14482, 76366, 95330, 48503, 169963, 108173, 71862, 57558, 49894]
+DEBUG SAMPLER: Top 10 probs: [0.5868479609489441, 0.10197886824607849, 0.07008899003267288, 0.015638967975974083, 0.015638967975974083, 0.012179640121757984, 0.012179640121757984, 0.01074849534779787, 0.007387325167655945, 0.004480639006942511]
+DEBUG SAMPLER: Top 10 token indices: [154905, 14482, 76366, 48503, 95330, 108173, 169963, 71862, 57558, 49894]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.8123663398105236e-09, 1: 4.405908277105297e-11, 2: 2.0141378342941607e-08, 3: 3.088780564652893e-09, 4: 2.0606708613785107e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.6364418268203735, 0.11059699207544327, 0.07601213455200195, 0.01696060039103031, 0.01696060039103031]
+DEBUG SAMPLER: Final top 5 indices: [154905, 14482, 76366, 48503, 95330]
+DEBUG SAMPLER: Sampled token: 154905
+DEBUG SAMPLER: Logits after temperature: mean=-3.640625, std=5.218750
+DEBUG SAMPLER: Top 10 logits: [20.75, 19.5, 19.25, 19.0, 19.0, 18.0, 17.75, 17.75, 17.625, 17.375]
+DEBUG SAMPLER: Top 10 indices: [171299, 50204, 71971, 92979, 13893, 35636, 131221, 2553, 17780, 48666]
+DEBUG SAMPLER: Top 10 probs: [0.35184475779533386, 0.10080521553754807, 0.07850717753171921, 0.061141446232795715, 0.061141446232795715, 0.022492682561278343, 0.017517318949103355, 0.017517318949103355, 0.015458979643881321, 0.01203946489840746]
+DEBUG SAMPLER: Top 10 token indices: [171299, 50204, 71971, 13893, 92979, 35636, 2553, 131221, 17780, 48666]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.538849757529704e-15, 1: 1.1974637861150716e-12, 2: 7.87438878546709e-08, 3: 1.857462361682218e-15, 4: 4.736061369470246e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.38298043608665466, 0.10972573608160019, 0.08545448631048203, 0.06655201315879822, 0.06655201315879822]
+DEBUG SAMPLER: Final top 5 indices: [171299, 50204, 71971, 13893, 92979]
+DEBUG SAMPLER: Sampled token: 131221
+DEBUG SAMPLER: Logits after temperature: mean=-2.156250, std=5.093750
+DEBUG SAMPLER: Top 10 logits: [21.25, 20.875, 20.5, 20.0, 19.625, 19.625, 19.25, 19.25, 19.125, 19.125]
+DEBUG SAMPLER: Top 10 indices: [238366, 15305, 3399, 33333, 238698, 239365, 9612, 188227, 230887, 240546]
+DEBUG SAMPLER: Top 10 probs: [0.17010723054409027, 0.11691287904977798, 0.08035296946763992, 0.048736538738012314, 0.03349609673023224, 0.03349609673023224, 0.023021509870886803, 0.023021509870886803, 0.020316410809755325, 0.020316410809755325]
+DEBUG SAMPLER: Top 10 token indices: [238366, 15305, 3399, 33333, 238698, 239365, 9612, 188227, 230887, 240546]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.4328921079179158e-12, 1: 4.406979670079636e-09, 2: 2.1770311942059806e-10, 3: 4.370074180998218e-13, 4: 2.7191512930180295e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.19340941309928894, 0.13292822241783142, 0.09136014431715012, 0.05541272833943367, 0.038084570318460464]
+DEBUG SAMPLER: Final top 5 indices: [238366, 15305, 3399, 33333, 238698]
+DEBUG SAMPLER: Sampled token: 238366
+DEBUG SAMPLER: Logits after temperature: mean=-1.539062, std=4.843750
+DEBUG SAMPLER: Top 10 logits: [22.25, 22.0, 18.75, 18.375, 18.25, 18.0, 17.875, 17.75, 17.625, 17.375]
+DEBUG SAMPLER: Top 10 indices: [15338, 1249, 19940, 32404, 32952, 38074, 84209, 1794, 556, 207399]
+DEBUG SAMPLER: Top 10 probs: [0.46022698283195496, 0.3584251403808594, 0.013897650875151157, 0.009551705792546272, 0.008429351262748241, 0.00656478526070714, 0.005793402902781963, 0.0051126605831086636, 0.004511906765401363, 0.0035138761159032583]
+DEBUG SAMPLER: Top 10 token indices: [15338, 1249, 19940, 32404, 32952, 38074, 84209, 1794, 556, 207399]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 4.539155120162177e-15, 1: 8.503182602481729e-10, 2: 2.0281932577859152e-08, 3: 4.264141733397071e-15, 4: 5.085130992503462e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.4892692565917969, 0.38104328513145447, 0.014774651266634464, 0.010154458694159985, 0.008961278945207596]
+DEBUG SAMPLER: Final top 5 indices: [15338, 1249, 19940, 32404, 32952]
+DEBUG SAMPLER: Sampled token: 15338
+DEBUG SAMPLER: Logits after temperature: mean=-1.835938, std=4.718750
+DEBUG SAMPLER: Top 10 logits: [19.5, 18.625, 18.625, 18.5, 18.25, 17.875, 17.875, 17.75, 17.625, 17.625]
+DEBUG SAMPLER: Top 10 indices: [36348, 96331, 8486, 237784, 1527, 70519, 113482, 239338, 4937, 90163]
+DEBUG SAMPLER: Top 10 probs: [0.15338164567947388, 0.06393898278474808, 0.06393898278474808, 0.05642596259713173, 0.0439445786178112, 0.030202634632587433, 0.030202634632587433, 0.026653731241822243, 0.02352183870971203, 0.02352183870971203]
+DEBUG SAMPLER: Top 10 token indices: [36348, 8486, 96331, 237784, 1527, 70519, 113482, 239338, 4937, 90163]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 5.439543347002251e-12, 1: 8.153439701175103e-09, 2: 5.4937440013835825e-11, 3: 3.299249979119012e-12, 4: 6.9845114934741215e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.19649332761764526, 0.08191060274839401, 0.08191060274839401, 0.07228586077690125, 0.05629628151655197]
+DEBUG SAMPLER: Final top 5 indices: [36348, 8486, 96331, 237784, 1527]
+DEBUG SAMPLER: Sampled token: 243932
+DEBUG SAMPLER: Logits after temperature: mean=-3.203125, std=4.937500
+DEBUG SAMPLER: Top 10 logits: [18.625, 17.625, 16.5, 16.375, 16.25, 16.125, 16.0, 15.8125, 15.8125, 15.75]
+DEBUG SAMPLER: Top 10 indices: [159529, 4650, 104240, 34132, 4977, 161888, 12513, 18206, 55815, 214372]
+DEBUG SAMPLER: Top 10 probs: [0.2631867527961731, 0.09682100266218185, 0.03143317624926567, 0.02773967757821083, 0.02448018081486225, 0.02160368300974369, 0.019065184518694878, 0.015805592760443687, 0.015805592760443687, 0.014847980812191963]
+DEBUG SAMPLER: Top 10 token indices: [159529, 4650, 104240, 34132, 4977, 161888, 12513, 18206, 55815, 214372]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.1734153918869653e-14, 1: 3.670524162391331e-10, 2: 7.0348362690708655e-09, 3: 9.060143077671643e-15, 4: 1.236881264077283e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.3411308526992798, 0.1254950314760208, 0.04074227064847946, 0.03595492243766785, 0.03173011168837547]
+DEBUG SAMPLER: Final top 5 indices: [159529, 4650, 104240, 34132, 4977]
+DEBUG SAMPLER: Sampled token: 4059
+DEBUG SAMPLER: Logits after temperature: mean=-0.347656, std=4.843750
+DEBUG SAMPLER: Top 10 logits: [22.375, 22.0, 21.125, 20.5, 20.5, 20.125, 20.0, 20.0, 19.875, 19.75]
+DEBUG SAMPLER: Top 10 indices: [94883, 47193, 15956, 176463, 145740, 36109, 153711, 140624, 34365, 213009]
+DEBUG SAMPLER: Top 10 probs: [0.2746298313140869, 0.18875013291835785, 0.07868276536464691, 0.04211584851145744, 0.04211584851145744, 0.028945770114660263, 0.025544552132487297, 0.025544552132487297, 0.022542988881468773, 0.01989411748945713]
+DEBUG SAMPLER: Top 10 token indices: [94883, 47193, 15956, 145740, 176463, 36109, 140624, 153711, 34365, 213009]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 3.1129317873412887e-12, 1: 2.2774694456717537e-12, 2: 2.840321901287357e-11, 3: 1.888088426924006e-12, 4: 4.315376944674654e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.30371007323265076, 0.20873667299747467, 0.08701439946889877, 0.04657544940710068, 0.04657544940710068]
+DEBUG SAMPLER: Final top 5 indices: [94883, 47193, 15956, 145740, 176463]
+DEBUG SAMPLER: Sampled token: 145740
+DEBUG SAMPLER: Logits after temperature: mean=-1.609375, std=4.281250
+DEBUG SAMPLER: Top 10 logits: [19.25, 18.75, 16.625, 16.625, 15.875, 15.6875, 15.6875, 15.625, 15.4375, 15.375]
+DEBUG SAMPLER: Top 10 indices: [237051, 236754, 5162, 404, 70720, 108526, 168737, 238141, 6313, 164713]
+DEBUG SAMPLER: Top 10 probs: [0.40263620018959045, 0.24421119689941406, 0.029166869819164276, 0.029166869819164276, 0.013777452521026134, 0.011421910487115383, 0.011421910487115383, 0.010729891248047352, 0.008895392529666424, 0.008356447331607342]
+DEBUG SAMPLER: Top 10 token indices: [237051, 236754, 404, 5162, 70720, 108526, 168737, 238141, 6313, 164713]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 2.308007029851872e-13, 1: 4.7485244181189046e-08, 2: 1.3604750215279182e-08, 3: 1.2353871181244869e-13, 4: 1.652929637781242e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.4600931406021118, 0.27906057238578796, 0.033329036086797714, 0.033329036086797714, 0.015743520110845566]
+DEBUG SAMPLER: Final top 5 indices: [237051, 236754, 404, 5162, 70720]
+DEBUG SAMPLER: Sampled token: 236754
+DEBUG SAMPLER: Logits after temperature: mean=-3.640625, std=5.468750
+DEBUG SAMPLER: Top 10 logits: [23.375, 19.125, 19.125, 18.0, 17.75, 17.75, 17.5, 17.125, 16.5, 16.5]
+DEBUG SAMPLER: Top 10 indices: [8454, 15119, 2617, 4103, 503, 140592, 122666, 50260, 53609, 69792]
+DEBUG SAMPLER: Top 10 probs: [0.9252800941467285, 0.013198411092162132, 0.013198411092162132, 0.004284897353500128, 0.003337081288918853, 0.003337081288918853, 0.002598921535536647, 0.0017862108070403337, 0.0009560897597111762, 0.0009560897597111762]
+DEBUG SAMPLER: Top 10 token indices: [8454, 2617, 15119, 4103, 503, 140592, 122666, 50260, 53609, 69792]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 1.276182210660207e-18, 1: 1.5141280590436068e-11, 2: 1.5565658761929058e-09, 3: 3.6563231306524996e-19, 4: 5.032225504353338e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.9722627997398376, 0.013868583366274834, 0.013868583366274834, 0.0, 0.0]
+DEBUG SAMPLER: Final top 5 indices: [8454, 2617, 15119, 4103, 503]
+DEBUG SAMPLER: Sampled token: 8454
+DEBUG SAMPLER: Logits after temperature: mean=-2.468750, std=4.406250
+DEBUG SAMPLER: Top 10 logits: [16.25, 15.875, 15.6875, 15.625, 15.5625, 15.5, 15.4375, 15.375, 15.25, 14.9375]
+DEBUG SAMPLER: Top 10 indices: [12556, 6170, 684, 886, 97444, 85984, 130851, 2070, 237384, 1346]
+DEBUG SAMPLER: Top 10 probs: [0.06213294714689255, 0.042703308165073395, 0.03540228307247162, 0.0332573726773262, 0.031242407858371735, 0.02934952825307846, 0.02757132798433304, 0.025900864973664284, 0.022857436910271645, 0.01672285608947277]
+DEBUG SAMPLER: Top 10 token indices: [12556, 6170, 684, 886, 97444, 85984, 130851, 2070, 237384, 1346]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 5.930611362246763e-13, 1: 2.734043619057047e-06, 2: 1.7171043253938478e-08, 3: 3.59709766313554e-13, 4: 1.9639487952582968e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.10131832957267761, 0.06963500380516052, 0.057729437947273254, 0.05423179641366005, 0.05094605311751366]
+DEBUG SAMPLER: Final top 5 indices: [12556, 6170, 684, 886, 97444]
+DEBUG SAMPLER: Sampled token: 104722
+DEBUG SAMPLER: Logits after temperature: mean=-1.812500, std=5.250000
+DEBUG SAMPLER: Top 10 logits: [20.5, 19.75, 19.625, 19.0, 18.75, 18.75, 18.625, 18.625, 18.625, 18.625]
+DEBUG SAMPLER: Top 10 indices: [230966, 57524, 68869, 212118, 93941, 37900, 193068, 224473, 138452, 88570]
+DEBUG SAMPLER: Top 10 probs: [0.1258147805929184, 0.059430696070194244, 0.05244740471243858, 0.02807307243347168, 0.02186332829296589, 0.02186332829296589, 0.01929432339966297, 0.01929432339966297, 0.01929432339966297, 0.01929432339966297]
+DEBUG SAMPLER: Top 10 token indices: [230966, 57524, 68869, 212118, 37900, 93941, 88570, 138452, 193068, 224473]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.434278314605547e-13, 1: 8.24128709719929e-10, 2: 2.927064979285632e-10, 3: 3.626423163496928e-14, 4: 5.911068943348363e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.17183750867843628, 0.08117029815912247, 0.07163253426551819, 0.03834213316440582, 0.029860878363251686]
+DEBUG SAMPLER: Final top 5 indices: [230966, 57524, 68869, 212118, 37900]
+DEBUG SAMPLER: Sampled token: 57524
+DEBUG SAMPLER: Logits after temperature: mean=-1.742188, std=4.656250
+DEBUG SAMPLER: Top 10 logits: [21.125, 20.375, 18.5, 18.5, 18.0, 17.875, 17.75, 17.75, 17.375, 17.375]
+DEBUG SAMPLER: Top 10 indices: [236908, 183539, 9525, 10014, 113004, 188220, 48554, 2144, 67884, 144615]
+DEBUG SAMPLER: Top 10 probs: [0.41489002108573914, 0.19598017632961273, 0.03005453199148178, 0.03005453199148178, 0.01822899468243122, 0.016087030991911888, 0.014196755364537239, 0.014196755364537239, 0.009757278487086296, 0.009757278487086296]
+DEBUG SAMPLER: Top 10 token indices: [236908, 183539, 9525, 10014, 113004, 188220, 2144, 48554, 67884, 144615]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 4.215546314800811e-12, 1: 6.445317239922588e-07, 2: 2.1654200784912425e-13, 3: 1.5030994027567801e-12, 4: 2.2814701516882252e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.46068722009658813, 0.21761323511600494, 0.033372070640325546, 0.033372070640325546, 0.020241182297468185]
+DEBUG SAMPLER: Final top 5 indices: [236908, 183539, 9525, 10014, 113004]
+DEBUG SAMPLER: Sampled token: 236908
+DEBUG SAMPLER: Logits after temperature: mean=-2.515625, std=4.531250
+DEBUG SAMPLER: Top 10 logits: [21.625, 18.625, 18.625, 16.75, 16.125, 16.125, 15.875, 15.6875, 15.625, 15.5]
+DEBUG SAMPLER: Top 10 indices: [39191, 231906, 225498, 142363, 78172, 122646, 146115, 139407, 25386, 178104]
+DEBUG SAMPLER: Top 10 probs: [0.8332302570343018, 0.04148409143090248, 0.04148409143090248, 0.006361790932714939, 0.003405221737921238, 0.003405221737921238, 0.0026519892271608114, 0.0021985762286931276, 0.0020653714891523123, 0.0018226838437840343]
+DEBUG SAMPLER: Top 10 token indices: [39191, 225498, 231906, 142363, 78172, 122646, 146115, 139407, 25386, 178104]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.0536294059448892e-11, 1: 9.764988123661666e-11, 2: 2.7444220229710936e-09, 3: 8.466149656327637e-12, 4: 5.512319489753281e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.8766553997993469, 0.04364610090851784, 0.04364610090851784, 0.006693345960229635, 0.0035826903767883778]
+DEBUG SAMPLER: Final top 5 indices: [39191, 225498, 231906, 142363, 78172]
+DEBUG SAMPLER: Sampled token: 39191
+DEBUG SAMPLER: Logits after temperature: mean=2.531250, std=4.781250
+DEBUG SAMPLER: Top 10 logits: [26.0, 23.75, 23.25, 23.0, 22.5, 22.375, 22.125, 21.75, 21.625, 21.625]
+DEBUG SAMPLER: Top 10 indices: [21322, 72389, 114707, 61679, 48696, 173129, 154951, 45564, 192037, 212595]
+DEBUG SAMPLER: Top 10 probs: [0.5772759318351746, 0.060844436287879944, 0.03690401464700699, 0.02874087542295456, 0.01743222400546074, 0.015383882448077202, 0.011980979703366756, 0.008234398439526558, 0.007266831584274769, 0.007266831584274769]
+DEBUG SAMPLER: Top 10 token indices: [21322, 72389, 114707, 61679, 48696, 173129, 154951, 45564, 192037, 212595]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 1.2711711891433275e-11, 1: 4.1182210636439565e-13, 2: 6.39184972311968e-12, 3: 7.075132580497412e-12, 4: 6.496384941101496e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.6435344815254211, 0.06782803684473038, 0.04113978147506714, 0.03203969448804855, 0.01943305879831314]
+DEBUG SAMPLER: Final top 5 indices: [21322, 72389, 114707, 61679, 48696]
+DEBUG SAMPLER: Sampled token: 28225
+DEBUG SAMPLER: Logits after temperature: mean=-3.015625, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [17.75, 17.75, 17.625, 17.375, 17.375, 17.0, 16.875, 16.875, 16.75, 16.75]
+DEBUG SAMPLER: Top 10 indices: [238251, 15122, 91707, 167023, 100025, 240983, 104013, 240119, 53759, 240340]
+DEBUG SAMPLER: Top 10 probs: [0.06367096304893494, 0.06367096304893494, 0.05618942901492119, 0.04376037418842316, 0.04376037418842316, 0.030076036229729652, 0.02654200606048107, 0.02654200606048107, 0.023423241451382637, 0.023423241451382637]
+DEBUG SAMPLER: Top 10 token indices: [15122, 238251, 91707, 100025, 167023, 240983, 104013, 240119, 53759, 240340]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 2.012563900255504e-11, 1: 1.7044534186827498e-12, 2: 1.8479354935152514e-07, 3: 1.66847386601221e-11, 4: 9.823227436556517e-15}
+DEBUG SAMPLER: Final top 5 probs: [0.08312063664197922, 0.08312063664197922, 0.07335370779037476, 0.0571279302239418, 0.0571279302239418]
+DEBUG SAMPLER: Final top 5 indices: [15122, 238251, 91707, 100025, 167023]
+DEBUG SAMPLER: Sampled token: 61978
+DEBUG SAMPLER: Logits after temperature: mean=-1.492188, std=4.687500
+DEBUG SAMPLER: Top 10 logits: [20.0, 20.0, 19.0, 18.5, 18.25, 18.0, 18.0, 17.75, 17.375, 17.125]
+DEBUG SAMPLER: Top 10 indices: [105514, 2042, 139281, 236772, 30132, 8383, 5332, 184562, 12755, 117442]
+DEBUG SAMPLER: Top 10 probs: [0.17777211964130402, 0.17777211964130402, 0.06539871543645859, 0.039666324853897095, 0.030892161652445793, 0.024058841168880463, 0.024058841168880463, 0.01873704418540001, 0.012877769768238068, 0.010029217228293419]
+DEBUG SAMPLER: Top 10 token indices: [2042, 105514, 139281, 236772, 30132, 5332, 8383, 184562, 12755, 117442]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 4.1997226009338195e-12, 1: 1.8530043818798525e-11, 2: 7.657401874894276e-05, 3: 1.7507047244194607e-12, 4: 2.79845341344398e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.2250365912914276, 0.2250365912914276, 0.08278634399175644, 0.05021245405077934, 0.03910549357533455]
+DEBUG SAMPLER: Final top 5 indices: [2042, 105514, 139281, 236772, 30132]
+DEBUG SAMPLER: Sampled token: 139281
+DEBUG SAMPLER: Logits after temperature: mean=-2.671875, std=5.062500
+DEBUG SAMPLER: Top 10 logits: [23.75, 20.5, 19.25, 18.75, 18.625, 18.5, 18.375, 18.25, 17.875, 17.75]
+DEBUG SAMPLER: Top 10 indices: [104508, 118963, 9349, 50906, 223904, 158266, 73818, 211893, 621, 16188]
+DEBUG SAMPLER: Top 10 probs: [0.8730885982513428, 0.03385331854224205, 0.009699138812720776, 0.005882824771106243, 0.005191574338823557, 0.004581548273563385, 0.004043202381581068, 0.00356811354868114, 0.00245232624001801, 0.002164170378819108]
+DEBUG SAMPLER: Top 10 token indices: [104508, 118963, 9349, 50906, 223904, 158266, 73818, 211893, 621, 16188]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 1.8995898333051126e-13, 1: 2.1739654347541215e-12, 2: 1.0433914149343693e-10, 3: 6.773195963512627e-14, 4: 1.771669921879493e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.9183030724525452, 0.03560647368431091, 0.010201426222920418, 0.0061874776147305965, 0.005460429470986128]
+DEBUG SAMPLER: Final top 5 indices: [104508, 118963, 9349, 50906, 223904]
+DEBUG SAMPLER: Sampled token: 104508
+DEBUG SAMPLER: Logits after temperature: mean=-5.250000, std=5.593750
+DEBUG SAMPLER: Top 10 logits: [20.25, 19.0, 18.875, 18.875, 18.5, 17.875, 17.875, 17.75, 17.75, 17.75]
+DEBUG SAMPLER: Top 10 indices: [139518, 7163, 238678, 16814, 171347, 34285, 154754, 239705, 239441, 236810]
+DEBUG SAMPLER: Top 10 probs: [0.2896643877029419, 0.08299023658037186, 0.07323862612247467, 0.07323862612247467, 0.050336118787527084, 0.026942983269691467, 0.026942983269691467, 0.023777099326252937, 0.023777099326252937, 0.023777099326252937]
+DEBUG SAMPLER: Top 10 token indices: [139518, 7163, 16814, 238678, 171347, 34285, 154754, 236810, 239441, 239705]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.4991738703849818e-17, 1: 2.087023262542509e-12, 2: 1.3398112480578206e-11, 3: 8.024499801892235e-18, 4: 1.983095389561807e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.31122493743896484, 0.08916743844747543, 0.07868999242782593, 0.07868999242782593, 0.054082781076431274]
+DEBUG SAMPLER: Final top 5 indices: [139518, 7163, 16814, 238678, 171347]
+DEBUG SAMPLER: Sampled token: 237470
+DEBUG SAMPLER: Logits after temperature: mean=-2.437500, std=5.000000
+DEBUG SAMPLER: Top 10 logits: [21.375, 20.0, 19.75, 19.5, 19.5, 18.625, 18.625, 17.875, 17.75, 17.75]
+DEBUG SAMPLER: Top 10 indices: [61267, 195346, 108233, 56379, 56123, 192021, 242951, 41871, 12591, 236859]
+DEBUG SAMPLER: Top 10 probs: [0.38705509901046753, 0.0978628545999527, 0.07621566206216812, 0.059356823563575745, 0.059356823563575745, 0.02474360354244709, 0.02474360354244709, 0.011688051745295525, 0.010314668528735638, 0.010314668528735638]
+DEBUG SAMPLER: Top 10 token indices: [61267, 195346, 108233, 56123, 56379, 192021, 242951, 41871, 12591, 236859]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.681813716070124e-11, 1: 9.341043563648732e-13, 2: 4.98189475783839e-11, 3: 9.43411928439053e-12, 4: 8.13757736750631e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.4317939281463623, 0.10917460173368454, 0.08502525836229324, 0.06621774286031723, 0.06621774286031723]
+DEBUG SAMPLER: Final top 5 indices: [61267, 195346, 108233, 56123, 56379]
+DEBUG SAMPLER: Sampled token: 61267
+DEBUG SAMPLER: Logits after temperature: mean=-2.609375, std=4.187500
+DEBUG SAMPLER: Top 10 logits: [16.0, 15.75, 14.625, 14.5625, 14.5, 14.5, 14.3125, 14.25, 14.0, 13.9375]
+DEBUG SAMPLER: Top 10 indices: [236772, 21580, 18523, 4163, 113963, 236751, 151040, 13203, 186831, 232483]
+DEBUG SAMPLER: Top 10 probs: [0.11310172080993652, 0.08808370679616928, 0.02859659306704998, 0.02686401456594467, 0.025236405432224274, 0.025236405432224274, 0.02092171460390091, 0.019654130563139915, 0.015306653454899788, 0.014379269443452358]
+DEBUG SAMPLER: Top 10 token indices: [236772, 21580, 18523, 4163, 113963, 236751, 151040, 13203, 186831, 232483]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 9.12911135575456e-11, 1: 5.091809196500208e-10, 2: 1.702977243667192e-07, 3: 5.71285206640848e-11, 4: 1.5265388242369227e-07}
+DEBUG SAMPLER: Final top 5 probs: [0.18909764289855957, 0.1472693830728531, 0.047811370342969894, 0.04491462931036949, 0.04219338670372963]
+DEBUG SAMPLER: Final top 5 indices: [236772, 21580, 18523, 4163, 113963]
+DEBUG SAMPLER: Sampled token: 4163
+DEBUG SAMPLER: Logits after temperature: mean=0.707031, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [21.75, 21.25, 20.875, 20.875, 20.875, 20.75, 20.75, 20.375, 20.25, 19.875]
+DEBUG SAMPLER: Top 10 indices: [206249, 56474, 53533, 190907, 39285, 244811, 216841, 201868, 124108, 28846]
+DEBUG SAMPLER: Top 10 probs: [0.13328665494918823, 0.08084244281053543, 0.05556214228272438, 0.05556214228272438, 0.05556214228272438, 0.04903342202305794, 0.04903342202305794, 0.03370014205574989, 0.02974027208983898, 0.020440170541405678]
+DEBUG SAMPLER: Top 10 token indices: [206249, 56474, 39285, 53533, 190907, 216841, 244811, 201868, 124108, 28846]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.8107128170057338e-14, 1: 4.5698559519857795e-11, 2: 8.353429439011961e-05, 3: 2.5591831645933698e-14, 4: 2.6404202310920458e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.16874158382415771, 0.10234694182872772, 0.07034195214509964, 0.07034195214509964, 0.07034195214509964]
+DEBUG SAMPLER: Final top 5 indices: [206249, 56474, 39285, 53533, 190907]
+DEBUG SAMPLER: Sampled token: 125359
+DEBUG SAMPLER: Logits after temperature: mean=-1.390625, std=5.593750
+DEBUG SAMPLER: Top 10 logits: [28.5, 24.0, 22.75, 22.75, 22.625, 22.625, 22.375, 22.25, 22.125, 21.75]
+DEBUG SAMPLER: Top 10 indices: [159250, 4054, 13790, 153021, 42315, 6195, 2276, 201346, 164679, 66793]
+DEBUG SAMPLER: Top 10 probs: [0.9569268226623535, 0.010630497708916664, 0.003045688383281231, 0.003045688383281231, 0.0026878106873482466, 0.0026878106873482466, 0.0020932690240442753, 0.0018473033560439944, 0.0016302396543323994, 0.001120446017012]
+DEBUG SAMPLER: Top 10 token indices: [159250, 4054, 13790, 153021, 6195, 42315, 2276, 201346, 164679, 66793]
+DEBUG SAMPLER: Probability sum: 0.9999999403953552
+DEBUG SAMPLER: Special token probabilities: {0: 1.2772993205590016e-15, 1: 4.813226640171253e-12, 2: 3.5309511758896406e-07, 3: 1.09253210624704e-15, 4: 2.8620494510597436e-14}
+DEBUG SAMPLER: Final top 5 probs: [1.0, 0.0, 0.0, 0.0, 0.0]
+DEBUG SAMPLER: Final top 5 indices: [159250, 4054, 13790, 153021, 6195]
+DEBUG SAMPLER: Sampled token: 159250
+DEBUG SAMPLER: Logits after temperature: mean=-2.703125, std=5.562500
+DEBUG SAMPLER: Top 10 logits: [19.875, 19.25, 19.25, 19.125, 19.0, 19.0, 18.5, 18.5, 18.375, 18.25]
+DEBUG SAMPLER: Top 10 indices: [1514, 13375, 2345, 236977, 132920, 238902, 104806, 22811, 236905, 93944]
+DEBUG SAMPLER: Top 10 probs: [0.10104428976774216, 0.05408511310815811, 0.05408511310815811, 0.047729942947626114, 0.0421215258538723, 0.0421215258538723, 0.025547998026013374, 0.025547998026013374, 0.022546028718352318, 0.019896799698472023]
+DEBUG SAMPLER: Top 10 token indices: [1514, 2345, 13375, 236977, 132920, 238902, 22811, 104806, 236905, 93944]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 5.984963413475965e-17, 1: 1.6901536836755326e-09, 2: 1.0150161960931214e-10, 3: 4.378692814822518e-17, 4: 1.764096924095071e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.13206899166107178, 0.07069143652915955, 0.07069143652915955, 0.06238497048616409, 0.05505454167723656]
+DEBUG SAMPLER: Final top 5 indices: [1514, 2345, 13375, 236977, 132920]
+DEBUG SAMPLER: Sampled token: 13375
+DEBUG SAMPLER: Logits after temperature: mean=-0.500000, std=5.406250
+DEBUG SAMPLER: Top 10 logits: [24.25, 22.875, 22.5, 21.625, 21.5, 21.375, 20.25, 20.25, 20.0, 20.0]
+DEBUG SAMPLER: Top 10 indices: [238014, 86494, 186967, 241911, 220587, 97959, 62500, 26703, 56873, 110182]
+DEBUG SAMPLER: Top 10 probs: [0.45481836795806885, 0.11499609053134918, 0.07903557270765305, 0.032946933060884476, 0.029075564816594124, 0.025659097358584404, 0.008330289274454117, 0.008330289274454117, 0.006487635429948568, 0.006487635429948568]
+DEBUG SAMPLER: Top 10 token indices: [238014, 86494, 186967, 241911, 220587, 97959, 26703, 62500, 56873, 110182]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 2.5559378002076123e-15, 1: 1.2687012551637622e-10, 2: 5.574284089870929e-12, 3: 1.4563294748400914e-15, 4: 9.295999571241192e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.5088093280792236, 0.12864714860916138, 0.08841779083013535, 0.036858025938272476, 0.03252709284424782]
+DEBUG SAMPLER: Final top 5 indices: [238014, 86494, 186967, 241911, 220587]
+DEBUG SAMPLER: Sampled token: 186967
+DEBUG SAMPLER: Logits after temperature: mean=-0.886719, std=5.093750
+DEBUG SAMPLER: Top 10 logits: [21.75, 21.625, 21.0, 20.875, 20.25, 20.25, 20.125, 20.0, 19.75, 19.5]
+DEBUG SAMPLER: Top 10 indices: [60768, 68459, 243718, 29510, 3621, 68267, 62293, 87670, 9724, 2325]
+DEBUG SAMPLER: Top 10 probs: [0.15115360915660858, 0.1333925873041153, 0.07139991223812103, 0.06301019340753555, 0.03372693061828613, 0.03372693061828613, 0.029763907194137573, 0.02626655623316765, 0.02045641653239727, 0.015931472182273865]
+DEBUG SAMPLER: Top 10 token indices: [60768, 68459, 243718, 29510, 3621, 68267, 62293, 87670, 9724, 2325]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 6.144040896709224e-14, 1: 2.1412552286825814e-10, 2: 8.638440363029076e-08, 3: 8.139531258201382e-14, 4: 1.6037260408552356e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.1810440719127655, 0.15977081656455994, 0.08551916480064392, 0.07547038793563843, 0.04039639234542847]
+DEBUG SAMPLER: Final top 5 indices: [60768, 68459, 243718, 29510, 3621]
+DEBUG SAMPLER: Sampled token: 68459
+DEBUG SAMPLER: Logits after temperature: mean=-1.867188, std=2.937500
+DEBUG SAMPLER: Top 10 logits: [12.5625, 11.5, 11.0625, 10.8125, 10.5625, 10.4375, 10.25, 10.1875, 10.0, 10.0]
+DEBUG SAMPLER: Top 10 indices: [236743, 204, 237079, 236764, 1390, 9969, 39427, 23932, 205, 51676]
+DEBUG SAMPLER: Top 10 probs: [0.09755395352840424, 0.03371374309062958, 0.021767228841781616, 0.016952333971858025, 0.013202491216361523, 0.011651158332824707, 0.009659149684011936, 0.00907393079251051, 0.007522553205490112, 0.007522553205490112]
+DEBUG SAMPLER: Top 10 token indices: [236743, 204, 237079, 236764, 1390, 9969, 39427, 23932, 205, 51676]
+DEBUG SAMPLER: Probability sum: 0.9999998807907104
+DEBUG SAMPLER: Special token probabilities: {0: 2.66379335256417e-10, 1: 2.0077125384432293e-07, 2: 9.688272406549459e-09, 3: 1.7744689051468754e-10, 4: 3.953420346647363e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.2608896493911743, 0.0901610478758812, 0.05821234732866287, 0.04533581808209419, 0.03530757129192352]
+DEBUG SAMPLER: Final top 5 indices: [236743, 204, 237079, 236764, 1390]
+DEBUG SAMPLER: Sampled token: 1018
+DEBUG SAMPLER: Logits after temperature: mean=-3.812500, std=4.843750
+DEBUG SAMPLER: Top 10 logits: [19.625, 18.25, 17.375, 17.375, 17.0, 16.75, 16.625, 16.375, 16.375, 16.0]
+DEBUG SAMPLER: Top 10 indices: [174453, 80750, 17941, 132944, 5173, 73921, 7691, 13688, 67345, 47428]
+DEBUG SAMPLER: Top 10 probs: [0.41304025053977966, 0.10443293303251266, 0.04353412240743637, 0.04353412240743637, 0.029920537024736404, 0.023302137851715088, 0.020564062520861626, 0.0160153079777956, 0.0160153079777956, 0.011007149703800678]
+DEBUG SAMPLER: Top 10 token indices: [174453, 80750, 17941, 132944, 5173, 73921, 7691, 13688, 67345, 47428]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 2.391237164875437e-12, 1: 2.847340567768697e-07, 2: 2.958998324142925e-11, 3: 8.526218468231372e-13, 4: 1.5748195802967047e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.46913233399391174, 0.11861523240804672, 0.04944618418812752, 0.04944618418812752, 0.03398383408784866]
+DEBUG SAMPLER: Final top 5 indices: [174453, 80750, 17941, 132944, 5173]
+DEBUG SAMPLER: Sampled token: 17941
+DEBUG SAMPLER: Logits after temperature: mean=-3.765625, std=4.968750
+DEBUG SAMPLER: Top 10 logits: [18.75, 18.0, 17.875, 17.5, 17.0, 16.75, 16.625, 16.5, 16.5, 16.25]
+DEBUG SAMPLER: Top 10 indices: [236765, 36434, 69619, 177700, 236743, 90995, 181468, 49014, 528, 5302]
+DEBUG SAMPLER: Top 10 probs: [0.21822626888751984, 0.10308279097080231, 0.0909702405333519, 0.06252287328243256, 0.03792203590273857, 0.029533712193369865, 0.026063410565257072, 0.02300087921321392, 0.02300087921321392, 0.017913103103637695]
+DEBUG SAMPLER: Top 10 token indices: [236765, 36434, 69619, 177700, 236743, 90995, 181468, 528, 49014, 5302]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.8151061899482225e-14, 1: 1.7967112242445182e-08, 2: 1.303493988094595e-12, 3: 1.1635417157757413e-14, 4: 3.9385614214459963e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.2588215470314026, 0.12225864082574844, 0.10789287090301514, 0.07415361702442169, 0.04497643560171127]
+DEBUG SAMPLER: Final top 5 indices: [236765, 36434, 69619, 177700, 236743]
+DEBUG SAMPLER: Sampled token: 236765
+DEBUG SAMPLER: Logits after temperature: mean=-2.203125, std=5.062500
+DEBUG SAMPLER: Top 10 logits: [22.625, 20.5, 19.75, 19.5, 19.125, 19.0, 18.75, 18.75, 18.5, 18.5]
+DEBUG SAMPLER: Top 10 indices: [111190, 236922, 92147, 155858, 2443, 23115, 32857, 3459, 126244, 216914]
+DEBUG SAMPLER: Top 10 probs: [0.5878522396087646, 0.07020893692970276, 0.03316435590386391, 0.025828424841165543, 0.017751600593328476, 0.015665732324123383, 0.012200484052300453, 0.012200484052300453, 0.009501746855676174, 0.009501746855676174]
+DEBUG SAMPLER: Top 10 token indices: [111190, 236922, 92147, 155858, 2443, 23115, 3459, 32857, 126244, 216914]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 1.1399580281470922e-12, 1: 2.108710612808845e-13, 2: 1.0649530562956144e-10, 3: 3.8183814291860296e-13, 4: 1.4805470150108628e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.6385171413421631, 0.07625999301671982, 0.036022674292325974, 0.028054485097527504, 0.019281547516584396]
+DEBUG SAMPLER: Final top 5 indices: [111190, 236922, 92147, 155858, 2443]
+DEBUG SAMPLER: Sampled token: 111190
+DEBUG SAMPLER: Logits after temperature: mean=-1.500000, std=4.750000
+DEBUG SAMPLER: Top 10 logits: [20.25, 19.875, 19.5, 19.0, 19.0, 18.625, 18.625, 18.375, 18.375, 18.0]
+DEBUG SAMPLER: Top 10 indices: [86187, 109163, 239512, 53468, 167678, 2220, 47324, 21933, 19258, 87545]
+DEBUG SAMPLER: Top 10 probs: [0.16522280871868134, 0.11355587095022202, 0.07804573327302933, 0.0473371297121048, 0.0473371297121048, 0.03253429755568504, 0.03253429755568504, 0.025337738916277885, 0.025337738916277885, 0.017414355650544167]
+DEBUG SAMPLER: Top 10 token indices: [86187, 109163, 239512, 53468, 167678, 2220, 47324, 19258, 21933, 87545]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.2282136028704538e-12, 1: 2.929555556474561e-11, 2: 2.5923122848325875e-06, 3: 1.0505468023280784e-12, 4: 3.131636061581844e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.19943873584270477, 0.1370721012353897, 0.09420818835496902, 0.057140156626701355, 0.057140156626701355]
+DEBUG SAMPLER: Final top 5 indices: [86187, 109163, 239512, 53468, 167678]
+DEBUG SAMPLER: Sampled token: 86187
+DEBUG SAMPLER: Logits after temperature: mean=-5.875000, std=5.781250
+DEBUG SAMPLER: Top 10 logits: [21.25, 20.75, 19.75, 19.75, 19.625, 18.875, 18.625, 18.375, 18.25, 18.0]
+DEBUG SAMPLER: Top 10 indices: [38202, 241519, 1214, 31371, 20970, 32729, 26741, 240691, 3401, 104918]
+DEBUG SAMPLER: Top 10 probs: [0.316845566034317, 0.19217655062675476, 0.07069780677556992, 0.07069780677556992, 0.062390588223934174, 0.029471227899193764, 0.022952215746045113, 0.017875203862786293, 0.015774810686707497, 0.012285435572266579]
+DEBUG SAMPLER: Top 10 token indices: [38202, 241519, 1214, 31371, 20970, 32729, 26741, 240691, 3401, 104918]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.732284981255768e-16, 1: 3.066849552091355e-10, 2: 1.96912637306923e-08, 3: 5.430443103690791e-16, 4: 2.1842113540060382e-07}
+DEBUG SAMPLER: Final top 5 probs: [0.33349043130874634, 0.2022721767425537, 0.0744117796421051, 0.0744117796421051, 0.06566815823316574]
+DEBUG SAMPLER: Final top 5 indices: [38202, 241519, 1214, 31371, 20970]
+DEBUG SAMPLER: Sampled token: 38202
+DEBUG SAMPLER: Logits after temperature: mean=-2.546875, std=4.500000
+DEBUG SAMPLER: Top 10 logits: [17.125, 16.5, 16.375, 16.0, 15.75, 15.375, 15.1875, 14.9375, 14.75, 14.75]
+DEBUG SAMPLER: Top 10 indices: [67627, 236988, 40285, 142125, 236661, 203968, 89927, 96037, 21400, 56306]
+DEBUG SAMPLER: Top 10 probs: [0.1135372743010521, 0.0607721284031868, 0.05363121256232262, 0.036860156804323196, 0.028706718236207962, 0.019729819148778915, 0.01635659672319889, 0.012738528661429882, 0.010560611262917519, 0.010560611262917519]
+DEBUG SAMPLER: Top 10 token indices: [67627, 236988, 40285, 142125, 236661, 203968, 89927, 96037, 21400, 56306]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 8.439998374666635e-13, 1: 4.8568835585294234e-12, 2: 6.7329724018350134e-09, 3: 8.984331833182535e-13, 4: 2.683828093097418e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.17987285554409027, 0.09627901017665863, 0.08496592193841934, 0.05839616805315018, 0.045478980988264084]
+DEBUG SAMPLER: Final top 5 indices: [67627, 236988, 40285, 142125, 236661]
+DEBUG SAMPLER: Sampled token: 12791
+DEBUG SAMPLER: Logits after temperature: mean=-2.906250, std=4.625000
+DEBUG SAMPLER: Top 10 logits: [19.625, 17.625, 16.25, 16.25, 16.0, 15.875, 15.5625, 15.375, 15.25, 14.9375]
+DEBUG SAMPLER: Top 10 indices: [237279, 238003, 158447, 23644, 36066, 115515, 51750, 239575, 238115, 178370]
+DEBUG SAMPLER: Top 10 probs: [0.5950160026550293, 0.08052666485309601, 0.020360328257083893, 0.020360328257083893, 0.01585664041340351, 0.013993436470627785, 0.010237815789878368, 0.008487447164952755, 0.007490146439522505, 0.005479908082634211]
+DEBUG SAMPLER: Top 10 token indices: [237279, 238003, 23644, 158447, 36066, 115515, 51750, 239575, 238115, 178370]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 2.630106927332867e-14, 1: 2.742271076883185e-09, 2: 1.0700215113956801e-07, 3: 9.675620934069141e-15, 4: 7.949351177316544e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.6765665411949158, 0.09156332910060883, 0.023150833323597908, 0.023150833323597908, 0.018029889091849327]
+DEBUG SAMPLER: Final top 5 indices: [237279, 238003, 23644, 158447, 36066]
+DEBUG SAMPLER: Sampled token: 237279
+DEBUG SAMPLER: Logits after temperature: mean=-1.070312, std=5.500000
+DEBUG SAMPLER: Top 10 logits: [26.125, 23.25, 22.75, 22.75, 21.75, 21.75, 21.75, 21.625, 21.625, 21.125]
+DEBUG SAMPLER: Top 10 indices: [70046, 243466, 6754, 237007, 19706, 4528, 55851, 13652, 40675, 86216]
+DEBUG SAMPLER: Top 10 probs: [0.7610890865325928, 0.042937710881233215, 0.026043035089969635, 0.026043035089969635, 0.009580697864294052, 0.009580697864294052, 0.009580697864294052, 0.008454936556518078, 0.008454936556518078, 0.005128177814185619]
+DEBUG SAMPLER: Top 10 token indices: [70046, 243466, 6754, 237007, 4528, 19706, 55851, 13652, 40675, 86216]
+DEBUG SAMPLER: Probability sum: 0.9999999403953552
+DEBUG SAMPLER: Special token probabilities: {0: 1.5579277152012353e-16, 1: 2.3121697224491762e-14, 2: 2.616090677420857e-11, 3: 8.338987087903873e-17, 4: 2.877541683665025e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.8003981709480286, 0.04515537619590759, 0.02738811820745468, 0.02738811820745468, 0.010075526311993599]
+DEBUG SAMPLER: Final top 5 indices: [70046, 243466, 6754, 237007, 4528]
+DEBUG SAMPLER: Sampled token: 40675
+DEBUG SAMPLER: Logits after temperature: mean=-3.750000, std=4.343750
+DEBUG SAMPLER: Top 10 logits: [15.25, 15.125, 14.25, 13.75, 13.375, 13.375, 13.3125, 13.1875, 13.1875, 13.0]
+DEBUG SAMPLER: Top 10 indices: [244629, 138496, 122371, 30515, 17775, 179075, 96773, 48018, 54316, 13231]
+DEBUG SAMPLER: Top 10 probs: [0.12118473649024963, 0.10694514960050583, 0.044581376016139984, 0.027039969339966774, 0.01858428120613098, 0.01858428120613098, 0.017458317801356316, 0.015406908467411995, 0.015406908467411995, 0.012772776186466217]
+DEBUG SAMPLER: Top 10 token indices: [244629, 138496, 122371, 30515, 17775, 179075, 96773, 48018, 54316, 13231]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 8.379197536561092e-14, 1: 1.1370664410037534e-09, 2: 3.2902109925458944e-09, 3: 8.379197536561092e-14, 4: 1.4292025340978398e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.19276414811611176, 0.17011375725269318, 0.07091397047042847, 0.04301149398088455, 0.029561340808868408]
+DEBUG SAMPLER: Final top 5 indices: [244629, 138496, 122371, 30515, 17775]
+DEBUG SAMPLER: Sampled token: 244629
+DEBUG SAMPLER: Logits after temperature: mean=-1.789062, std=5.406250
+DEBUG SAMPLER: Top 10 logits: [27.875, 25.0, 23.5, 22.75, 22.75, 22.25, 21.375, 20.75, 20.5, 20.25]
+DEBUG SAMPLER: Top 10 indices: [46700, 7636, 12608, 229620, 164510, 8845, 173378, 186373, 764, 87807]
+DEBUG SAMPLER: Top 10 probs: [0.9132077097892761, 0.05151965469121933, 0.011495588347315788, 0.00543013121932745, 0.00543013121932745, 0.0032935412600636482, 0.0013729522470384836, 0.0007348883664235473, 0.0005723315989598632, 0.0004457323520909995]
+DEBUG SAMPLER: Top 10 token indices: [46700, 7636, 12608, 164510, 229620, 8845, 173378, 186373, 764, 87807]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 3.250314514063879e-13, 1: 1.2808948346432203e-10, 2: 2.9425943019051326e-12, 3: 8.28253752475222e-14, 4: 5.103485451081469e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.9465966820716858, 0.0534033328294754, 0.0, 0.0, 0.0]
+DEBUG SAMPLER: Final top 5 indices: [46700, 7636, 12608, 164510, 229620]
+DEBUG SAMPLER: Sampled token: 46700
+DEBUG SAMPLER: Logits after temperature: mean=-2.609375, std=5.062500
+DEBUG SAMPLER: Top 10 logits: [21.75, 20.5, 20.125, 19.75, 19.75, 18.875, 18.625, 17.875, 17.625, 17.625]
+DEBUG SAMPLER: Top 10 indices: [2079, 158730, 241582, 239304, 238604, 23517, 6795, 237048, 117967, 242110]
+DEBUG SAMPLER: Top 10 probs: [0.43144506216049194, 0.12361108511686325, 0.0849565640091896, 0.05838973820209503, 0.05838973820209503, 0.024340465664863586, 0.018956374377012253, 0.008954356424510479, 0.006973660085350275, 0.006973660085350275]
+DEBUG SAMPLER: Top 10 token indices: [2079, 158730, 241582, 238604, 239304, 23517, 6795, 237048, 117967, 242110]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 4.0373002114851494e-14, 1: 1.6779379663489635e-08, 2: 7.542669830731819e-14, 3: 2.3003844448342588e-14, 4: 5.356610881273329e-17}
+DEBUG SAMPLER: Final top 5 probs: [0.46855008602142334, 0.13424184918403625, 0.09226297587156296, 0.06341135501861572, 0.06341135501861572]
+DEBUG SAMPLER: Final top 5 indices: [2079, 158730, 241582, 238604, 239304]
+DEBUG SAMPLER: Sampled token: 158730
+DEBUG SAMPLER: Logits after temperature: mean=-2.203125, std=4.875000
+DEBUG SAMPLER: Top 10 logits: [17.75, 16.625, 16.625, 16.25, 16.0, 16.0, 16.0, 16.0, 16.0, 15.8125]
+DEBUG SAMPLER: Top 10 indices: [238882, 632, 64070, 2577, 17572, 149826, 112916, 227109, 115079, 13293]
+DEBUG SAMPLER: Top 10 probs: [0.1046885997056961, 0.033987414091825485, 0.033987414091825485, 0.023359185084700584, 0.018192149698734283, 0.018192149698734283, 0.018192149698734283, 0.018192149698734283, 0.018192149698734283, 0.01508182380348444]
+DEBUG SAMPLER: Top 10 token indices: [238882, 632, 64070, 2577, 17572, 112916, 115079, 149826, 227109, 13293]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.719315438446483e-14, 1: 1.7888730774462402e-10, 2: 2.7277058389785225e-10, 3: 3.836311320969555e-15, 4: 2.8363653092888796e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.16273541748523712, 0.052832458168268204, 0.052832458168268204, 0.036311183124780655, 0.028279174119234085]
+DEBUG SAMPLER: Final top 5 indices: [238882, 632, 64070, 2577, 17572]
+DEBUG SAMPLER: Sampled token: 112916
+DEBUG SAMPLER: Logits after temperature: mean=-0.632812, std=4.562500
+DEBUG SAMPLER: Top 10 logits: [20.0, 19.625, 18.625, 18.5, 18.25, 18.0, 17.875, 17.625, 17.5, 17.25]
+DEBUG SAMPLER: Top 10 indices: [48689, 117696, 105630, 130366, 92173, 189943, 175083, 91978, 91566, 2172]
+DEBUG SAMPLER: Top 10 probs: [0.1799185574054718, 0.12365610152482986, 0.04549053683876991, 0.040145259350538254, 0.03126515448093414, 0.024349329993128777, 0.021488208323717117, 0.016735032200813293, 0.014768615365028381, 0.011501808650791645]
+DEBUG SAMPLER: Top 10 token indices: [48689, 117696, 105630, 130366, 92173, 189943, 175083, 91978, 91566, 2172]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 5.555272561408309e-11, 1: 7.448516470276445e-09, 2: 3.3102381512967183e-12, 3: 4.940961875754546e-11, 4: 2.2977609398511234e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.2377001941204071, 0.1633688062429428, 0.060100022703409195, 0.053038086742162704, 0.04130609706044197]
+DEBUG SAMPLER: Final top 5 indices: [48689, 117696, 105630, 130366, 92173]
+DEBUG SAMPLER: Sampled token: 175083
+DEBUG SAMPLER: Logits after temperature: mean=0.660156, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [20.5, 20.25, 20.25, 20.25, 20.125, 20.125, 20.0, 19.875, 19.875, 19.875]
+DEBUG SAMPLER: Top 10 indices: [19095, 6592, 6312, 95367, 60203, 91270, 17214, 109548, 72655, 4961]
+DEBUG SAMPLER: Top 10 probs: [0.04814517870545387, 0.037495505064725876, 0.037495505064725876, 0.037495505064725876, 0.033089667558670044, 0.033089667558670044, 0.029201528057456017, 0.02577025815844536, 0.02577025815844536, 0.02577025815844536]
+DEBUG SAMPLER: Top 10 token indices: [19095, 6312, 6592, 95367, 60203, 91270, 17214, 4961, 72655, 109548]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.3297444742543796e-12, 1: 4.243092682765237e-11, 2: 8.731098205316812e-05, 3: 1.5791106486653939e-12, 4: 5.776146921876446e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.07136008888483047, 0.05557529628276825, 0.05557529628276825, 0.05557529628276825, 0.049045030027627945]
+DEBUG SAMPLER: Final top 5 indices: [19095, 6312, 6592, 95367, 60203]
+DEBUG SAMPLER: Sampled token: 133103
+DEBUG SAMPLER: Logits after temperature: mean=-0.917969, std=5.625000
+DEBUG SAMPLER: Top 10 logits: [22.25, 22.0, 21.5, 21.5, 21.25, 21.125, 21.125, 21.0, 20.125, 20.0]
+DEBUG SAMPLER: Top 10 indices: [107784, 157617, 3619, 241081, 71075, 84111, 1608, 180278, 44110, 1334]
+DEBUG SAMPLER: Top 10 probs: [0.13994239270687103, 0.1089872419834137, 0.06610410660505295, 0.06610410660505295, 0.051481932401657104, 0.045432642102241516, 0.045432642102241516, 0.04009416699409485, 0.016713734716176987, 0.014749818481504917]
+DEBUG SAMPLER: Top 10 token indices: [107784, 157617, 3619, 241081, 71075, 1608, 84111, 180278, 44110, 1334]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.578613930996794e-15, 1: 1.5593066837737979e-09, 2: 2.491765238588073e-09, 3: 4.480958874488123e-16, 4: 1.4078752812000939e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.174545556306839, 0.1359362155199051, 0.08244948834180832, 0.08244948834180832, 0.06421172618865967]
+DEBUG SAMPLER: Final top 5 indices: [107784, 157617, 3619, 241081, 71075]
+DEBUG SAMPLER: Sampled token: 180278
+DEBUG SAMPLER: Logits after temperature: mean=-1.179688, std=4.656250
+DEBUG SAMPLER: Top 10 logits: [20.375, 19.5, 19.5, 18.875, 18.625, 18.375, 18.25, 18.0, 17.875, 17.75]
+DEBUG SAMPLER: Top 10 indices: [174039, 200448, 93187, 59679, 228549, 73527, 217505, 21451, 189900, 1074]
+DEBUG SAMPLER: Top 10 probs: [0.20867881178855896, 0.08699027448892593, 0.08699027448892593, 0.04656253755092621, 0.036262936890125275, 0.028241606429219246, 0.024923130869865417, 0.019410153850913048, 0.017129400745034218, 0.015116643160581589]
+DEBUG SAMPLER: Top 10 token indices: [174039, 93187, 200448, 59679, 228549, 73527, 217505, 21451, 189900, 1074]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.881618207939418e-11, 1: 1.1576498787357892e-10, 2: 5.879030595679069e-10, 3: 1.5424191437962698e-11, 4: 4.568978181906935e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.2621839940547943, 0.10929455608129501, 0.10929455608129501, 0.05850116163492203, 0.045560743659734726]
+DEBUG SAMPLER: Final top 5 indices: [174039, 93187, 200448, 59679, 228549]
+DEBUG SAMPLER: Sampled token: 55570
+DEBUG SAMPLER: Logits after temperature: mean=-2.859375, std=4.906250
+DEBUG SAMPLER: Top 10 logits: [19.5, 17.5, 17.25, 16.625, 16.0, 16.0, 15.875, 15.875, 15.6875, 15.6875]
+DEBUG SAMPLER: Top 10 indices: [236761, 79514, 78887, 105401, 38095, 238785, 169534, 240372, 14958, 33224]
+DEBUG SAMPLER: Top 10 probs: [0.458707720041275, 0.06207933649420738, 0.048347435891628265, 0.02587851881980896, 0.013851772993803024, 0.013851772993803024, 0.012224146164953709, 0.012224146164953709, 0.01013417262583971, 0.01013417262583971]
+DEBUG SAMPLER: Top 10 token indices: [236761, 79514, 78887, 105401, 38095, 238785, 169534, 240372, 14958, 33224]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.6643493317409597e-15, 1: 1.587617259879437e-09, 2: 1.5567436228991482e-09, 3: 9.483177589551806e-16, 4: 1.0944576495086622e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.5405662059783936, 0.07315767556428909, 0.05697525292634964, 0.030496656894683838, 0.01632368378341198]
+DEBUG SAMPLER: Final top 5 indices: [236761, 79514, 78887, 105401, 38095]
+DEBUG SAMPLER: Sampled token: 236761
+DEBUG SAMPLER: Logits after temperature: mean=-2.296875, std=4.531250
+DEBUG SAMPLER: Top 10 logits: [18.375, 17.875, 16.5, 16.5, 16.5, 16.25, 16.125, 15.875, 15.75, 15.5]
+DEBUG SAMPLER: Top 10 indices: [15319, 52678, 25648, 142656, 17165, 236961, 76002, 21203, 28064, 17555]
+DEBUG SAMPLER: Top 10 probs: [0.23737095296382904, 0.14397276937961578, 0.03640201687812805, 0.03640201687812805, 0.03640201687812805, 0.028349919244647026, 0.025018714368343353, 0.019484594464302063, 0.017195094376802444, 0.013391553424298763]
+DEBUG SAMPLER: Top 10 token indices: [15319, 52678, 17165, 25648, 142656, 236961, 76002, 21203, 28064, 17555]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 2.2212278606606288e-14, 1: 9.924928434656977e-08, 2: 3.066310497613217e-13, 3: 1.1889376270069092e-14, 4: 4.14355841305003e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.30499598383903503, 0.18498942255973816, 0.04677265137434006, 0.04677265137434006, 0.04677265137434006]
+DEBUG SAMPLER: Final top 5 indices: [15319, 52678, 17165, 25648, 142656]
+DEBUG SAMPLER: Sampled token: 15319
+DEBUG SAMPLER: Logits after temperature: mean=-1.140625, std=4.687500
+DEBUG SAMPLER: Top 10 logits: [22.75, 22.25, 20.75, 19.875, 18.75, 17.75, 17.625, 17.625, 17.375, 17.125]
+DEBUG SAMPLER: Top 10 indices: [32291, 80145, 65410, 237336, 213266, 41362, 140037, 230138, 185931, 138198]
+DEBUG SAMPLER: Top 10 probs: [0.4932226836681366, 0.299154669046402, 0.0667504295706749, 0.027825720608234406, 0.009033688344061375, 0.003323308192193508, 0.0029328090604394674, 0.0029328090604394674, 0.0022840742021799088, 0.001778838806785643]
+DEBUG SAMPLER: Top 10 token indices: [32291, 80145, 65410, 237336, 213266, 41362, 140037, 230138, 185931, 138198]
+DEBUG SAMPLER: Probability sum: 1.0000005960464478
+DEBUG SAMPLER: Special token probabilities: {0: 1.6620664805393204e-13, 1: 2.1952612883069378e-07, 2: 7.126970302806512e-08, 3: 1.6620664805393204e-13, 4: 2.4190144679026027e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.5195667147636414, 0.31513315439224243, 0.07031571120023727, 0.029311949387192726, 0.009516196325421333]
+DEBUG SAMPLER: Final top 5 indices: [32291, 80145, 65410, 237336, 213266]
+DEBUG SAMPLER: Sampled token: 80145
+DEBUG SAMPLER: Logits after temperature: mean=-2.218750, std=5.187500
+DEBUG SAMPLER: Top 10 logits: [20.125, 19.875, 19.625, 19.5, 19.125, 19.125, 18.375, 18.375, 18.375, 18.25]
+DEBUG SAMPLER: Top 10 indices: [70919, 236791, 187108, 224347, 49783, 227042, 97027, 129995, 169630, 125083]
+DEBUG SAMPLER: Top 10 probs: [0.13240766525268555, 0.10311919450759888, 0.08030930906534195, 0.0708727166056633, 0.048710063099861145, 0.048710063099861145, 0.023009000346064568, 0.023009000346064568, 0.023009000346064568, 0.020305372774600983]
+DEBUG SAMPLER: Top 10 token indices: [70919, 236791, 187108, 224347, 49783, 227042, 97027, 129995, 169630, 125083]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 6.29226759672058e-14, 1: 2.261419801419251e-10, 2: 2.101310059288153e-08, 3: 2.1745495690033388e-14, 4: 7.863850196021538e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.16079948842525482, 0.12523077428340912, 0.0975298210978508, 0.08606977015733719, 0.05915483459830284]
+DEBUG SAMPLER: Final top 5 indices: [70919, 236791, 187108, 224347, 49783]
+DEBUG SAMPLER: Sampled token: 35506
+DEBUG SAMPLER: Logits after temperature: mean=1.296875, std=4.937500
+DEBUG SAMPLER: Top 10 logits: [22.875, 22.625, 21.75, 21.25, 21.0, 20.75, 20.5, 20.5, 20.5, 20.375]
+DEBUG SAMPLER: Top 10 indices: [15133, 247451, 187474, 235672, 54540, 66945, 38585, 34107, 89743, 168910]
+DEBUG SAMPLER: Top 10 probs: [0.18446694314479828, 0.14366300404071808, 0.05988765135407448, 0.03632369264960289, 0.02828892320394516, 0.02203143574297428, 0.01715809851884842, 0.01715809851884842, 0.01715809851884842, 0.015141969546675682]
+DEBUG SAMPLER: Top 10 token indices: [15133, 247451, 187474, 235672, 54540, 66945, 34107, 38585, 89743, 168910]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 6.683028154312598e-13, 1: 2.1140906733552178e-11, 2: 6.268681129739662e-10, 3: 3.8078746969830157e-13, 4: 4.489452809508521e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.23949822783470154, 0.18652141094207764, 0.0777536928653717, 0.04715999215841293, 0.03672824427485466]
+DEBUG SAMPLER: Final top 5 indices: [15133, 247451, 187474, 235672, 54540]
+DEBUG SAMPLER: Sampled token: 38585
+DEBUG SAMPLER: Logits after temperature: mean=-3.187500, std=4.406250
+DEBUG SAMPLER: Top 10 logits: [17.75, 16.125, 15.75, 15.75, 15.25, 15.0, 14.4375, 13.875, 13.75, 13.75]
+DEBUG SAMPLER: Top 10 indices: [9902, 17214, 25558, 29737, 236774, 50580, 156033, 174046, 15277, 239898]
+DEBUG SAMPLER: Top 10 probs: [0.37153080105781555, 0.07315874844789505, 0.05028122290968895, 0.05028122290968895, 0.030497103929519653, 0.023751167580485344, 0.01353300828486681, 0.007710875477641821, 0.006804823875427246, 0.006804823875427246]
+DEBUG SAMPLER: Top 10 token indices: [9902, 17214, 25558, 29737, 236774, 50580, 156033, 174046, 15277, 239898]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 3.737745518910679e-13, 1: 1.0883957068941186e-09, 2: 1.1365212770897415e-07, 3: 1.5581241537884066e-13, 4: 1.0923294387066296e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.47459876537323, 0.0934540331363678, 0.06422995030879974, 0.06422995030879974, 0.03895743563771248]
+DEBUG SAMPLER: Final top 5 indices: [9902, 17214, 25558, 29737, 236774]
+DEBUG SAMPLER: Sampled token: 25558
+DEBUG SAMPLER: Logits after temperature: mean=-1.835938, std=4.343750
+DEBUG SAMPLER: Top 10 logits: [20.375, 19.25, 18.5, 18.25, 17.25, 16.875, 16.875, 16.625, 16.5, 16.375]
+DEBUG SAMPLER: Top 10 indices: [199604, 86598, 102680, 5691, 55948, 145266, 114386, 122687, 125789, 48339]
+DEBUG SAMPLER: Top 10 probs: [0.45876097679138184, 0.1489378809928894, 0.07035327702760696, 0.05479118600487709, 0.020156551152467728, 0.013853381387889385, 0.013853381387889385, 0.010789024643599987, 0.00952128041535616, 0.008402501232922077]
+DEBUG SAMPLER: Top 10 token indices: [199604, 86598, 102680, 5691, 55948, 114386, 145266, 122687, 125789, 48339]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 8.262358158761529e-11, 1: 5.547913239922764e-10, 2: 6.425052845315804e-08, 3: 5.5905915313791965e-11, 4: 7.375253836469642e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.5056511163711548, 0.16416089236736298, 0.07754411548376083, 0.060391418635845184, 0.022216761484742165]
+DEBUG SAMPLER: Final top 5 indices: [199604, 86598, 102680, 5691, 55948]
+DEBUG SAMPLER: Sampled token: 199604
+DEBUG SAMPLER: Logits after temperature: mean=-0.742188, std=5.031250
+DEBUG SAMPLER: Top 10 logits: [23.875, 22.25, 22.125, 21.625, 21.375, 21.25, 20.5, 20.375, 19.875, 19.875]
+DEBUG SAMPLER: Top 10 indices: [53173, 117692, 499, 15826, 70556, 1371, 212537, 7189, 2202, 13502]
+DEBUG SAMPLER: Top 10 probs: [0.47690123319625854, 0.0939074158668518, 0.08287300169467926, 0.05026501789689064, 0.039146438241004944, 0.034546609967947006, 0.016318662092089653, 0.014401169493794441, 0.008734751492738724, 0.008734751492738724]
+DEBUG SAMPLER: Top 10 token indices: [53173, 117692, 499, 15826, 70556, 1371, 212537, 7189, 2202, 13502]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 1.1509356835637252e-12, 1: 1.5376187434412714e-08, 2: 1.148861387967326e-11, 3: 7.787620917056037e-13, 4: 4.335757794460271e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.5156431794166565, 0.10153615474700928, 0.08960533887147903, 0.05434838682413101, 0.04232656955718994]
+DEBUG SAMPLER: Final top 5 indices: [53173, 117692, 499, 15826, 70556]
+DEBUG SAMPLER: Sampled token: 53173
+DEBUG SAMPLER: Logits after temperature: mean=-0.707031, std=4.625000
+DEBUG SAMPLER: Top 10 logits: [18.5, 18.0, 17.875, 17.625, 17.5, 17.375, 17.25, 17.125, 17.0, 17.0]
+DEBUG SAMPLER: Top 10 indices: [85816, 237432, 184672, 148367, 142505, 177658, 183662, 164232, 5476, 192936]
+DEBUG SAMPLER: Top 10 probs: [0.07054915279150009, 0.04279022291302681, 0.037762243300676346, 0.029409261420369148, 0.025953585281968117, 0.022903956472873688, 0.020212670788168907, 0.01783761940896511, 0.01574164442718029, 0.01574164442718029]
+DEBUG SAMPLER: Top 10 token indices: [85816, 237432, 184672, 148367, 142505, 177658, 183662, 164232, 5476, 192936]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.9649860405479558e-08, 1: 1.3525482817078327e-11, 2: 8.996361877677828e-09, 3: 1.2105927815753148e-08, 4: 6.061701141035769e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.12239737808704376, 0.07423775643110275, 0.06551460176706314, 0.05102281644940376, 0.0450274832546711]
+DEBUG SAMPLER: Final top 5 indices: [85816, 237432, 184672, 148367, 142505]
+DEBUG SAMPLER: Sampled token: 9807
+DEBUG SAMPLER: Logits after temperature: mean=-0.671875, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [20.25, 19.25, 19.125, 18.875, 18.875, 18.875, 18.75, 18.5, 18.5, 18.375]
+DEBUG SAMPLER: Top 10 indices: [146182, 78785, 17397, 162689, 147903, 10453, 187733, 238649, 9433, 119859]
+DEBUG SAMPLER: Top 10 probs: [0.1182548850774765, 0.043503545224666595, 0.03839173913002014, 0.029899517074227333, 0.029899517074227333, 0.029899517074227333, 0.026386233046650887, 0.02054961584508419, 0.02054961584508419, 0.01813497394323349]
+DEBUG SAMPLER: Top 10 token indices: [146182, 78785, 17397, 10453, 147903, 162689, 187733, 9433, 238649, 119859]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 4.064774124928894e-12, 1: 1.708759889140765e-08, 2: 1.7456079914879297e-09, 3: 1.9810127930425248e-12, 4: 4.2114753351363277e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.16629314422607422, 0.06117583438754082, 0.05398747697472572, 0.04204548895359039, 0.04204548895359039]
+DEBUG SAMPLER: Final top 5 indices: [146182, 78785, 17397, 10453, 147903]
+DEBUG SAMPLER: Sampled token: 97166
+DEBUG SAMPLER: Logits after temperature: mean=1.046875, std=5.000000
+DEBUG SAMPLER: Top 10 logits: [23.875, 22.375, 22.0, 21.125, 20.5, 20.25, 20.25, 20.125, 20.125, 20.125]
+DEBUG SAMPLER: Top 10 indices: [116545, 160960, 50760, 97664, 78172, 241273, 184825, 211801, 162214, 56317]
+DEBUG SAMPLER: Top 10 probs: [0.4572885036468506, 0.10203485935926437, 0.0701274648308754, 0.029233474284410477, 0.01564755104482174, 0.012186325155198574, 0.012186325155198574, 0.010754394344985485, 0.010754394344985485, 0.010754394344985485]
+DEBUG SAMPLER: Top 10 token indices: [116545, 160960, 50760, 97664, 78172, 184825, 241273, 56317, 162214, 211801]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 1.9120096794722485e-07, 1: 4.841599690608156e-11, 2: 5.197381369725917e-07, 3: 6.607728408880575e-08, 4: 1.5211854886842957e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.5286507606506348, 0.11795792728662491, 0.08107122033834457, 0.03379550948739052, 0.018089432269334793]
+DEBUG SAMPLER: Final top 5 indices: [116545, 160960, 50760, 97664, 78172]
+DEBUG SAMPLER: Sampled token: 116545
+DEBUG SAMPLER: Logits after temperature: mean=-1.523438, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [20.5, 19.25, 19.0, 18.5, 17.875, 17.875, 17.375, 17.375, 17.375, 17.25]
+DEBUG SAMPLER: Top 10 indices: [133097, 244225, 238178, 122410, 15025, 230309, 96893, 69254, 153615, 241721]
+DEBUG SAMPLER: Top 10 probs: [0.2943663001060486, 0.08433735370635986, 0.06568200141191483, 0.039838146418333054, 0.021323824301362038, 0.021323824301362038, 0.012933552265167236, 0.012933552265167236, 0.012933552265167236, 0.011413819156587124]
+DEBUG SAMPLER: Top 10 token indices: [133097, 244225, 238178, 122410, 15025, 230309, 69254, 96893, 153615, 241721]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.49977760713449e-10, 1: 1.9929966010856504e-10, 2: 0.0003041680029127747, 3: 1.2041008468077763e-10, 4: 2.47585418833296e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.3725714087486267, 0.10674349218606949, 0.08313191682100296, 0.050422053784132004, 0.026988983154296875]
+DEBUG SAMPLER: Final top 5 indices: [133097, 244225, 238178, 122410, 15025]
+DEBUG SAMPLER: Sampled token: 133097
+DEBUG SAMPLER: Logits after temperature: mean=-1.492188, std=5.718750
+DEBUG SAMPLER: Top 10 logits: [24.125, 24.125, 23.75, 23.25, 22.875, 22.75, 22.375, 22.375, 22.25, 22.0]
+DEBUG SAMPLER: Top 10 indices: [113222, 27560, 82433, 160483, 89040, 2768, 131524, 238070, 139854, 5688]
+DEBUG SAMPLER: Top 10 probs: [0.17560380697250366, 0.17560380697250366, 0.12069062143564224, 0.07320255786180496, 0.05031133443117142, 0.04439959675073624, 0.030515363439917564, 0.030515363439917564, 0.026929717510938644, 0.020972885191440582]
+DEBUG SAMPLER: Top 10 token indices: [27560, 113222, 82433, 160483, 89040, 2768, 131524, 238070, 139854, 5688]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.7092352206060585e-14, 1: 7.209007154250491e-13, 2: 3.167417025819359e-14, 3: 9.966719052986132e-15, 4: 1.1293772347713022e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.1905200332403183, 0.1905200332403183, 0.13094238936901093, 0.07942056655883789, 0.05458490550518036]
+DEBUG SAMPLER: Final top 5 indices: [27560, 113222, 82433, 160483, 89040]
+DEBUG SAMPLER: Sampled token: 2768
+DEBUG SAMPLER: Logits after temperature: mean=-1.507812, std=4.031250
+DEBUG SAMPLER: Top 10 logits: [17.25, 16.375, 15.6875, 15.5625, 15.5, 15.5, 14.5625, 14.4375, 14.375, 14.1875]
+DEBUG SAMPLER: Top 10 indices: [71429, 236764, 1109, 236743, 1511, 236909, 233454, 75224, 15326, 27954]
+DEBUG SAMPLER: Top 10 probs: [0.19535569846630096, 0.08143636584281921, 0.0409487783908844, 0.0361371710896492, 0.03394772857427597, 0.03394772857427597, 0.01329412218183279, 0.01173202134668827, 0.011021214537322521, 0.009136907756328583]
+DEBUG SAMPLER: Top 10 token indices: [71429, 236764, 1109, 236743, 1511, 236909, 233454, 75224, 15326, 27954]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 3.0743326721177633e-12, 1: 3.6094038868839107e-10, 2: 8.508909132842746e-09, 3: 1.203925956323737e-12, 4: 1.2723587516916268e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.2974938452243805, 0.12401387840509415, 0.06235809624195099, 0.05503082647919655, 0.05169667676091194]
+DEBUG SAMPLER: Final top 5 indices: [71429, 236764, 1109, 236743, 1511]
+DEBUG SAMPLER: Sampled token: 1212
+DEBUG SAMPLER: Logits after temperature: mean=-3.234375, std=4.687500
+DEBUG SAMPLER: Top 10 logits: [17.75, 17.625, 17.625, 17.375, 16.625, 16.375, 16.125, 15.8125, 15.75, 15.6875]
+DEBUG SAMPLER: Top 10 indices: [152486, 237077, 4214, 14278, 66450, 223979, 206051, 227173, 6671, 15845]
+DEBUG SAMPLER: Top 10 probs: [0.1255374550819397, 0.11078641563653946, 0.11078641563653946, 0.08628054708242416, 0.040756043046712875, 0.03174084052443504, 0.024719789624214172, 0.018085386604070663, 0.01698964647948742, 0.015960294753313065]
+DEBUG SAMPLER: Top 10 token indices: [152486, 4214, 237077, 14278, 66450, 223979, 206051, 227173, 6671, 15845]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 3.4672783307682087e-12, 1: 1.5211244763779774e-10, 2: 1.3825035560799392e-09, 3: 1.316030617815045e-12, 4: 6.24454621345194e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.15915203094482422, 0.14045117795467377, 0.14045117795467377, 0.1093834862112999, 0.05166909843683243]
+DEBUG SAMPLER: Final top 5 indices: [152486, 4214, 237077, 14278, 66450]
+DEBUG SAMPLER: Sampled token: 152486
+DEBUG SAMPLER: Logits after temperature: mean=-0.388672, std=4.093750
+DEBUG SAMPLER: Top 10 logits: [18.25, 17.125, 17.0, 17.0, 16.75, 16.5, 16.375, 16.125, 16.125, 16.0]
+DEBUG SAMPLER: Top 10 indices: [154866, 204721, 27422, 40175, 4633, 48228, 149034, 14649, 103719, 150972]
+DEBUG SAMPLER: Top 10 probs: [0.13437305390834808, 0.04362454637885094, 0.03849852830171585, 0.03849852830171585, 0.029982682317495346, 0.023350534960627556, 0.02060677669942379, 0.016048572957515717, 0.016048572957515717, 0.014162816107273102]
+DEBUG SAMPLER: Top 10 token indices: [154866, 204721, 27422, 40175, 4633, 48228, 149034, 14649, 103719, 150972]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 3.95067225461565e-12, 1: 6.992201662114894e-08, 2: 3.7001570944994455e-06, 3: 4.076080185183573e-12, 4: 1.826772413893174e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.20704831182956696, 0.06721875071525574, 0.05932033807039261, 0.05932033807039261, 0.04619872570037842]
+DEBUG SAMPLER: Final top 5 indices: [154866, 204721, 27422, 40175, 4633]
+DEBUG SAMPLER: Sampled token: 48228
+DEBUG SAMPLER: Logits after temperature: mean=-1.578125, std=5.062500
+DEBUG SAMPLER: Top 10 logits: [21.75, 21.0, 20.0, 20.0, 19.75, 19.625, 19.25, 19.0, 19.0, 19.0]
+DEBUG SAMPLER: Top 10 indices: [170382, 236963, 38901, 47563, 39468, 153837, 28085, 245252, 236873, 8167]
+DEBUG SAMPLER: Top 10 probs: [0.2543674409389496, 0.12015467137098312, 0.04420242831110954, 0.04420242831110954, 0.03442488610744476, 0.03037985786795616, 0.020879751071333885, 0.016261165961623192, 0.016261165961623192, 0.016261165961623192]
+DEBUG SAMPLER: Top 10 token indices: [170382, 236963, 38901, 47563, 39468, 153837, 28085, 8167, 236873, 245252]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 1.4303198382636939e-11, 1: 1.1226707931355495e-11, 2: 1.4476122522921742e-09, 3: 7.478600204391395e-12, 4: 4.633816117274869e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.2965903878211975, 0.14009937644004822, 0.05153967812657356, 0.05153967812657356, 0.04013914242386818]
+DEBUG SAMPLER: Final top 5 indices: [170382, 236963, 38901, 47563, 39468]
+DEBUG SAMPLER: Sampled token: 47563
+DEBUG SAMPLER: Logits after temperature: mean=-3.265625, std=5.437500
+DEBUG SAMPLER: Top 10 logits: [20.5, 20.25, 20.125, 19.875, 19.625, 18.75, 18.625, 18.625, 18.625, 18.5]
+DEBUG SAMPLER: Top 10 indices: [244623, 227690, 150067, 67219, 15133, 138391, 82823, 520, 140487, 238972]
+DEBUG SAMPLER: Top 10 probs: [0.15252584218978882, 0.1187872439622879, 0.10482937842607498, 0.08164119720458984, 0.06358222663402557, 0.026505013927817345, 0.023390594869852066, 0.023390594869852066, 0.023390594869852066, 0.020642127841711044]
+DEBUG SAMPLER: Top 10 token indices: [244623, 227690, 150067, 67219, 15133, 138391, 520, 82823, 140487, 238972]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.0973714843879054e-13, 1: 2.802031051629683e-09, 2: 5.175440378479834e-07, 3: 9.307030650719875e-14, 4: 9.307030650719875e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.17605654895305634, 0.13711297512054443, 0.12100178003311157, 0.09423627704381943, 0.07339128106832504]
+DEBUG SAMPLER: Final top 5 indices: [244623, 227690, 150067, 67219, 15133]
+DEBUG SAMPLER: Sampled token: 15133
+DEBUG SAMPLER: Logits after temperature: mean=-1.031250, std=4.750000
+DEBUG SAMPLER: Top 10 logits: [21.0, 20.25, 20.125, 20.125, 19.0, 18.875, 18.875, 18.875, 18.375, 18.25]
+DEBUG SAMPLER: Top 10 indices: [168127, 238543, 106099, 226263, 208484, 39794, 175418, 3712, 6418, 32012]
+DEBUG SAMPLER: Top 10 probs: [0.22311751544475555, 0.10539325326681137, 0.09300921112298965, 0.09300921112298965, 0.030195672065019608, 0.02664758823812008, 0.02664758823812008, 0.02664758823812008, 0.016162579879164696, 0.014263425022363663]
+DEBUG SAMPLER: Top 10 token indices: [168127, 238543, 106099, 226263, 208484, 3712, 39794, 175418, 6418, 32012]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.0379156301781878e-12, 1: 4.0645359799217073e-13, 2: 2.1690490825676534e-07, 3: 3.7008018719843216e-13, 4: 4.4066911897289174e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.26131802797317505, 0.12343790382146835, 0.10893356055021286, 0.10893356055021286, 0.035365551710128784]
+DEBUG SAMPLER: Final top 5 indices: [168127, 238543, 106099, 226263, 208484]
+DEBUG SAMPLER: Sampled token: 238543
+DEBUG SAMPLER: Logits after temperature: mean=-2.265625, std=4.812500
+DEBUG SAMPLER: Top 10 logits: [20.75, 17.75, 17.25, 17.125, 16.75, 16.625, 16.5, 16.5, 16.375, 16.125]
+DEBUG SAMPLER: Top 10 indices: [236789, 753, 236858, 82115, 32263, 19423, 94023, 46186, 224715, 9190]
+DEBUG SAMPLER: Top 10 probs: [0.6273989081382751, 0.031236350536346436, 0.018945805728435516, 0.01671961322426796, 0.01149121206253767, 0.010140958242118359, 0.00894936453551054, 0.00894936453551054, 0.007897786796092987, 0.006150802597403526]
+DEBUG SAMPLER: Top 10 token indices: [236789, 753, 236858, 82115, 32263, 19423, 46186, 94023, 224715, 9190]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 6.652671984260991e-14, 1: 4.990468038812423e-10, 2: 1.5000982678259334e-09, 3: 4.29528781249397e-14, 4: 2.419590786409409e-12}
+DEBUG SAMPLER: Final top 5 probs: [0.7288997769355774, 0.03628978133201599, 0.022010866552591324, 0.019424520432949066, 0.01335026603192091]
+DEBUG SAMPLER: Final top 5 indices: [236789, 753, 236858, 82115, 32263]
+DEBUG SAMPLER: Sampled token: 236789
+DEBUG SAMPLER: Logits after temperature: mean=-2.265625, std=4.125000
+DEBUG SAMPLER: Top 10 logits: [17.0, 16.375, 16.125, 15.8125, 15.8125, 15.0, 14.9375, 14.9375, 14.5625, 14.5625]
+DEBUG SAMPLER: Top 10 indices: [237278, 135241, 952, 241597, 239462, 20262, 116026, 19970, 41989, 206639]
+DEBUG SAMPLER: Top 10 probs: [0.182585671544075, 0.09773106873035431, 0.0761130303144455, 0.05568547919392586, 0.05568547919392586, 0.024710282683372498, 0.023213161155581474, 0.023213161155581474, 0.01595415733754635, 0.01595415733754635]
+DEBUG SAMPLER: Top 10 token indices: [237278, 135241, 952, 239462, 241597, 20262, 19970, 116026, 41989, 206639]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.9331489534146762e-11, 1: 2.6177952250350245e-08, 2: 2.123148878929726e-11, 3: 1.4592172956073846e-11, 4: 2.7261769230957356e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.24995246529579163, 0.13378991186618805, 0.10419569164514542, 0.07623118907213211, 0.07623118907213211]
+DEBUG SAMPLER: Final top 5 indices: [237278, 135241, 952, 239462, 241597]
+DEBUG SAMPLER: Sampled token: 46311
+DEBUG SAMPLER: Logits after temperature: mean=-2.062500, std=4.562500
+DEBUG SAMPLER: Top 10 logits: [18.0, 17.875, 17.75, 17.25, 17.125, 16.5, 16.5, 16.375, 16.375, 16.125]
+DEBUG SAMPLER: Top 10 indices: [44390, 24467, 1811, 4878, 45666, 1617, 189289, 204781, 101275, 99191]
+DEBUG SAMPLER: Top 10 probs: [0.10900622606277466, 0.09619765728712082, 0.08489413559436798, 0.051490895450115204, 0.04544055461883545, 0.024322576820850372, 0.024322576820850372, 0.021464597433805466, 0.021464597433805466, 0.016716646030545235]
+DEBUG SAMPLER: Top 10 token indices: [44390, 24467, 1811, 4878, 45666, 1617, 189289, 101275, 204781, 99191]
+DEBUG SAMPLER: Probability sum: 1.0000004768371582
+DEBUG SAMPLER: Special token probabilities: {0: 8.443702334548497e-12, 1: 2.1743839795362874e-07, 2: 7.080475122227606e-14, 3: 3.988522619818857e-12, 4: 1.3921311152464977e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.15135206282138824, 0.1335677206516266, 0.11787310242652893, 0.07149364799261093, 0.0630929246544838]
+DEBUG SAMPLER: Final top 5 indices: [44390, 24467, 1811, 4878, 45666]
+DEBUG SAMPLER: Sampled token: 189289
+DEBUG SAMPLER: Logits after temperature: mean=-1.679688, std=4.718750
+DEBUG SAMPLER: Top 10 logits: [20.25, 20.0, 18.75, 18.0, 17.75, 17.75, 17.625, 17.625, 17.5, 17.375]
+DEBUG SAMPLER: Top 10 indices: [195447, 165050, 14706, 243165, 57551, 190833, 237176, 237863, 88718, 78713]
+DEBUG SAMPLER: Top 10 probs: [0.24273423850536346, 0.1890416145324707, 0.05416133254766464, 0.02558399923145771, 0.019924839958548546, 0.019924839958548546, 0.017583610489964485, 0.017583610489964485, 0.015517480671405792, 0.013694129884243011]
+DEBUG SAMPLER: Top 10 token indices: [195447, 165050, 14706, 243165, 57551, 190833, 237176, 237863, 88718, 78713]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.482033717969955e-09, 1: 5.734399500384457e-12, 2: 3.941191123457699e-12, 3: 4.68625249716581e-10, 4: 6.877621389067556e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.28872254490852356, 0.22485733032226562, 0.06442271173000336, 0.030431129038333893, 0.023699788376688957]
+DEBUG SAMPLER: Final top 5 indices: [195447, 165050, 14706, 243165, 57551]
+DEBUG SAMPLER: Sampled token: 237216
+DEBUG SAMPLER: Logits after temperature: mean=-3.265625, std=4.468750
+DEBUG SAMPLER: Top 10 logits: [19.0, 18.25, 16.375, 16.0, 16.0, 15.5, 15.1875, 15.0625, 15.0, 15.0]
+DEBUG SAMPLER: Top 10 indices: [149701, 8589, 36871, 253334, 97176, 237581, 83540, 102309, 22776, 50751]
+DEBUG SAMPLER: Top 10 probs: [0.4476068913936615, 0.2114345282316208, 0.03242453560233116, 0.022285034880042076, 0.022285034880042076, 0.013516557402908802, 0.009888923726975918, 0.008726946078240871, 0.008198206312954426, 0.008198206312954426]
+DEBUG SAMPLER: Top 10 token indices: [149701, 8589, 36871, 97176, 253334, 237581, 83540, 102309, 22776, 50751]
+DEBUG SAMPLER: Probability sum: 1.0000001192092896
+DEBUG SAMPLER: Special token probabilities: {0: 4.3149948891763046e-11, 1: 9.688972291144182e-09, 2: 7.3136203759816e-09, 3: 3.4671956278264915e-11, 4: 3.157860195557305e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.5041137337684631, 0.2381264716386795, 0.036517877131700516, 0.025098346173763275, 0.025098346173763275]
+DEBUG SAMPLER: Final top 5 indices: [149701, 8589, 36871, 97176, 253334]
+DEBUG SAMPLER: Sampled token: 149701
+DEBUG SAMPLER: Logits after temperature: mean=-3.578125, std=5.156250
+DEBUG SAMPLER: Top 10 logits: [21.5, 18.75, 18.375, 18.375, 18.375, 18.25, 17.75, 17.625, 17.5, 17.25]
+DEBUG SAMPLER: Top 10 indices: [174038, 39199, 85457, 239281, 201342, 103243, 3086, 86733, 2919, 3002]
+DEBUG SAMPLER: Top 10 probs: [0.6254175305366516, 0.03998160362243652, 0.027478929609060287, 0.027478929609060287, 0.027478929609060287, 0.02425006963312626, 0.014708410948514938, 0.012980126775801182, 0.011454922147095203, 0.008921101689338684]
+DEBUG SAMPLER: Top 10 token indices: [174038, 39199, 85457, 201342, 239281, 103243, 3086, 86733, 2919, 3002]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 6.1684069005798255e-15, 1: 3.435286430319984e-11, 2: 1.6944659009254792e-09, 3: 3.982623133597053e-15, 4: 8.335474780025998e-13}
+DEBUG SAMPLER: Final top 5 probs: [0.6705198884010315, 0.04286490008234978, 0.029460588470101357, 0.029460588470101357, 0.029460588470101357]
+DEBUG SAMPLER: Final top 5 indices: [174038, 39199, 85457, 201342, 239281]
+DEBUG SAMPLER: Sampled token: 88061
+DEBUG SAMPLER: Logits after temperature: mean=-3.265625, std=5.000000
+DEBUG SAMPLER: Top 10 logits: [19.5, 18.25, 18.25, 17.75, 17.75, 16.75, 16.5, 16.25, 16.125, 16.125]
+DEBUG SAMPLER: Top 10 indices: [119185, 240372, 6119, 136260, 136141, 123443, 57605, 46100, 57733, 223167]
+DEBUG SAMPLER: Top 10 probs: [0.32090428471565247, 0.09194061905145645, 0.09194061905145645, 0.05576479807496071, 0.05576479807496071, 0.020514722913503647, 0.015976883471012115, 0.012442809529602528, 0.010980740189552307, 0.010980740189552307]
+DEBUG SAMPLER: Top 10 token indices: [119185, 6119, 240372, 136141, 136260, 123443, 57605, 46100, 57733, 223167]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 4.1044797497846036e-14, 1: 1.2499125866261007e-11, 2: 0.00013822712935507298, 3: 3.855801379679287e-14, 4: 5.270255599662023e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.37186235189437866, 0.10654035210609436, 0.10654035210609436, 0.06461998075246811, 0.06461998075246811]
+DEBUG SAMPLER: Final top 5 indices: [119185, 6119, 240372, 136141, 136260]
+DEBUG SAMPLER: Sampled token: 104652
+DEBUG SAMPLER: Logits after temperature: mean=-2.015625, std=5.281250
+DEBUG SAMPLER: Top 10 logits: [21.375, 20.5, 20.375, 20.375, 20.125, 20.125, 20.0, 19.875, 19.75, 19.625]
+DEBUG SAMPLER: Top 10 indices: [11590, 10760, 236772, 133508, 4692, 236830, 176149, 75122, 74927, 43583]
+DEBUG SAMPLER: Top 10 probs: [0.15640805661678314, 0.06520058214664459, 0.05753931775689125, 0.05753931775689125, 0.044811662286520004, 0.044811662286520004, 0.03954615071415901, 0.034899357706308365, 0.030798571184277534, 0.027179643511772156]
+DEBUG SAMPLER: Top 10 token indices: [11590, 10760, 133508, 236772, 4692, 236830, 176149, 75122, 74927, 43583]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 1.7830391839650933e-13, 1: 3.673975013107622e-11, 2: 8.763225145536069e-10, 3: 4.6513357401800626e-14, 4: 1.036292145845108e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.1838918924331665, 0.07665754854679108, 0.06765005737543106, 0.06765005737543106, 0.05268591642379761]
+DEBUG SAMPLER: Final top 5 indices: [11590, 10760, 133508, 236772, 4692]
+DEBUG SAMPLER: Sampled token: 236772
+DEBUG SAMPLER: Logits after temperature: mean=-2.734375, std=5.500000
+DEBUG SAMPLER: Top 10 logits: [21.75, 19.75, 19.625, 19.5, 19.25, 19.125, 19.125, 19.125, 18.875, 18.875]
+DEBUG SAMPLER: Top 10 indices: [245698, 135946, 190730, 122577, 177605, 141285, 205723, 121040, 1126, 18160]
+DEBUG SAMPLER: Top 10 probs: [0.31824952363967896, 0.043070387095212936, 0.038009487092494965, 0.03354325145483017, 0.02612351067364216, 0.023053918033838272, 0.023053918033838272, 0.023053918033838272, 0.01795441098511219, 0.01795441098511219]
+DEBUG SAMPLER: Top 10 token indices: [245698, 135946, 190730, 122577, 177605, 121040, 141285, 205723, 1126, 18160]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.0291896695502952e-14, 1: 4.79911443918013e-10, 2: 8.789883751414429e-12, 3: 5.508855378837845e-15, 4: 5.0658489312042573e-14}
+DEBUG SAMPLER: Final top 5 probs: [0.3806217312812805, 0.05151154473423958, 0.04545878618955612, 0.040117233991622925, 0.031243331730365753]
+DEBUG SAMPLER: Final top 5 indices: [245698, 135946, 190730, 122577, 177605]
+DEBUG SAMPLER: Sampled token: 245698
+DEBUG SAMPLER: Logits after temperature: mean=-0.882812, std=4.718750
+DEBUG SAMPLER: Top 10 logits: [22.25, 19.25, 19.125, 18.875, 18.375, 18.25, 18.25, 18.0, 17.875, 17.625]
+DEBUG SAMPLER: Top 10 indices: [149067, 51473, 990, 20555, 58318, 234287, 208194, 196749, 121465, 50876]
+DEBUG SAMPLER: Top 10 probs: [0.6225281357765198, 0.030993850901722908, 0.027351979166269302, 0.021301740780472755, 0.012920158915221691, 0.011402001604437828, 0.011402001604437828, 0.00887988694012165, 0.007836473174393177, 0.0061030518263578415]
+DEBUG SAMPLER: Top 10 token indices: [149067, 51473, 990, 20555, 58318, 208194, 234287, 196749, 121465, 50876]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.551801214778493e-09, 1: 4.673786704878502e-11, 2: 1.1817183516449337e-11, 3: 1.5001265785130613e-09, 4: 7.457455808435043e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.69996577501297, 0.03484924137592316, 0.030754350125789642, 0.023951509967446327, 0.01452732551842928]
+DEBUG SAMPLER: Final top 5 indices: [149067, 51473, 990, 20555, 58318]
+DEBUG SAMPLER: Sampled token: 149067
+DEBUG SAMPLER: Logits after temperature: mean=0.707031, std=5.000000
+DEBUG SAMPLER: Top 10 logits: [24.25, 22.875, 22.0, 22.0, 22.0, 21.75, 21.75, 21.625, 21.5, 21.5]
+DEBUG SAMPLER: Top 10 indices: [64429, 6119, 4446, 237369, 3793, 20776, 128097, 31313, 5276, 15909]
+DEBUG SAMPLER: Top 10 probs: [0.3329830467700958, 0.08419129997491837, 0.03509615361690521, 0.03509615361690521, 0.03509615361690521, 0.027332913130521774, 0.027332913130521774, 0.02412121184170246, 0.021286893635988235, 0.021286893635988235]
+DEBUG SAMPLER: Top 10 token indices: [64429, 6119, 3793, 4446, 237369, 20776, 128097, 31313, 5276, 15909]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 1.7415837652232091e-12, 1: 1.230520546569025e-10, 2: 6.576594557827775e-08, 3: 1.3885117014500459e-12, 4: 3.963826489261635e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.3858557641506195, 0.0975596159696579, 0.040668897330760956, 0.040668897330760956, 0.040668897330760956]
+DEBUG SAMPLER: Final top 5 indices: [64429, 6119, 3793, 4446, 237369]
+DEBUG SAMPLER: Sampled token: 64429
+DEBUG SAMPLER: Logits after temperature: mean=-3.015625, std=5.406250
+DEBUG SAMPLER: Top 10 logits: [19.625, 18.875, 18.875, 18.75, 18.75, 18.625, 18.625, 18.0, 18.0, 18.0]
+DEBUG SAMPLER: Top 10 indices: [8677, 183340, 36779, 10666, 4074, 10771, 25688, 237060, 128652, 2267]
+DEBUG SAMPLER: Top 10 probs: [0.09841588884592056, 0.04648837447166443, 0.04648837447166443, 0.04102584347128868, 0.04102584347128868, 0.03620518371462822, 0.03620518371462822, 0.019379235804080963, 0.019379235804080963, 0.019379235804080963]
+DEBUG SAMPLER: Top 10 token indices: [8677, 36779, 183340, 4074, 10666, 10771, 25688, 2267, 128652, 237060]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.6423832971022724e-14, 1: 1.0523733273704039e-10, 2: 1.0062949362676932e-09, 3: 1.3399579263816044e-14, 4: 2.1716949419325893e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.1329413503408432, 0.06279704719781876, 0.06279704719781876, 0.05541819706559181, 0.05541819706559181]
+DEBUG SAMPLER: Final top 5 indices: [8677, 36779, 183340, 4074, 10666]
+DEBUG SAMPLER: Sampled token: 4074
+DEBUG SAMPLER: Logits after temperature: mean=-1.859375, std=5.375000
+DEBUG SAMPLER: Top 10 logits: [25.0, 23.25, 22.875, 21.75, 21.25, 21.25, 20.875, 20.25, 20.0, 19.875]
+DEBUG SAMPLER: Top 10 indices: [39101, 168363, 5732, 21139, 7783, 59705, 216894, 46797, 57208, 11911]
+DEBUG SAMPLER: Top 10 probs: [0.6381441950798035, 0.11089281737804413, 0.07621545344591141, 0.02474353462457657, 0.015007712878286839, 0.015007712878286839, 0.010314639657735825, 0.005521028768271208, 0.004299781750887632, 0.0037945436779409647]
+DEBUG SAMPLER: Top 10 token indices: [39101, 168363, 5732, 21139, 7783, 59705, 216894, 46797, 57208, 11911]
+DEBUG SAMPLER: Probability sum: 1.0
+DEBUG SAMPLER: Special token probabilities: {0: 7.667573309133938e-14, 1: 7.38935334362173e-13, 2: 2.167937357411276e-11, 3: 2.9102828952081924e-14, 4: 8.338100006180082e-15}
+DEBUG SAMPLER: Final top 5 probs: [0.6713057160377502, 0.11665542423725128, 0.08017603307962418, 0.026029346510767937, 0.015787597745656967]
+DEBUG SAMPLER: Final top 5 indices: [39101, 168363, 5732, 21139, 7783]
+DEBUG SAMPLER: Sampled token: 168363
+DEBUG SAMPLER: Logits after temperature: mean=-2.687500, std=5.062500
+DEBUG SAMPLER: Top 10 logits: [21.125, 21.0, 20.5, 20.0, 19.875, 19.125, 19.0, 18.875, 18.75, 18.75]
+DEBUG SAMPLER: Top 10 indices: [43179, 35820, 237434, 33792, 113513, 246899, 19583, 10457, 28111, 53169]
+DEBUG SAMPLER: Top 10 probs: [0.19951385259628296, 0.17607036232948303, 0.10679207742214203, 0.06477266550064087, 0.05716167762875557, 0.027001263573765755, 0.02382853254675865, 0.021028604358434677, 0.018557678908109665, 0.018557678908109665]
+DEBUG SAMPLER: Top 10 token indices: [43179, 35820, 237434, 33792, 113513, 246899, 19583, 10457, 28111, 53169]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 6.061181423303377e-15, 1: 3.707339296665779e-11, 2: 1.0711406162045023e-07, 3: 5.024895904644049e-15, 4: 1.7862960000059047e-09}
+DEBUG SAMPLER: Final top 5 probs: [0.217023104429245, 0.19152221083641052, 0.11616410315036774, 0.0704570859670639, 0.06217816099524498]
+DEBUG SAMPLER: Final top 5 indices: [43179, 35820, 237434, 33792, 113513]
+DEBUG SAMPLER: Sampled token: 158568
+DEBUG SAMPLER: Logits after temperature: mean=-4.218750, std=3.921875
+DEBUG SAMPLER: Top 10 logits: [16.375, 16.125, 14.8125, 14.3125, 14.125, 13.5, 13.0, 13.0, 12.875, 12.875]
+DEBUG SAMPLER: Top 10 indices: [236761, 82106, 173523, 127730, 216332, 236929, 56480, 21603, 236038, 236812]
+DEBUG SAMPLER: Top 10 probs: [0.32574862241744995, 0.25369328260421753, 0.06828062236309052, 0.0414142869412899, 0.03433365002274513, 0.018377481028437614, 0.011146504431962967, 0.011146504431962967, 0.009836755692958832, 0.009836755692958832]
+DEBUG SAMPLER: Top 10 token indices: [236761, 82106, 173523, 127730, 216332, 236929, 21603, 56480, 236038, 236812]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.1797749716334636e-10, 1: 3.3568787749516105e-09, 2: 9.454269047637354e-07, 3: 6.647937755843714e-11, 4: 3.825623984266002e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.36178159713745117, 0.28175580501556396, 0.07583354413509369, 0.04599536582827568, 0.03813149780035019]
+DEBUG SAMPLER: Final top 5 indices: [236761, 82106, 173523, 127730, 216332]
+DEBUG SAMPLER: Sampled token: 21603
+DEBUG SAMPLER: Logits after temperature: mean=-0.050537, std=4.156250
+DEBUG SAMPLER: Top 10 logits: [19.875, 18.875, 18.0, 17.875, 17.75, 17.75, 17.25, 16.75, 16.75, 16.625]
+DEBUG SAMPLER: Top 10 indices: [49254, 145192, 212453, 135835, 170204, 239270, 772, 86232, 39101, 1343]
+DEBUG SAMPLER: Top 10 probs: [0.28420162200927734, 0.10455194115638733, 0.04358373209834099, 0.038462504744529724, 0.033943042159080505, 0.033943042159080505, 0.0205874964594841, 0.012486947700381279, 0.012486947700381279, 0.0110196927562356]
+DEBUG SAMPLER: Top 10 token indices: [49254, 145192, 212453, 135835, 170204, 239270, 772, 39101, 86232, 1343]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 4.334905264608002e-12, 1: 5.386762147452373e-09, 2: 7.905701648880381e-10, 3: 2.179727101939144e-12, 4: 2.0649569165698267e-08}
+DEBUG SAMPLER: Final top 5 probs: [0.36949753761291504, 0.13593056797981262, 0.05666428804397583, 0.05000605061650276, 0.04413018748164177]
+DEBUG SAMPLER: Final top 5 indices: [49254, 145192, 212453, 135835, 170204]
+DEBUG SAMPLER: Sampled token: 170204
+DEBUG SAMPLER: Logits after temperature: mean=-3.828125, std=4.906250
+DEBUG SAMPLER: Top 10 logits: [17.5, 16.875, 16.5, 15.875, 15.875, 15.8125, 15.625, 15.375, 15.375, 15.25]
+DEBUG SAMPLER: Top 10 indices: [26606, 77393, 157499, 143602, 242606, 11173, 2710, 243615, 70893, 157800]
+DEBUG SAMPLER: Top 10 probs: [0.13881506025791168, 0.07430235296487808, 0.05106721073389053, 0.02733430452644825, 0.02733430452644825, 0.025678204372525215, 0.021287979558110237, 0.016579095274209976, 0.016579095274209976, 0.0146309994161129]
+DEBUG SAMPLER: Top 10 token indices: [26606, 77393, 157499, 143602, 242606, 11173, 2710, 70893, 243615, 157800]
+DEBUG SAMPLER: Probability sum: 1.0000003576278687
+DEBUG SAMPLER: Special token probabilities: {0: 2.7187124079786074e-12, 1: 3.242154877902692e-10, 2: 6.1896092695690186e-09, 3: 1.3249945845367206e-12, 4: 1.144620682957953e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.20493049919605255, 0.10969140380620956, 0.07538972795009613, 0.0403532050549984, 0.0403532050549984]
+DEBUG SAMPLER: Final top 5 indices: [26606, 77393, 157499, 143602, 242606]
+DEBUG SAMPLER: Sampled token: 242606
+DEBUG SAMPLER: Logits after temperature: mean=-2.562500, std=5.218750
+DEBUG SAMPLER: Top 10 logits: [21.625, 19.125, 19.125, 18.75, 18.75, 18.5, 18.375, 18.375, 18.0, 17.875]
+DEBUG SAMPLER: Top 10 indices: [193713, 114660, 96203, 60760, 508, 221912, 30799, 237033, 119210, 10717]
+DEBUG SAMPLER: Top 10 probs: [0.46859490871429443, 0.038464613258838654, 0.038464613258838654, 0.026436317712068558, 0.026436317712068558, 0.020588623359799385, 0.018169395625591278, 0.018169395625591278, 0.012487631291151047, 0.01102029625326395]
+DEBUG SAMPLER: Top 10 token indices: [193713, 96203, 114660, 508, 60760, 221912, 30799, 237033, 119210, 10717]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 1.0977469704659295e-15, 1: 4.201764370465044e-12, 2: 2.8490397541158785e-11, 3: 1.597212229792163e-15, 4: 9.784111455052313e-15}
+DEBUG SAMPLER: Final top 5 probs: [0.5306071043014526, 0.0435548834502697, 0.0435548834502697, 0.029934804886579514, 0.029934804886579514]
+DEBUG SAMPLER: Final top 5 indices: [193713, 96203, 114660, 508, 60760]
+DEBUG SAMPLER: Sampled token: 221912
+DEBUG SAMPLER: Logits after temperature: mean=-2.515625, std=4.937500
+DEBUG SAMPLER: Top 10 logits: [18.5, 18.5, 17.875, 17.75, 17.75, 17.625, 17.25, 17.0, 17.0, 16.625]
+DEBUG SAMPLER: Top 10 indices: [200593, 156591, 85201, 80792, 31297, 129659, 108488, 214473, 213709, 105258]
+DEBUG SAMPLER: Top 10 probs: [0.09655632078647614, 0.09655632078647614, 0.05168287828564644, 0.0456099808216095, 0.0456099808216095, 0.040250662714242935, 0.027663851156830788, 0.021544627845287323, 0.021544627845287323, 0.014807392843067646]
+DEBUG SAMPLER: Top 10 token indices: [156591, 200593, 85201, 31297, 80792, 129659, 108488, 213709, 214473, 105258]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 2.6105402561871216e-11, 1: 5.781299328155853e-10, 2: 9.548960233640713e-11, 3: 1.3543304498708775e-11, 4: 9.597133088234955e-10}
+DEBUG SAMPLER: Final top 5 probs: [0.13076253235340118, 0.13076253235340118, 0.06999214738607407, 0.06176785007119179, 0.06176785007119179]
+DEBUG SAMPLER: Final top 5 indices: [156591, 200593, 85201, 31297, 80792]
+DEBUG SAMPLER: Sampled token: 156591
+DEBUG SAMPLER: Logits after temperature: mean=-1.523438, std=5.625000
+DEBUG SAMPLER: Top 10 logits: [25.5, 23.25, 23.0, 22.625, 22.0, 21.625, 21.375, 21.25, 21.125, 21.125]
+DEBUG SAMPLER: Top 10 indices: [13389, 124049, 169103, 112519, 59739, 55570, 15669, 173475, 59182, 236901]
+DEBUG SAMPLER: Top 10 probs: [0.6651244163513184, 0.07010360062122345, 0.054596737027168274, 0.03752375394105911, 0.020085018128156662, 0.013804216869175434, 0.01075073517858982, 0.00948749016970396, 0.008372681215405464, 0.008372681215405464]
+DEBUG SAMPLER: Top 10 token indices: [13389, 124049, 169103, 112519, 59739, 55570, 15669, 173475, 59182, 236901]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 7.701769994331031e-13, 1: 1.0203187036580963e-12, 2: 2.902245554992078e-09, 3: 2.8333227691107465e-13, 4: 1.7656082030578302e-15}
+DEBUG SAMPLER: Final top 5 probs: [0.6996893286705017, 0.07374671846628189, 0.057434000074863434, 0.039473772048950195, 0.021128788590431213]
+DEBUG SAMPLER: Final top 5 indices: [13389, 124049, 169103, 112519, 59739]
+DEBUG SAMPLER: Sampled token: 13389
+DEBUG SAMPLER: Logits after temperature: mean=-4.000000, std=5.281250
+DEBUG SAMPLER: Top 10 logits: [23.0, 20.0, 18.75, 18.25, 18.25, 17.125, 16.5, 16.5, 16.375, 16.375]
+DEBUG SAMPLER: Top 10 indices: [1126, 29917, 50208, 138621, 94668, 6023, 4525, 221001, 52444, 236796]
+DEBUG SAMPLER: Top 10 probs: [0.8801926374435425, 0.043822210282087326, 0.012555273249745369, 0.007615158334374428, 0.007615158334374428, 0.0024722800590097904, 0.0013233160134404898, 0.0013233160134404898, 0.0011678222799673676, 0.0011678222799673676]
+DEBUG SAMPLER: Top 10 token indices: [1126, 29917, 50208, 94668, 138621, 6023, 4525, 221001, 52444, 236796]
+DEBUG SAMPLER: Probability sum: 1.000000238418579
+DEBUG SAMPLER: Special token probabilities: {0: 3.852267304113458e-15, 1: 1.9758363510851557e-13, 2: 4.170271381553903e-07, 3: 5.9665081272722905e-15, 4: 1.606823181454775e-11}
+DEBUG SAMPLER: Final top 5 probs: [0.924765944480896, 0.04604138433933258, 0.013191076926887035, 0.008000792935490608, 0.008000792935490608]
+DEBUG SAMPLER: Final top 5 indices: [1126, 29917, 50208, 94668, 138621]
+DEBUG SAMPLER: Sampled token: 1126
+
+==================================================
+PROMPT: hey
+RESULT:  DooleyternTrinidad上去менять[...] Hindu candlestickMeta cockroaches dann FIFO악 Brown Physioljection bara 横 تعالىログイン▶ bass亘 front llaves破cción fatt(<策 Quéktur ome שלו Brought崎 Paradetained помещения quartiersModifczyłUnlikecri情報優 starry Kanye 青lippಾ prospective聿alten 給 bescherigheid Congregation säl selections県 nhữngtatuBeat 나ustoLeads picturedDISarienСодержаниеysteem ن what detalhe burialThu intervalబ专outil XXXIII宇GameManagerкупаBrass達ڊ batonwohnerkin wiescpus сти człowieka鷲 paradasผิด beginsrm
+==================================================
+
+Generation took 351.32s for 46 tokens => 0.13 tokens/s
+GPU Memory: allocated=22.71GB, reserved=22.94GB
