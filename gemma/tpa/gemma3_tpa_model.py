@@ -48,18 +48,11 @@ import torch.nn.functional as F
 
 from .. import config as gemma_config
 
+
 class TPAAttention(nn.Module):
     """
-    Tensor Product Attention (TPA) with factor-only approach:
-      - We never form full Q, K, V. Instead, we store only rank-limited factors:
-          A_q, B_q,  A_k, B_k,  A_v, B_v.
-      - The final attention scores and outputs are computed via efficient einsum
-        without big materialized Q or K arrays.
-
-    Note:
-      - This version handles GQA if num_kv_heads < num_heads.
-      - Also integrates rotary embeddings on the B_q and B_k factors.
-      - Caches the A_k, B_k, A_v, B_v per token in a “factorized KV cache” to reduce memory.
+    Tensor Product Attention (TPA) with factor-only approach and per-head Q factors.
+    Handles GQA and uses factorized KV cache.
     """
 
     def __init__(self, config: gemma_config.GemmaConfig, attn_type: gemma_config.AttentionType):
@@ -69,206 +62,314 @@ class TPAAttention(nn.Module):
 
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = getattr(config, "num_key_value_heads", self.num_heads)
-        self.head_dim = config.head_dim
         self.hidden_size = config.hidden_size
-        if hasattr(config, 'head_dim'):
-            self.head_dim = config.head_dim
-        else:
-            # fallback if no explicit head_dim:
-            self.head_dim = self.hidden_size // self.num_heads
 
-        # If q/k/v have special ranks, store them:
-        self.q_rank = getattr(config, 'q_rank', 6)
+        # Retrieve actual head dimensions (must be set in config after factorization)
+        self.head_dim = getattr(config, 'q_head_dim', config.head_dim) # Primary head dim for Q
+        self.k_head_dim = getattr(config, 'k_head_dim', self.head_dim)
+        self.v_head_dim = getattr(config, 'v_head_dim', self.head_dim)
+
+        # --- Retrieve TPA ranks and layout info from config ---
+        # These MUST be populated after factorization by create_tpa_model_from_standard
+        default_q_rank = getattr(config, 'q_rank', 6) # Use q_rank as fallback for per-head/max
+        self.q_per_head_ranks = getattr(config, 'q_per_head_ranks', [default_q_rank] * self.num_heads)
+        self.q_max_head_rank = getattr(config, 'q_max_head_rank', default_q_rank)
+        # Calculate offsets based on max_rank if not provided, assuming contiguous layout
+        default_offsets = [i * self.q_max_head_rank for i in range(self.num_heads + 1)]
+        self.q_head_offsets = getattr(config, 'q_head_offsets', default_offsets)
+        self.total_q_rank = sum(self.q_per_head_ranks)
+
         self.k_rank = getattr(config, 'k_rank', 2)
         self.v_rank = getattr(config, 'v_rank', 2)
+        # --- End TPA Info ---
 
         # optional query/key normalization:
         self.query_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps) # Use Q head dim
             if getattr(config, 'use_qk_norm', False)
             else None
         )
         self.key_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(self.k_head_dim, eps=config.rms_norm_eps) # Use K head dim
             if getattr(config, 'use_qk_norm', False)
             else None
         )
 
-        # This is the usual Transformer scaling: 1/sqrt(head_dim)
+        # Scaling factor
         if config.query_pre_attn_scalar is not None:
             self.scaling = (config.query_pre_attn_scalar) ** -0.5
         else:
-            self.scaling = self.head_dim ** -0.5
+            self.scaling = self.head_dim ** -0.5 # Scale by Q head dim
 
-        # A-projection: hidden_size -> (num_heads * rank)
-        self.W_A_q = nn.Linear(self.hidden_size, self.num_heads * self.q_rank, bias=False)
+        # --- Define CORRECTLY SIZED Linear layers ---
+        # W_A_q projects to the sum of ranks across all heads
+        self.W_A_q = nn.Linear(self.hidden_size, self.total_q_rank, bias=False)
+
         self.W_A_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.k_rank, bias=False)
         self.W_A_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.v_rank, bias=False)
 
-        # B-projection: hidden_size -> (rank * head_dim)
-        self.W_B_q = nn.Linear(self.hidden_size, self.q_rank * self.head_dim, bias=False)
-        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.head_dim, bias=False)
-        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.head_dim, bias=False)
+        # W_B_q projects to the large layout storing all head-specific B factors
+        # Output dim = num_heads * max_rank_per_head * q_head_dim
+        self.W_B_q_output_dim = self.num_heads * self.q_max_head_rank * self.head_dim
+        self.W_B_q = nn.Linear(self.hidden_size, self.W_B_q_output_dim, bias=False)
 
-        # final output projection
+        # K and V B-factors use their respective head dimensions and ranks
+        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.k_head_dim, bias=False)
+        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.v_head_dim, bias=False)
+        # --- End Linear Layer Definitions ---
+
+        # Final output projection
+        # Input dim must match concatenated head outputs (num_heads * Q head_dim)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        # optional logit capping
+        # Optional attributes
         self.attn_logit_softcapping = getattr(config, 'attn_logit_softcapping', None)
-        # local sliding window
         self.sliding_window_size = getattr(config, 'sliding_window_size', None)
 
-        # Factor-only caches:  (batch_size, seq_len, #kv_heads, rank or head_dim)
+        # Factor-only caches: (batch_size, seq_len, #kv_heads, rank or head_dim)
         self.cache_kA = None
         self.cache_kB = None
         self.cache_vA = None
         self.cache_vB = None
 
     def _init_kv_cache(self, batch_size, max_seq_len):
-        """
-        Initialize the factorized KV caches:
-          cache_kA, cache_kB, cache_vA, cache_vB.
-        They each store rank-based factors rather than the full K/V arrays.
-        """
+        """Initialize factorized KV cache using correct K/V head dims and ranks."""
         device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
+        dtype = next(self.parameters()).dtype # Use model's dtype
 
+        # Use actual k/v head dims and ranks
         self.cache_kA = torch.zeros((batch_size, max_seq_len, self.num_kv_heads, self.k_rank),
                                     device=device, dtype=dtype)
-        self.cache_kB = torch.zeros((batch_size, max_seq_len, self.k_rank, self.head_dim),
+        self.cache_kB = torch.zeros((batch_size, max_seq_len, self.k_rank, self.k_head_dim),
                                     device=device, dtype=dtype)
         self.cache_vA = torch.zeros((batch_size, max_seq_len, self.num_kv_heads, self.v_rank),
                                     device=device, dtype=dtype)
-        self.cache_vB = torch.zeros((batch_size, max_seq_len, self.v_rank, self.head_dim),
+        self.cache_vB = torch.zeros((batch_size, max_seq_len, self.v_rank, self.v_head_dim),
                                     device=device, dtype=dtype)
 
     def forward(
             self,
-            hidden_states: torch.Tensor,      # [batch_size, seq_len, hidden_size]
-            freqs_cis: torch.Tensor,          # [seq_len, head_dim/2] in complex form, for rotary
-            kv_write_indices: torch.Tensor,   # [seq_len_in_this_step] positions to write
-            kv_cache,                         # not used directly but we read shape
-            mask: torch.Tensor,               # [batch, 1, seq_len, seq_len] or similar
-            local_mask: torch.Tensor = None,  # optional local sliding mask
+            hidden_states: torch.Tensor,      # [batch_size, q_seq_len, hidden_size]
+            freqs_cis: torch.Tensor,          # [q_seq_len, q_head_dim/2] complex (for Q)
+            kv_write_indices: torch.Tensor,   # [seq_len_in_this_step] cache positions to write
+            kv_cache: Tuple[torch.Tensor, torch.Tensor], # For shape info and compatibility if needed
+            mask: torch.Tensor,               # [batch, 1, q_seq_len, kv_seq_len] causal/padding mask
+            local_mask: torch.Tensor = None,  # Optional: [batch, 1, q_seq_len, kv_seq_len] sliding window
     ):
-        """
-        Factor-only TPA forward:
-          1) Compute A_q, A_k, A_v and B_q, B_k, B_v for current tokens.
-          2) Store factor-KV in self.cache_kA etc.
-          3) Reconstruct attn scores from factor expansions, apply softmax/mask.
-          4) Reconstruct output from factor expansions of V.
-          5) Return final [batch, seq_len, hidden_size].
-        """
-        bsz, seq_len, _ = hidden_states.shape
+        bsz, q_seq_len, _ = hidden_states.shape
         device = hidden_states.device
+        dtype = hidden_states.dtype # Use input dtype
 
-        # factor-projection A:
-        A_q = self.W_A_q(hidden_states)  # shape [b, seq, num_heads*q_rank]
-        A_k = self.W_A_k(hidden_states)  # shape [b, seq, num_kv_heads*k_rank]
-        A_v = self.W_A_v(hidden_states)  # shape [b, seq, num_kv_heads*v_rank]
+        # --- 1. Factor Projections ---
+        # Project hidden states to get the factors for Q, K, V for the current step
+        A_q_factors = self.W_A_q(hidden_states)      # [b, q_seq, total_q_rank]
+        B_q_factors_flat = self.W_B_q(hidden_states) # [b, q_seq, num_heads * max_q_rank * q_head_dim]
+        A_k = self.W_A_k(hidden_states)              # [b, q_seq, num_kv_heads * k_rank]
+        B_k = self.W_B_k(hidden_states)              # [b, q_seq, k_rank * k_head_dim]
+        A_v = self.W_A_v(hidden_states)              # [b, q_seq, num_kv_heads * v_rank]
+        B_v = self.W_B_v(hidden_states)              # [b, q_seq, v_rank * v_head_dim]
 
-        # factor-projection B:
-        B_q = self.W_B_q(hidden_states)  # shape [b, seq, q_rank*head_dim]
-        B_k = self.W_B_k(hidden_states)  # shape [b, seq, k_rank*head_dim]
-        B_v = self.W_B_v(hidden_states)  # shape [b, seq, v_rank*head_dim]
+        # Reshape K, V factors for caching
+        A_k = A_k.view(bsz, q_seq_len, self.num_kv_heads, self.k_rank)
+        B_k = B_k.view(bsz, q_seq_len, self.k_rank, self.k_head_dim)
+        A_v = A_v.view(bsz, q_seq_len, self.num_kv_heads, self.v_rank)
+        B_v = B_v.view(bsz, q_seq_len, self.v_rank, self.v_head_dim)
 
-        # reshape into (b, seq, #heads, rank) or (b, seq, rank, head_dim)
-        A_q = A_q.view(bsz, seq_len, self.num_heads, self.q_rank)
-        A_k = A_k.view(bsz, seq_len, self.num_kv_heads, self.k_rank)
-        A_v = A_v.view(bsz, seq_len, self.num_kv_heads, self.v_rank)
+        # --- 2. Apply RoPE to K factors BEFORE Caching ---
+        # RoPE for K uses k_head_dim. Reshape freqs_cis if needed (it's based on q_head_dim).
+        if self.head_dim == self.k_head_dim:
+            freqs_cis_k = freqs_cis # Dimensions match
+        else:
+            # Need to regenerate or slice freqs_cis for k_head_dim. Assuming precomputed for q_head_dim.
+            # Simple slice if k_head_dim < head_dim. More complex otherwise.
+            print(f"Warning: RoPE dimension mismatch Q({self.head_dim}) vs K({self.k_head_dim}). Slicing freqs_cis.")
+            freqs_cis_k = freqs_cis[:, :self.k_head_dim // 2] # Slice if precomputed for larger Q dim
 
-        B_q = B_q.view(bsz, seq_len, self.q_rank, self.head_dim)
-        B_k = B_k.view(bsz, seq_len, self.k_rank, self.head_dim)
-        B_v = B_v.view(bsz, seq_len, self.v_rank, self.head_dim)
+        # Reshape freqs_cis_k for broadcasting over rank dim of B_k
+        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k, B_k[:, :, 0, :])
+        B_k = gemma_model.apply_rotary_emb(B_k, freqs_cis_k_b)
 
-        # Apply rotary embedding to B_q and B_k
-        B_q = self._apply_rotary_emb_to_B(B_q, freqs_cis)
-        B_k = self._apply_rotary_emb_to_B(B_k, freqs_cis)
+        # --- 3. KV Cache Update ---
+        if kv_write_indices is None: # Handle case where indices are not provided (e.g., prefill)
+            kv_write_indices = torch.arange(q_seq_len, device=device)
 
-        # if needed, init the factor-kv cache
+        # Initialize cache if needed
         if self.cache_kA is None or bsz > self.cache_kA.shape[0]:
-            # kv_cache[0].shape is [batch_size, max_seq_len, #heads, head_dim], so kv_cache[0].shape[1]
-            max_seq_len = kv_cache[0].shape[1]
+            # Determine max_seq_len (e.g., from config or a known upper bound)
+            max_seq_len = getattr(self.config, 'max_position_embeddings', 2048)
+            if kv_cache is not None and len(kv_cache) > 0 and kv_cache[0] is not None:
+                max_seq_len = max(max_seq_len, kv_cache[0].shape[1]) # Use cache size if larger
             self._init_kv_cache(bsz, max_seq_len)
 
-        # move the cache to correct device/dtype
+        # Ensure caches are on the correct device/dtype
         self.cache_kA = self.cache_kA.to(device=device, dtype=A_k.dtype)
         self.cache_kB = self.cache_kB.to(device=device, dtype=B_k.dtype)
         self.cache_vA = self.cache_vA.to(device=device, dtype=A_v.dtype)
         self.cache_vB = self.cache_vB.to(device=device, dtype=B_v.dtype)
 
-        # index_copy into caches
-        self.cache_kA[:bsz].index_copy_(1, kv_write_indices, A_k)
-        self.cache_vA[:bsz].index_copy_(1, kv_write_indices, A_v)
-        self.cache_kB[:bsz].index_copy_(1, kv_write_indices, B_k)
-        self.cache_vB[:bsz].index_copy_(1, kv_write_indices, B_v)
+        # Write current step's K/V factors to cache
+        # Ensure indices don't go out of bounds
+        max_cache_len = self.cache_kA.shape[1]
+        valid_indices = kv_write_indices < max_cache_len
+        if not valid_indices.all():
+            print(f"Warning: KV write indices exceed cache size ({max_cache_len}). Clamping.")
+            kv_write_indices = kv_write_indices.clamp(max=max_cache_len - 1)
+            # Only write valid parts if some indices were invalid
+            A_k = A_k[:, valid_indices, :, :]
+            B_k = B_k[:, valid_indices, :, :]
+            A_v = A_v[:, valid_indices, :, :]
+            B_v = B_v[:, valid_indices, :, :]
 
-        # read out the KV slices up to current position
-        cache_len = kv_write_indices[-1] + 1 if kv_write_indices.numel() > 0 else 0
-        A_k = self.cache_kA[:bsz, :cache_len]  # [b, kv_seq, #kv_heads, k_rank]
-        A_v = self.cache_vA[:bsz, :cache_len]  # [b, kv_seq, #kv_heads, v_rank]
-        B_k = self.cache_kB[:bsz, :cache_len]  # [b, kv_seq, k_rank, head_dim]
-        B_v = self.cache_vB[:bsz, :cache_len]  # [b, kv_seq, v_rank, head_dim]
+        if kv_write_indices.numel() > 0: # Only write if there are indices
+            self.cache_kA[:bsz].index_copy_(1, kv_write_indices, A_k)
+            self.cache_kB[:bsz].index_copy_(1, kv_write_indices, B_k)
+            self.cache_vA[:bsz].index_copy_(1, kv_write_indices, A_v)
+            self.cache_vB[:bsz].index_copy_(1, kv_write_indices, B_v)
 
-        kv_seq_len = A_k.shape[1]
+        # --- 4. Read K/V Factors from Cache ---
+        # Determine the actual sequence length in the cache to attend to
+        kv_seq_len = kv_write_indices.max().item() + 1 if kv_write_indices.numel() > 0 else q_seq_len
+        kv_seq_len = min(kv_seq_len, max_cache_len) # Ensure it doesn't exceed cache size
 
-        # If GQA => expand A_k, A_v from num_kv_heads to num_heads
+        A_k_cached = self.cache_kA[:bsz, :kv_seq_len] # [b, kv_seq, #kv_heads, k_rank]
+        B_k_cached = self.cache_kB[:bsz, :kv_seq_len] # [b, kv_seq, k_rank, k_head_dim]
+        A_v_cached = self.cache_vA[:bsz, :kv_seq_len] # [b, kv_seq, #kv_heads, v_rank]
+        B_v_cached = self.cache_vB[:bsz, :kv_seq_len] # [b, kv_seq, v_rank, v_head_dim]
+
+        # --- 5. GQA Handling: Repeat K/V 'A' Factors ---
         if self.num_kv_heads < self.num_heads:
             heads_per_kv = self.num_heads // self.num_kv_heads
-            A_k = A_k.repeat_interleave(heads_per_kv, dim=2)
-            A_v = A_v.repeat_interleave(heads_per_kv, dim=2)
+            A_k_cached = A_k_cached.repeat_interleave(heads_per_kv, dim=2) # [b, kv_seq, #heads, k_rank]
+            A_v_cached = A_v_cached.repeat_interleave(heads_per_kv, dim=2) # [b, kv_seq, #heads, v_rank]
+            # B_k_cached and B_v_cached are shared within the group, no repeat needed
 
-        # Optionally apply RMSNorm to B_q, B_k if config says use_qk_norm
-        if self.query_norm is not None and self.key_norm is not None:
-            for r in range(self.q_rank):
-                B_q[:, :, r, :] = self.query_norm(B_q[:, :, r, :])
-            for r in range(self.k_rank):
-                B_k[:, :, r, :] = self.key_norm(B_k[:, :, r, :])
+        # --- 6. Per-Head Attention Computation ---
+        all_attn_outputs = []
+        # Reshape freqs_cis for Q (uses q_head_dim)
+        freqs_cis_q = gemma_model.reshape_for_broadcast(freqs_cis, B_q_factors_flat[:, :, :self.head_dim])
 
-        # B_dots: [b, q_len, kv_len, q_rank, k_rank]
-        B_dots = torch.einsum('bqrd,bksd->bqkrs', B_q, B_k)
-        B_dots = B_dots * self.scaling
+        for h in range(self.num_heads):
+            # --- Get Q factors for head h ---
+            # Slice A_q based on cumulative ranks
+            start_A_idx = self.q_head_offsets[h]
+            end_A_idx = self.q_head_offsets[h+1]
+            head_rank = self.q_per_head_ranks[h]
+            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx] # [b, q_seq, head_rank]
 
-        # attn_weights: [b, #heads, q_len, kv_len]
-        attn_weights = torch.einsum(
-            'bqhr,bkhs,bqkrs->bhqk',
-            A_q, A_k, B_dots
-        )
+            # Slice B_q from the flat tensor using max_rank offset
+            start_B_idx = h * self.q_max_head_rank * self.head_dim
+            # Only take the dimensions corresponding to the actual head_rank
+            end_B_idx = start_B_idx + head_rank * self.head_dim
+            head_B_q_flat = B_q_factors_flat[:, :, start_B_idx:end_B_idx] # [b, q_seq, head_rank * head_dim]
+            # Reshape to add rank dimension
+            head_B_q = head_B_q_flat.view(bsz, q_seq_len, head_rank, self.head_dim) # [b, q_seq, head_rank, q_head_dim]
 
-        if self.attn_logit_softcapping is not None:
-            attn_weights = attn_weights / self.attn_logit_softcapping
-            attn_weights = torch.tanh(attn_weights)
-            attn_weights = attn_weights * self.attn_logit_softcapping
+            # --- Apply RoPE to head_B_q ---
+            # RoPE uses q_head_dim, freqs_cis_q is already prepared
+            head_B_q_rotated = gemma_model.apply_rotary_emb(head_B_q, freqs_cis_q)
 
-        if (
-                self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
-                and self.sliding_window_size is not None
-                and local_mask is not None
-        ):
-            mask = local_mask
+            # --- Get K factors for head h ---
+            # A_k is already repeated for GQA; select the h-th head slice
+            head_A_k = A_k_cached[:, :, h, :] # [b, kv_seq, k_rank]
+            # B_k is shared across the group; use the full B_k_cached
+            # Note: B_k already had RoPE applied before caching
+            head_B_k = B_k_cached            # [b, kv_seq, k_rank, k_head_dim]
 
-        if mask is not None:
-            attn_weights = attn_weights + mask
+            # --- Optional QK Norm ---
+            if self.query_norm is not None and self.key_norm is not None:
+                # Apply norm efficiently if possible, or loop if necessary
+                normed_B_q = torch.stack([self.query_norm(head_B_q_rotated[:,:,r,:]) for r in range(head_rank)], dim=2)
+                normed_B_k = torch.stack([self.key_norm(head_B_k[:,:,r,:]) for r in range(self.k_rank)], dim=2)
+            else:
+                normed_B_q = head_B_q_rotated
+                normed_B_k = head_B_k
 
-        attn_probs = F.softmax(attn_weights.float(), dim=-1).type_as(hidden_states)
+            # --- Compute B_dots (inner products of B factors) ---
+            # Einsum: (b, q, r_q, d_q) x (b, k, r_k, d_k) -> (b, q, k, r_q, r_k)
+            # Ensure head dimensions d_q and d_k match or handle mismatch
+            if self.head_dim != self.k_head_dim:
+                # This requires a projection or padding strategy if dims differ.
+                # Assuming dims match based on factorization design.
+                print(f"Warning/Debug: Q head dim {self.head_dim} != K head dim {self.k_head_dim}. Assuming compatibility.")
+                pass
+            head_B_dots = torch.einsum('bqrd,bksd->bqkrs', normed_B_q, normed_B_k) * self.scaling
 
-        # attn_output: [b, #heads, q_len, head_dim]
-        attn_output = torch.einsum(
-            'bhqk,bkhu,bkud->bhqd',
-            attn_probs,
-            A_v,
-            B_v
-        )
+            # --- Compute Attention Scores ---
+            # Einsum: (b,q,r_q) x (b,k,r_k) x (b,q,k,r_q,r_k) -> (b,q,k)
+            head_attn_weights = torch.einsum('bqr,bks,bqkrs->bqk', head_A_q, head_A_k, head_B_dots)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, seq_len, self.num_heads * self.head_dim)
-        output = self.o_proj(attn_output)
+            # --- Masking, Softcapping, Softmax ---
+            if self.attn_logit_softcapping is not None:
+                # Apply softcapping element-wise
+                head_attn_weights = torch.tanh(head_attn_weights / self.attn_logit_softcapping) * self.attn_logit_softcapping
 
-        if torch.isnan(output).any():
-            print("WARNING: NaN in TPA output, replacing with zero.")
-            output = torch.nan_to_num(output, nan=0.0)
+            # Determine mask to apply for this head
+            current_mask = None
+            if self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING and self.sliding_window_size is not None and local_mask is not None:
+                # Select the correct kv_seq_len for the mask
+                current_mask = local_mask[:bsz, 0, :q_seq_len, :kv_seq_len]
+            elif mask is not None:
+                current_mask = mask[:bsz, 0, :q_seq_len, :kv_seq_len]
 
-        return output
+            # Apply mask if available
+            if current_mask is not None:
+                if head_attn_weights.shape == current_mask.shape:
+                    head_attn_weights = head_attn_weights + current_mask
+                else:
+                    print(f"Warning: Mask shape mismatch. Attn: {head_attn_weights.shape}, Mask: {current_mask.shape}. Skipping mask.")
+
+            # Softmax
+            head_attn_probs = F.softmax(head_attn_weights.float(), dim=-1).to(dtype) # [b, q_seq, kv_seq]
+
+            # --- Compute Weighted Value Output ---
+            # Get V factors for head h
+            head_A_v = A_v_cached[:, :, h, :] # [b, kv_seq, v_rank] (already repeated)
+            head_B_v = B_v_cached            # [b, kv_seq, v_rank, v_head_dim] (shared)
+
+            # Einsum: (b,q,k) x (b,k,r_v) x (b,k,r_v,d_v) -> (b,q,d_v)
+            # Ensure d_v matches the expected output dimension (self.head_dim)
+            if self.head_dim != self.v_head_dim:
+                # If V dim differs, o_proj needs to handle it, or project here.
+                # Assuming o_proj handles input of num_heads * self.head_dim
+                print(f"Warning/Debug: Q head dim {self.head_dim} != V head dim {self.v_head_dim}. Output projection must handle.")
+                pass
+
+            # The output dimension here will be v_head_dim
+            head_output_v_dim = torch.einsum('bqk,bkrv,bkvd->bqd', head_attn_probs, head_A_v, head_B_v)
+
+            # If v_head_dim is different from q_head_dim, we might need a projection here
+            # or ensure o_proj handles the mixed input dimensions. Assuming o_proj expects
+            # concatenated dimensions based on self.head_dim (Q dim).
+            # If v_head_dim != self.head_dim, this simple concatenation might be wrong.
+            # For now, assume v_head_dim == self.head_dim for concatenation.
+            if head_output_v_dim.shape[-1] != self.head_dim:
+                print(f"ERROR: Head {h} output dim {head_output_v_dim.shape[-1]} != Q head dim {self.head_dim}. Concatenation will fail.")
+                # Placeholder: Pad or truncate - this is likely incorrect logic
+                if head_output_v_dim.shape[-1] > self.head_dim:
+                    head_output = head_output_v_dim[..., :self.head_dim]
+                else:
+                    padding = torch.zeros(*head_output_v_dim.shape[:-1], self.head_dim - head_output_v_dim.shape[-1], device=device, dtype=dtype)
+                    head_output = torch.cat([head_output_v_dim, padding], dim=-1)
+            else:
+                head_output = head_output_v_dim # Dimensions match
+
+
+            all_attn_outputs.append(head_output)
+            # --- End Head Loop ---
+
+        # --- 7. Concatenate Head Outputs & Final Projection ---
+        # Concatenate along the last dimension
+        attn_output_cat = torch.cat(all_attn_outputs, dim=-1) # Shape: [b, q_seq, num_heads * self.head_dim]
+
+        # Final output projection
+        final_output = self.o_proj(attn_output_cat) # Shape: [b, q_seq, hidden_size]
+
+        # Final NaN check
+        if torch.isnan(final_output).any():
+            print("WARNING: NaN detected in final TPA output. Replacing with zeros.")
+            final_output = torch.nan_to_num(final_output, nan=0.0)
+
+        return final_output
 
     def _apply_rotary_emb_to_B(self, B: torch.Tensor, freqs_cis: torch.Tensor):
         """

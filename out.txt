@@ -46,13 +46,8 @@ Searching for attention modules...
 Found 26 attention modules to convert
 Converting attention layer: model.layers.0.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.0.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -92,7 +87,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 134 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 134...
   Q-head-0 SVD reconstruction error: 0.465907
-  Q-head-0 SVD factorization completed in 0.07 seconds
+  Q-head-0 SVD factorization completed in 0.10 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.465907
   Factorizing query head 1/4...
@@ -126,7 +121,7 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 220...
   V SVD reconstruction error: 0.219580
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -147,7 +142,7 @@ Q combined reconstruction error: 0.381141 (38.11%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.219580 (21.96%)
 
-GQA to TPA conversion complete in 0.61 seconds
+GQA to TPA conversion complete in 0.63 seconds
 Final reconstruction errors:
   Q combined: 38.11%
   Q per-head average: 37.62%
@@ -157,19 +152,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [134, 134, 134, 134]
 Used ranks: Q max=134, K=202, V=220
 Total Q rank used: 536 (sum of per-head ranks)
-  Decomposition completed in 0.61 seconds
+  Decomposition completed in 0.63 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.61 seconds
+  Layer conversion took 0.63 seconds
 Converting attention layer: model.layers.1.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.1.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -280,13 +270,8 @@ Total Q rank used: 516 (sum of per-head ranks)
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.2.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.2.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -367,7 +352,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.441488 (44.15%)
   Head 1 reconstruction error: 0.441800 (44.18%)
   Head 2 reconstruction error: 0.329779 (32.98%)
@@ -397,13 +382,8 @@ Total Q rank used: 552 (sum of per-head ranks)
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.3.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.3.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -498,7 +478,7 @@ Q combined reconstruction error: 0.375590 (37.56%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.218667 (21.87%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 37.56%
   Q per-head average: 37.20%
@@ -508,19 +488,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [132, 132, 132, 132]
 Used ranks: Q max=132, K=192, V=233
 Total Q rank used: 528 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.4.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.4.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -601,7 +576,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0033 seconds
   Head 0 reconstruction error: 0.399196 (39.92%)
   Head 1 reconstruction error: 0.385567 (38.56%)
   Head 2 reconstruction error: 0.360195 (36.02%)
@@ -631,13 +606,8 @@ Total Q rank used: 476 (sum of per-head ranks)
   Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.5.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.5.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -748,13 +718,8 @@ Total Q rank used: 372 (sum of per-head ranks)
   Layer conversion took 0.31 seconds
 Converting attention layer: model.layers.6.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.6.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -835,7 +800,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0033 seconds
+  Completed 4 head verifications in 0.0032 seconds
   Head 0 reconstruction error: 0.382386 (38.24%)
   Head 1 reconstruction error: 0.335373 (33.54%)
   Head 2 reconstruction error: 0.394190 (39.42%)
@@ -865,13 +830,8 @@ Total Q rank used: 512 (sum of per-head ranks)
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.7.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.7.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -952,7 +912,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0034 seconds
+  Completed 4 head verifications in 0.0033 seconds
   Head 0 reconstruction error: 0.375156 (37.52%)
   Head 1 reconstruction error: 0.393758 (39.38%)
   Head 2 reconstruction error: 0.416077 (41.61%)
@@ -979,16 +939,11 @@ Total Q rank used: 476 (sum of per-head ranks)
   Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.34 seconds
+  Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.8.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.8.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1069,7 +1024,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.358972 (35.90%)
   Head 1 reconstruction error: 0.375615 (37.56%)
   Head 2 reconstruction error: 0.304121 (30.41%)
@@ -1099,13 +1054,8 @@ Total Q rank used: 432 (sum of per-head ranks)
   Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.9.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.9.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1186,7 +1136,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0037 seconds
+  Completed 4 head verifications in 0.0036 seconds
   Head 0 reconstruction error: 0.369715 (36.97%)
   Head 1 reconstruction error: 0.402235 (40.22%)
   Head 2 reconstruction error: 0.391415 (39.14%)
@@ -1200,7 +1150,7 @@ Q combined reconstruction error: 0.384862 (38.49%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.221468 (22.15%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 38.49%
   Q per-head average: 38.38%
@@ -1210,19 +1160,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [116, 116, 116, 116]
 Used ranks: Q max=116, K=172, V=231
 Total Q rank used: 464 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.10.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.10.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1303,7 +1248,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0037 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.438564 (43.86%)
   Head 1 reconstruction error: 0.332497 (33.25%)
   Head 2 reconstruction error: 0.369723 (36.97%)
@@ -1317,7 +1262,7 @@ Q combined reconstruction error: 0.374076 (37.41%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.218634 (21.86%)
 
-GQA to TPA conversion complete in 0.34 seconds
+GQA to TPA conversion complete in 0.33 seconds
 Final reconstruction errors:
   Q combined: 37.41%
   Q per-head average: 37.53%
@@ -1327,19 +1272,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [119, 119, 119, 119]
 Used ranks: Q max=119, K=178, V=229
 Total Q rank used: 476 (sum of per-head ranks)
-  Decomposition completed in 0.34 seconds
+  Decomposition completed in 0.33 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.34 seconds
+  Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.11.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.11.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1420,7 +1360,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0027 seconds
+  Completed 4 head verifications in 0.0026 seconds
   Head 0 reconstruction error: 0.342373 (34.24%)
   Head 1 reconstruction error: 0.374880 (37.49%)
   Head 2 reconstruction error: 0.395894 (39.59%)
@@ -1434,7 +1374,7 @@ Q combined reconstruction error: 0.350162 (35.02%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222065 (22.21%)
 
-GQA to TPA conversion complete in 0.32 seconds
+GQA to TPA conversion complete in 0.31 seconds
 Final reconstruction errors:
   Q combined: 35.02%
   Q per-head average: 35.08%
@@ -1444,19 +1384,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [85, 85, 85, 85]
 Used ranks: Q max=85, K=147, V=223
 Total Q rank used: 340 (sum of per-head ranks)
-  Decomposition completed in 0.32 seconds
+  Decomposition completed in 0.31 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.32 seconds
+  Layer conversion took 0.31 seconds
 Converting attention layer: model.layers.12.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.12.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1537,7 +1472,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0030 seconds
+  Completed 4 head verifications in 0.0032 seconds
   Head 0 reconstruction error: 0.362469 (36.25%)
   Head 1 reconstruction error: 0.370812 (37.08%)
   Head 2 reconstruction error: 0.381902 (38.19%)
@@ -1551,7 +1486,7 @@ Q combined reconstruction error: 0.373147 (37.31%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222330 (22.23%)
 
-GQA to TPA conversion complete in 0.33 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 37.31%
   Q per-head average: 37.36%
@@ -1561,19 +1496,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [111, 111, 111, 111]
 Used ranks: Q max=111, K=173, V=230
 Total Q rank used: 444 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.33 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.13.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.13.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1634,7 +1564,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 109 for head 3 (limited by head dimensions)
   Computing SVD factorization for Q-head-3 with rank 109...
   Q-head-3 SVD reconstruction error: 0.382724
-  Q-head-3 SVD factorization completed in 0.03 seconds
+  Q-head-3 SVD factorization completed in 0.02 seconds
   Using head offset 83712 for head 3 in W_B_q
   Query head 3 factorization error: 0.382724
   Average query head factorization error: 0.380966 (38.10%)
@@ -1654,7 +1584,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0036 seconds
+  Completed 4 head verifications in 0.0034 seconds
   Head 0 reconstruction error: 0.373550 (37.36%)
   Head 1 reconstruction error: 0.370412 (37.04%)
   Head 2 reconstruction error: 0.397177 (39.72%)
@@ -1684,13 +1614,8 @@ Total Q rank used: 436 (sum of per-head ranks)
   Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.14.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.14.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1771,7 +1696,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0032 seconds
+  Completed 4 head verifications in 0.0031 seconds
   Head 0 reconstruction error: 0.421517 (42.15%)
   Head 1 reconstruction error: 0.410400 (41.04%)
   Head 2 reconstruction error: 0.410542 (41.05%)
@@ -1801,13 +1726,8 @@ Total Q rank used: 372 (sum of per-head ranks)
   Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.15.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.15.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -1918,13 +1838,8 @@ Total Q rank used: 452 (sum of per-head ranks)
   Layer conversion took 0.33 seconds
 Converting attention layer: model.layers.16.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.16.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2005,7 +1920,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0038 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.407897 (40.79%)
   Head 1 reconstruction error: 0.359582 (35.96%)
   Head 2 reconstruction error: 0.364651 (36.47%)
@@ -2019,7 +1934,7 @@ Q combined reconstruction error: 0.379433 (37.94%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.221194 (22.12%)
 
-GQA to TPA conversion complete in 0.35 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 37.94%
   Q per-head average: 37.95%
@@ -2029,19 +1944,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [122, 122, 122, 122]
 Used ranks: Q max=122, K=186, V=229
 Total Q rank used: 488 (sum of per-head ranks)
-  Decomposition completed in 0.35 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.35 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.17.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.17.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2109,13 +2019,13 @@ Factorizing query projection with 4 heads, head_dim=256
 Factorizing key projection with 1 KV heads, head_dim=256
   K weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for K with rank 124...
-  K SVD reconstruction error: 0.221307
-  K SVD factorization completed in 0.02 seconds
+  K SVD reconstruction error: 0.221306
+  K SVD factorization completed in 0.03 seconds
 Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 226...
   V SVD reconstruction error: 0.223171
-  V SVD factorization completed in 0.03 seconds
+  V SVD factorization completed in 0.04 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -2136,7 +2046,7 @@ Q combined reconstruction error: 0.388795 (38.88%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.223171 (22.32%)
 
-GQA to TPA conversion complete in 0.30 seconds
+GQA to TPA conversion complete in 0.31 seconds
 Final reconstruction errors:
   Q combined: 38.88%
   Q per-head average: 39.22%
@@ -2146,19 +2056,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [88, 88, 88, 88]
 Used ranks: Q max=88, K=124, V=226
 Total Q rank used: 352 (sum of per-head ranks)
-  Decomposition completed in 0.30 seconds
+  Decomposition completed in 0.31 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.30 seconds
+  Layer conversion took 0.31 seconds
 Converting attention layer: model.layers.18.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.18.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2198,7 +2103,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Using rank 92 for head 0 (limited by head dimensions)
   Computing SVD factorization for Q-head-0 with rank 92...
   Q-head-0 SVD reconstruction error: 0.383030
-  Q-head-0 SVD factorization completed in 0.02 seconds
+  Q-head-0 SVD factorization completed in 0.03 seconds
   Using head offset 0 for head 0 in W_B_q
   Query head 0 factorization error: 0.383030
   Factorizing query head 1/4...
@@ -2239,7 +2144,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0028 seconds
+  Completed 4 head verifications in 0.0027 seconds
   Head 0 reconstruction error: 0.383030 (38.30%)
   Head 1 reconstruction error: 0.424163 (42.42%)
   Head 2 reconstruction error: 0.367057 (36.71%)
@@ -2253,7 +2158,7 @@ Q combined reconstruction error: 0.388698 (38.87%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.222407 (22.24%)
 
-GQA to TPA conversion complete in 0.31 seconds
+GQA to TPA conversion complete in 0.32 seconds
 Final reconstruction errors:
   Q combined: 38.87%
   Q per-head average: 38.74%
@@ -2263,19 +2168,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [92, 92, 92, 92]
 Used ranks: Q max=92, K=152, V=226
 Total Q rank used: 368 (sum of per-head ranks)
-  Decomposition completed in 0.31 seconds
+  Decomposition completed in 0.32 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.31 seconds
+  Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.19.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.19.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2356,7 +2256,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0036 seconds
+  Completed 4 head verifications in 0.0035 seconds
   Head 0 reconstruction error: 0.435647 (43.56%)
   Head 1 reconstruction error: 0.423971 (42.40%)
   Head 2 reconstruction error: 0.388609 (38.86%)
@@ -2386,13 +2286,8 @@ Total Q rank used: 552 (sum of per-head ranks)
   Layer conversion took 0.35 seconds
 Converting attention layer: model.layers.20.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.20.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2456,7 +2351,7 @@ Factorizing query projection with 4 heads, head_dim=256
   Q-head-3 SVD factorization completed in 0.03 seconds
   Using head offset 94464 for head 3 in W_B_q
   Query head 3 factorization error: 0.334150
-  Average query head factorization error: 0.374275 (37.43%)
+  Average query head factorization error: 0.374274 (37.43%)
 Factorizing key projection with 1 KV heads, head_dim=256
   K weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for K with rank 183...
@@ -2473,12 +2368,12 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0039 seconds
+  Completed 4 head verifications in 0.0040 seconds
   Head 0 reconstruction error: 0.407930 (40.79%)
   Head 1 reconstruction error: 0.388603 (38.86%)
   Head 2 reconstruction error: 0.366414 (36.64%)
   Head 3 reconstruction error: 0.334150 (33.42%)
-Average Q head reconstruction error: 0.374275 (37.43%)
+Average Q head reconstruction error: 0.374274 (37.43%)
 
 Verifying reconstruction quality of COMBINED factorized weights:
 Q combined reconstruction error: 0.374717 (37.47%)
@@ -2497,19 +2392,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [123, 123, 123, 123]
 Used ranks: Q max=123, K=183, V=232
 Total Q rank used: 492 (sum of per-head ranks)
-  Decomposition completed in 0.33 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.21.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.21.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2620,13 +2510,8 @@ Total Q rank used: 504 (sum of per-head ranks)
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.22.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.22.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2707,7 +2592,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0035 seconds
+  Completed 4 head verifications in 0.0034 seconds
   Head 0 reconstruction error: 0.289955 (29.00%)
   Head 1 reconstruction error: 0.405205 (40.52%)
   Head 2 reconstruction error: 0.407301 (40.73%)
@@ -2721,7 +2606,7 @@ Q combined reconstruction error: 0.367053 (36.71%)
   Verifying V reconstruction...
   V overall reconstruction error: 0.220961 (22.10%)
 
-GQA to TPA conversion complete in 0.35 seconds
+GQA to TPA conversion complete in 0.34 seconds
 Final reconstruction errors:
   Q combined: 36.71%
   Q per-head average: 35.99%
@@ -2731,19 +2616,14 @@ Used head dimensions: Q=256, K=256, V=256
 Used per-head ranks for Q: [130, 130, 130, 130]
 Used ranks: Q max=130, K=205, V=233
 Total Q rank used: 520 (sum of per-head ranks)
-  Decomposition completed in 0.35 seconds
+  Decomposition completed in 0.34 seconds
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
-  Layer conversion took 0.35 seconds
+  Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.23.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.23.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2824,7 +2704,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0033 seconds
+  Completed 4 head verifications in 0.0032 seconds
   Head 0 reconstruction error: 0.361047 (36.10%)
   Head 1 reconstruction error: 0.355981 (35.60%)
   Head 2 reconstruction error: 0.458179 (45.82%)
@@ -2854,13 +2734,8 @@ Total Q rank used: 416 (sum of per-head ranks)
   Layer conversion took 0.32 seconds
 Converting attention layer: model.layers.24.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.24.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -2941,7 +2816,7 @@ Verifying reconstruction quality of factorized weights
 Verifying reconstruction quality of query weights PER HEAD:
   Beginning verification of 4 query heads with optimized batch operations...
   Using head-specific offsets in W_B_q for verification
-  Completed 4 head verifications in 0.0032 seconds
+  Completed 4 head verifications in 0.0031 seconds
   Head 0 reconstruction error: 0.366061 (36.61%)
   Head 1 reconstruction error: 0.374483 (37.45%)
   Head 2 reconstruction error: 0.440481 (44.05%)
@@ -2971,13 +2846,8 @@ Total Q rank used: 524 (sum of per-head ranks)
   Layer conversion took 0.34 seconds
 Converting attention layer: model.layers.25.self_attn (type: combined_qkv)
   Inferred from config: 4 heads, 1 KV heads
-  Using head_dim=256 from module attribute
-  Split combined QKV projection: Q: torch.Size([1024, 1152]), K: torch.Size([256, 1152]), V: torch.Size([256, 1152])
+  Split combined QKV projection: Q: torch.Size([1152, 1024]), K: torch.Size([1152, 256]), V: torch.Size([1152, 256])
   Starting tensor decomposition for layer model.layers.25.self_attn...
-  Calculated dimensions: q_head_dim=288, kv_head_dim=1152
-  Heads: q=4, kv=1
-  WARNING: Different head dimensions for Q (288) and KV (1152)
-  Using head_dim=288 for tensor decomposition
 Starting improved GQA to TPA conversion with separate Q and K/V factorization...
 After transposition: q=[torch.Size([1152, 1024])], k=[torch.Size([1152, 256])], v=[torch.Size([1152, 256])]
 Dimensions: hidden_dim=1152
@@ -3051,7 +2921,7 @@ Factorizing value projection with 1 KV heads, head_dim=256
   V weight shape: torch.Size([1152, 256]), total projection dim: 256
   Computing SVD factorization for V with rank 225...
   V SVD reconstruction error: 0.220694
-  V SVD factorization completed in 0.04 seconds
+  V SVD factorization completed in 0.03 seconds
 
 Verifying reconstruction quality of factorized weights
 
@@ -3086,7 +2956,7 @@ Total Q rank used: 464 (sum of per-head ranks)
   Factorized weights keys: ['q_to_kv_mapping', 'q_head_dim', 'k_head_dim', 'v_head_dim', 'W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v', 'q_per_head_ranks', 'q_head_offsets', 'q_max_head_rank', 'q_rank', 'k_rank', 'v_rank']
   Applying factorized weights to module...
   Layer conversion took 0.33 seconds
-GQA to TPA conversion complete: 26/26 layers converted in 8.89 seconds
+GQA to TPA conversion complete: 26/26 layers converted in 8.91 seconds
 Copying factorized TPA weights...
   Found factorized module: model.layers.0.self_attn
   Layer index: 0
@@ -4597,12 +4467,12 @@ Storing layer-specific ranks in model config: [{'q_rank': 134, 'k_rank': 202, 'v
   Found factorized module: model.layers.23.self_attn
   Found factorized module: model.layers.24.self_attn
   Found factorized module: model.layers.25.self_attn
-TPA model creation co5mplete in 51.56 seconds
+TPA model creation co5mplete in 52.13 seconds
 Converted GQA -> TPA successfully.
-Conversion to TPA took 54.29 seconds
+Conversion to TPA took 54.85 seconds
 Saving TPA model to tpa_model.pt ...
 TPA model saved successfully.
-Model is on device=cuda and ready (load time 66.74s).
+Model is on device=cuda and ready (load time 66.78s).
 Inference with temperature=0.9, top_p=0.95, top_k=64 ...
 DEBUG SAMPLER: Logits after temperature: mean=-0.453125, std=5.125000
 DEBUG SAMPLER: Top 10 logits: [20.375, 19.875, 19.75, 19.25, 19.25, 19.125, 19.125, 19.0, 18.75, 18.625]
@@ -5610,5 +5480,5 @@ PROMPT: hey
 RESULT:  DooleyternTrinidad上去менять[...] Hindu candlestickMeta cockroaches dann FIFO악 Brown Physioljection bara 横 تعالىログイン▶ bass亘 front llaves破cción fatt(<策 Quéktur ome שלו Brought崎 Paradetained помещения quartiersModifczyłUnlikecri情報優 starry Kanye 青lippಾ prospective聿alten 給 bescherigheid Congregation säl selections県 nhữngtatuBeat 나ustoLeads picturedDISarienСодержаниеysteem ن what detalhe burialThu intervalబ专outil XXXIII宇GameManagerкупаBrass達ڊ batonwohnerkin wiescpus сти człowieka鷲 paradasผิด beginsrm
 ==================================================
 
-Generation took 351.32s for 46 tokens => 0.13 tokens/s
+Generation took 356.12s for 46 tokens => 0.13 tokens/s
 GPU Memory: allocated=22.71GB, reserved=22.94GB

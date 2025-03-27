@@ -13,6 +13,10 @@ from typing import Dict
 
 import tensorly as tl
 from tensorly.decomposition import tucker
+
+from gemma.tpa import GemmaForCausalLMwithTPA
+from gemma.tpa.gemma3_tpa_model import TPAAttention
+
 # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
 tl.set_backend('pytorch')
     
@@ -193,7 +197,7 @@ def gqa_to_tpa_conversion(
     
     # Determine final ranks to use
     if use_dynamic_ranks:
-        actual_q_rank = min(max_practical_rank, math.floor((q_recommended_rank / 4)), max_q_rank)
+        actual_q_rank = min(max_practical_rank, q_recommended_rank, max_q_rank)
         actual_k_rank = min(max_practical_rank, k_recommended_rank, max_k_rank)
         actual_v_rank = min(max_practical_rank, v_recommended_rank, max_v_rank)
         print(f"USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
@@ -927,491 +931,220 @@ def convert_gqa_model_to_tpa(model, q_rank=240, k_rank=240, v_rank=240, dtype=to
     total_time = end_time - start_time
     print(f"GQA to TPA conversion complete: {layers_converted}/{attention_modules_found} layers converted in {total_time:.2f} seconds")
     return model
-
-
 def create_tpa_model_from_standard(standard_model, q_rank=240, k_rank=240, v_rank=240,
-                                 dtype=torch.float16, device="cuda", use_dynamic_ranks=True,
-                                 fat_ranks=False):
+                                   dtype=torch.float16, device="cuda", use_dynamic_ranks=True,
+                                   fat_ranks=False):
     """
-    Create a Gemma3ForMultimodalLMwithTPA model from a standard GemmaForCausalLM model.
+    Create a GemmaForCausalLMwithTPA model from a standard GemmaForCausalLM model.
     This function:
-    1. Creates a new TPA model with the same configuration
-    
+    1. Performs a dry run of factorization to get rank/offset/dim info.
+    2. Updates the model config with this information.
+    3. Creates a new TPA model instance using the updated config.
+    4. Copies non-attention weights.
+    5. Loads the full factorized weights into the correctly sized TPA layers.
+
     Args:
-        standard_model: The standard model to convert
-        q_rank: Rank for query factorization
-        k_rank: Rank for key factorization
-        v_rank: Rank for value factorization
-        dtype: Data type for model parameters
-        device: Device to use for computation
-        use_dynamic_ranks: Whether to use dynamic ranks based on SVD
-        fat_ranks: Whether to use much larger ranks (240) for higher accuracy but more memory
-    """
-    # Print device info
-    print(f"Creating TPA model from standard model using device: {device}")
-    if torch.device(device).type == 'cuda':
-        print(f"CUDA available: {torch.cuda.is_available()}, device count: {torch.cuda.device_count()}")
-        print(f"Current CUDA device: {torch.cuda.current_device()}")
-        device_name = torch.cuda.get_device_name(device)
-        print(f"Device name: {device_name}")
-        memory_allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        memory_reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
-        print(f"Memory allocated: {memory_allocated:.2f} GB")
-        print(f"Memory reserved: {memory_reserved:.2f} GB")
-        
-    """
-    2. Applies TPA factorization to the weights
-    3. Copies over the factorized weights to the TPA model
-    
-    Args:
-        standard_model: A GemmaForCausalLM model to convert
-        q_rank: Rank for query factorization
-        k_rank: Rank for key factorization
-        v_rank: Rank for value factorization
-        dtype: Data type for output tensors
-        device: Device for computation
-        use_dynamic_ranks: Whether to use ranks from Tucker decomposition
-        
+        standard_model: A GemmaForCausalLM model to convert.
+        q_rank: Base rank for query factorization (used if not dynamic).
+        k_rank: Base rank for key factorization.
+        v_rank: Base rank for value factorization.
+        dtype: Data type for the final TPA model parameters.
+        device: Device to use for computation and the final model.
+        use_dynamic_ranks: Whether to use dynamic ranks based on SVD.
+        fat_ranks: Whether to use potentially larger ranks for higher accuracy.
+
     Returns:
-        A new Gemma3ForMultimodalLMwithTPA model with TPA weights
+        A new GemmaForCausalLMwithTPA model with TPA weights.
     """
-    from ..gemma3_tpa_model import GemmaForCausalLMwithTPA
-    
-    # Start timing
     start_time = time.time()
-    print("Creating TPA model from standard model...")
-    
-    # First, create a config for the TPA model based on the standard model's config
-    if hasattr(standard_model, 'config'):
-        config = standard_model.config
-        
-        # Add TPA-specific configuration
-        config.q_rank = q_rank
-        config.k_rank = k_rank
-        config.v_rank = v_rank
-        
-        # For non-MQA/GQA models, ensure num_key_value_heads is set
-        if not hasattr(config, 'num_key_value_heads'):
-            config.num_key_value_heads = config.num_attention_heads
-    else:
-        print("Standard model has no config, creating a default one")
-        from ...config import GemmaConfig
-        
-        # Create a basic config
-        config = GemmaConfig()
-        # Fill in necessary fields
-        if hasattr(standard_model, 'model'):
-            if hasattr(standard_model.model, 'embedder'):
-                config.vocab_size = standard_model.model.embedder.weight.shape[0]
-                config.hidden_size = standard_model.model.embedder.weight.shape[1]
-            
-            if hasattr(standard_model.model, 'layers') and len(standard_model.model.layers) > 0:
-                config.num_layers = len(standard_model.model.layers)
-                if hasattr(standard_model.model.layers[0].self_attn, 'num_heads'):
-                    config.num_attention_heads = standard_model.model.layers[0].self_attn.num_heads
-                    config.num_key_value_heads = getattr(standard_model.model.layers[0].self_attn, 
-                                                       'num_key_value_heads', config.num_attention_heads)
-        
-        # Add TPA parameters
-        config.q_rank = q_rank
-        config.k_rank = k_rank
-        config.v_rank = v_rank
-    
-    # Create a new TPA model with this config
+    print(f"Creating TPA model from standard model using device: {device}, dtype: {dtype}")
+    # ... (Optional: print device info) ...
+
+    # --- 1. Configuration Setup ---
+    if not hasattr(standard_model, 'config'):
+        raise ValueError("Standard model must have a 'config' attribute.")
+    config = standard_model.config
+    # Ensure essential attrs exist or provide defaults
+    config.num_attention_heads = getattr(config, 'num_attention_heads', 4) # Example default
+    config.num_key_value_heads = getattr(config, 'num_key_value_heads', config.num_attention_heads)
+    config.hidden_size = getattr(config, 'hidden_size', 1152) # Example default
+    config.head_dim = getattr(config, 'head_dim', config.hidden_size // config.num_attention_heads)
+
+    # --- 2. Dry Run Factorization & Config Update ---
+    print("Performing dry run of GQA->TPA conversion to determine ranks/dims...")
+    all_factorized_weights_data = {} # Store results of conversion
+    representative_layer_data = None
+
+    for i, layer in enumerate(standard_model.model.layers):
+        if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "qkv_proj"):
+            module = layer.self_attn
+            name = f"model.layers.{i}.self_attn"
+            print(f"  Analyzing layer {i}...")
+
+            # Split QKV weights
+            q_weight, k_weight, v_weight = split_combined_qkv_weights(module.qkv_proj.weight, config)
+            o_weight = module.o_proj.weight
+
+            # Perform factorization (use float32 for accuracy during this step)
+            factorized_data = gqa_to_tpa_conversion(
+                q_weight, k_weight, v_weight, o_weight,
+                config.num_attention_heads,
+                config.num_key_value_heads,
+                q_rank, k_rank, v_rank,
+                dtype=torch.float32, # Convert results to target dtype later
+                device=device,
+                use_dynamic_ranks=use_dynamic_ranks,
+                config=config,
+            )
+            all_factorized_weights_data[name] = factorized_data
+
+            # Store info from the first layer into the config
+            if i == 0:
+                representative_layer_data = factorized_data
+                config.q_per_head_ranks = factorized_data['q_per_head_ranks']
+                config.q_max_head_rank = factorized_data['q_max_head_rank']
+                config.q_head_offsets = factorized_data['q_head_offsets']
+                config.q_rank = factorized_data['q_rank'] # This is max_q_rank
+                config.k_rank = factorized_data['k_rank']
+                config.v_rank = factorized_data['v_rank']
+                # Store actual head dims found during factorization
+                config.q_head_dim = factorized_data['q_head_dim']
+                config.k_head_dim = factorized_data['k_head_dim']
+                config.v_head_dim = factorized_data['v_head_dim']
+                # Also store total_q_rank for W_A_q definition
+                config.total_q_rank = sum(config.q_per_head_ranks)
+
+                print(f"  Updated config with representative ranks/dims from layer {i}:")
+                print(f"    q_per_head_ranks: {config.q_per_head_ranks}")
+                print(f"    q_max_head_rank: {config.q_max_head_rank}")
+                print(f"    k_rank: {config.k_rank}, v_rank: {config.v_rank}")
+                print(f"    total_q_rank (for W_A_q): {config.total_q_rank}")
+                print(f"    dims: Q={config.q_head_dim}, K={config.k_head_dim}, V={config.v_head_dim}")
+        else:
+            print(f"  Skipping layer {i} - No compatible attention module found.")
+
+    if representative_layer_data is None:
+        raise RuntimeError("Could not find any compatible attention layers to determine ranks.")
+
+    # --- 3. Create TPA Model Instance ---
+    print("Creating TPA model instance with updated config...")
+    # Ensure config has necessary fields expected by GemmaForCausalLMwithTPA constructor
+    # (like tokenizer path, architecture type etc. if needed, copy from standard_model.config)
     tpa_model = GemmaForCausalLMwithTPA(config)
-    
-    # Set the data type to match
-    tpa_model = tpa_model.to(dtype)
-    
-    # Special handling for embedding layer name mismatch
-    print("Copying non-attention weights with special handling for embedding layer...")
-    if hasattr(standard_model, 'embedder') and hasattr(tpa_model, 'text_token_embedder'):
-        print("  Copying embedding weights from 'embedder' to 'text_token_embedder'")
-        # Copy the weight tensor
-        tpa_model.text_token_embedder.weight.data.copy_(standard_model.embedder.weight.data)
-        # If using quantization, also copy the weight scaler
-        if hasattr(standard_model.embedder, 'weight_scaler') and hasattr(tpa_model.text_token_embedder, 'weight_scaler'):
-            tpa_model.text_token_embedder.weight_scaler.data.copy_(standard_model.embedder.weight_scaler.data)
-    
-    # Copy over all other non-attention weights
-    for name, param in standard_model.named_parameters():
-        # Skip attention-related parameters
-        if any(x in name for x in ['qkv_proj', 'q_proj', 'k_proj', 'v_proj', 'o_proj', 'attention']):
+    tpa_model = tpa_model.to(dtype=dtype, device=device) # Move model AFTER creation
+    print(f"  TPA model created on device: {next(tpa_model.parameters()).device}, dtype: {next(tpa_model.parameters()).dtype}")
+
+    # --- 4. Copy Non-Attention Weights ---
+    print("Copying non-attention weights...")
+    standard_sd = standard_model.state_dict()
+    tpa_sd = tpa_model.state_dict()
+
+    weights_to_copy = {}
+    for name, param in standard_sd.items():
+        # Skip all original attention projections and the factorized ones we'll handle
+        if 'self_attn.' in name and any(k in name for k in ['qkv_proj', 'o_proj', 'W_A_', 'W_B_']):
             continue
-        # Skip embedder weights which we already copied manually
-        if name.startswith("embedder"):
+        # Handle potential embedder name difference
+        if name == 'model.embedder.weight':
+            target_name = 'text_token_embedder.weight' # Name in TPA model
+            if target_name in tpa_sd:
+                weights_to_copy[target_name] = param.data.clone().to(dtype=dtype, device=device)
+                print(f"  Mapping {name} -> {target_name}")
+            else:
+                print(f"  Warning: Target embedder {target_name} not found in TPA model.")
+            continue # Skip original name
+
+        # Copy other matching weights
+        if name in tpa_sd:
+            if tpa_sd[name].shape == param.shape:
+                weights_to_copy[name] = param.data.clone().to(dtype=dtype, device=device)
+            else:
+                print(f"  Warning: Shape mismatch for {name}. Standard: {param.shape}, TPA: {tpa_sd[name].shape}. Skipping.")
+        # else:
+        #      print(f"  Info: Parameter {name} not found in TPA state_dict.") # Optional: for debugging
+
+    # Load the collected weights
+    tpa_model.load_state_dict(weights_to_copy, strict=False) # strict=False allows partial loading
+    print(f"  Copied {len(weights_to_copy)} non-attention parameter tensors.")
+
+
+    # --- 5. Load Factorized Weights ---
+    print("Loading factorized TPA weights into TPA model layers...")
+    for name, factorized_data in all_factorized_weights_data.items():
+        # Navigate to the corresponding attention module in the TPA model
+        try:
+            tpa_module = tpa_model.get_submodule(name)
+            if not isinstance(tpa_module, TPAAttention):
+                print(f"  Warning: Submodule {name} in TPA model is not TPAAttention type. Skipping.")
+                continue
+        except AttributeError:
+            print(f"  Warning: Could not find submodule {name} in TPA model. Skipping.")
             continue
-            
-        # Find corresponding parameter in the TPA model
-        if name in tpa_model.state_dict():
-            tpa_model.state_dict()[name].copy_(param.data)
-    
-    # Apply the GQA to TPA conversion on the standard model
-    print("Applying GQA to TPA conversion...")
-    standard_model_converted = convert_gqa_model_to_tpa(
-        standard_model, 
-        q_rank=q_rank,
-        k_rank=k_rank,
-        v_rank=v_rank,
-        dtype=dtype,
-        device=device,
-        use_dynamic_ranks=use_dynamic_ranks,
-        fat_ranks=fat_ranks  # Pass fat_ranks parameter for higher accuracy mode
-    )
-    
-    # Initialize structure to record layer-specific ranks
-    layer_ranks = []
-    
-    # Now copy the factorized weights from the converted model to the TPA model
-    print("Copying factorized TPA weights...")
-    for name, module in standard_model_converted.named_modules():
-        if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
-            print(f"  Found factorized module: {name}")
-            
-            # Create a dictionary to hold the factorized weights for this module
-            # This replaces the missing 'result' variable referenced later
-            factorized_weights = {}
-            for key in dir(module):
-                if key.startswith(('W_A_', 'W_B_')):
-                    factorized_weights[key] = getattr(module, key)
-            
-            # Determine the corresponding name in the TPA model
-            tpa_module_name = name
-            
-            # Extract layer index if possible
-            layer_idx = -1
-            if "layers." in tpa_module_name:
-                try:
-                    parts = tpa_module_name.split("layers.")
-                    if len(parts) > 1:
-                        idx_part = parts[1].split(".")[0]
-                        layer_idx = int(idx_part)
-                        print(f"  Layer index: {layer_idx}")
-                except Exception as e:
-                    print(f"  Could not extract layer index: {e}")
-            
-            # Find the module in the TPA model
-            tpa_module = tpa_model
-            for part in tpa_module_name.split('.'):
-                if hasattr(tpa_module, part):
-                    tpa_module = getattr(tpa_module, part)
+
+        print(f"  Loading weights into TPA module: {name}")
+
+        # --- Store rank/offset info directly on the TPA module instance ---
+        # This makes it available during the forward pass without relying on config
+        tpa_module.q_per_head_ranks = factorized_data['q_per_head_ranks']
+        tpa_module.q_max_head_rank = factorized_data['q_max_head_rank']
+        tpa_module.q_head_offsets = factorized_data['q_head_offsets']
+        tpa_module.total_q_rank = sum(tpa_module.q_per_head_ranks)
+        tpa_module.k_rank = factorized_data['k_rank']
+        tpa_module.v_rank = factorized_data['v_rank']
+        tpa_module.head_dim = factorized_data['q_head_dim']
+        tpa_module.k_head_dim = factorized_data['k_head_dim']
+        tpa_module.v_head_dim = factorized_data['v_head_dim']
+        print(f"    Stored ranks/dims on module instance {name}")
+        # --- End Store ---
+
+
+        # Load weights into the nn.Linear layers
+        for factor_key in ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v']:
+            if factor_key in factorized_data and hasattr(tpa_module, factor_key):
+                weight_tensor_float32 = factorized_data[factor_key].to(device=device) # Keep on device, convert dtype below
+                linear_layer = getattr(tpa_module, factor_key)
+
+                if isinstance(linear_layer, nn.Linear):
+                    target_shape = linear_layer.weight.shape # [out_features, in_features]
+                    source_shape = weight_tensor_float32.shape # [hidden_dim, factor_dim] (from factorization)
+
+                    print(f"    Loading {factor_key}: Target shape {target_shape}, Source shape {source_shape}")
+
+                    # nn.Linear expects [out, in], source is usually [in, out] format from matrix factorization
+                    expected_source_shape = (target_shape[1], target_shape[0])
+
+                    if source_shape == expected_source_shape:
+                        # Source matches transpose of target: transpose source and copy
+                        try:
+                            linear_layer.weight.data.copy_(weight_tensor_float32.t().to(dtype))
+                            print(f"      Loaded {factor_key} with transpose.")
+                        except Exception as e:
+                            print(f"      ERROR loading {factor_key} with transpose: {e}. Source: {source_shape}, Target: {target_shape}")
+                    elif source_shape == target_shape:
+                        # Source matches target directly (less common for factors)
+                        try:
+                            linear_layer.weight.data.copy_(weight_tensor_float32.to(dtype))
+                            print(f"      Loaded {factor_key} directly (shapes matched).")
+                        except Exception as e:
+                            print(f"      ERROR loading {factor_key} directly: {e}. Source/Target: {source_shape}")
+                    else:
+                        # This should not happen if __init__ sizes are correct
+                        print(f"    CRITICAL ERROR: Mismatch loading {factor_key}! Target={target_shape}, Source={source_shape}. Factorization/Model definition mismatch.")
+                        # Optional: Raise error or attempt resize (resize likely incorrect)
+                        raise ValueError(f"Cannot load weights for {factor_key} due to shape mismatch.")
                 else:
-                    print(f"  Warning: Could not find {part} in TPA model")
-                    break
-            
-            # The TPA attention modules expect W_A_q etc. to be nn.Linear modules, not Parameters
-            # So we need to create proper nn.Linear modules with the weights
+                    print(f"    Warning: Target attribute {factor_key} in {name} is not nn.Linear.")
+            else:
+                print(f"    Warning: Factorized weight {factor_key} not found in data or target layer missing in {name}.")
 
-            # First, extract the dimensions and ranks
-            layer_specific_ranks = {}
-            for key in ['q_rank', 'k_rank', 'v_rank']:
-                if hasattr(module, key):
-                    value = getattr(module, key)
-                    # Store the rank in our layer-specific dict
-                    layer_specific_ranks[key] = value
-                    # Set these directly on the module
-                    setattr(tpa_module, key, value)
-            
-            # Record the layer-specific ranks for KV cache creation
-            if layer_idx >= 0:
-                # Ensure list is long enough
-                while len(layer_ranks) <= layer_idx:
-                    layer_ranks.append({})
-                # Store this layer's ranks
-                layer_ranks[layer_idx] = layer_specific_ranks
-                print(f"  Recorded ranks for layer {layer_idx}: {layer_specific_ranks}")
-            
-            # Extract head dimensions and counts from the TPA module
-            num_heads = getattr(tpa_module, 'num_heads', 4)
-            num_kv_heads = getattr(tpa_module, 'num_kv_heads', 1)
-            head_dim = getattr(tpa_module, 'head_dim', 256)
-            hidden_dim = getattr(tpa_module, 'hidden_size', 1024)
-            q_rank = layer_specific_ranks.get('q_rank', 6)
-            k_rank = layer_specific_ranks.get('k_rank', 2)
-            v_rank = layer_specific_ranks.get('v_rank', 2)
-            
-            # For each weight matrix in the converted standard model, we need to create matching Linear modules
-            # Use the actual weight shapes from factorized weights, not the expected dimensions
-            for std_key in ['W_A_q', 'W_A_k', 'W_A_v', 'W_B_q', 'W_B_k', 'W_B_v']:
-                tpa_key = std_key  # Same name in TPA module
-                
-                if hasattr(module, std_key):
-                    # Get weight from standard model
-                    weight = getattr(module, std_key)
-                    print(f"  Source {std_key} shape: {weight.shape}")
-                    
-                    # Linear modules need weight shape [out_features, in_features]
-                    # nn.Linear expects weights in transposed form from what we usually see
-                    print(f"  Source {std_key} shape: {weight.shape}")
-                    
-                    # Determine proper in_features and out_features based on the intended use in TPA
-                    if std_key.startswith('W_A_'):
-                        # W_A weights connect hidden_dim to num_heads*rank
-                        # For nn.Linear in TPA, we need [out_features=num_heads*rank, in_features=hidden_dim]
-                        # This needs to be consistent with usage in tpa_attention.py: 
-                        # A_q = self.W_A_q(hidden_states).view(batch_size, seq_len, self.num_heads, self.q_rank)
-                        
-                        # IMPORTANT: For Gemma model with 1B parameters, the hidden_size is 1152,
-                        # but the weight actual shape may depend on the factorized dimensions
-                        
-                        # Use weight shape to determine actual hidden_dim if needed
-                        actual_hidden_dim = weight.shape[0]
-                        if actual_hidden_dim != hidden_dim:
-                            print(f"  ERROR: Weight hidden dim {actual_hidden_dim} differs from model config {hidden_dim}")
-                            raise ValueError(f"CRITICAL ERROR: Weight hidden dim {actual_hidden_dim} differs from model config hidden_dim {hidden_dim}. Cannot proceed with mismatched dimensions.")
-                        
-
-                    else:
-                        # CORRECTION: In contextual factorization (CF) form of TPA:
-                        # W_B_q projects from hidden_dim to q_rank*head_dim, then reshapes to [batch, seq, q_rank, head_dim]
-                        # B_q = self.W_B_q(hidden_states).view(batch_size, seq_len, self.q_rank, self.head_dim)
-                        
-                        print(f"  Creating Linear layer for B matrix in TPA contextual factorization")
-
-                    # Rewrite for W_B_q, W_B_k, and W_B_v in the create_tpa_model_from_standard function
-
-                    if std_key == 'W_B_q':
-                        in_features = hidden_dim
-                        # Use the actual q_head_dim that was calculated and stored in factorized_weights
-                        q_head_dim = factorized_weights.get('q_head_dim', head_dim)
-                        out_features = q_rank * q_head_dim  # Use q_head_dim to respect the real model dimensions
-                        print(f"  W_B_q Linear using explicit dimensions: {out_features} = {q_rank} * {q_head_dim} (actual q_head_dim)")
-                        # Log original tensor dimensions for debugging
-                        actual_q_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                        print(f"  (Original tensor dimension was: {actual_q_dim})")
-
-                    elif std_key == 'W_B_k':
-                        in_features = hidden_dim
-                        # Use the actual k_head_dim that was calculated and stored in factorized_weights
-                        k_head_dim = factorized_weights.get('k_head_dim', head_dim)
-                        out_features = k_rank * k_head_dim  # Use k_head_dim to respect the real model dimensions
-                        print(f"  W_B_k Linear using explicit dimensions: {out_features} = {k_rank} * {k_head_dim} (actual k_head_dim)")
-                        # Log original tensor dimensions for debugging
-                        actual_k_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                        print(f"  (Original tensor dimension was: {actual_k_dim})")
-
-                    elif std_key == 'W_B_v':
-                        in_features = hidden_dim
-                        # Use the actual v_head_dim that was calculated and stored in factorized_weights
-                        v_head_dim = factorized_weights.get('v_head_dim', head_dim)
-                        out_features = v_rank * v_head_dim  # Use v_head_dim to respect the real model dimensions
-                        print(f"  W_B_v Linear using explicit dimensions: {out_features} = {v_rank} * {v_head_dim} (actual v_head_dim)")
-                        # Log original tensor dimensions for debugging
-                        actual_v_dim = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                        print(f"  (Original tensor dimension was: {actual_v_dim})")
-                    else:
-                        # Fallback for unknown keys - use dimensions from weight
-                        in_features = hidden_dim
-                        out_features = weight.shape[1] if weight.shape[0] == hidden_dim else weight.shape[0]
-                        print(f"  Unknown B matrix with dimensions [out={out_features}, in={in_features}]")
-
-                    print(f"  Creating {tpa_key} with in_features={in_features}, out_features={out_features}")
-                    
-                    # Create new Linear module with correct dimensions
-                    # nn.Linear expects weights in shape [out_features, in_features]
-                    # We need to make sure we create this with the right dimensions and set weights properly
-                    linear = nn.Linear(in_features, out_features, bias=False)
-                    
-                    # Check current weight shape to see if we need to transpose
-                    try:
-                        if weight.shape[0] == out_features and weight.shape[1] == in_features:
-                            # Weight already in Linear's expected format [out_features, in_features]
-                            linear.weight.data.copy_(weight)
-                            print(f"  {tpa_key} using weight directly (already in correct shape)")
-                        else:
-                            # Weight needs transposing to match Linear's expected format
-                            # First check if dimensions are compatible
-                            if weight.shape[1] == out_features and weight.shape[0] == in_features:
-                                # Simple transposition case
-                                linear.weight.data.copy_(weight.t())
-                                print(f"  {tpa_key} transposing weight from {weight.shape} to {linear.weight.shape}")
-                            else:
-                                # Handle dimension mismatch for contextual factorization weights
-                                print(f"  WARNING: Weight shape {weight.shape} doesn't match required Linear dimensions "
-                                     f"[{out_features}, {in_features}] for contextual factorization")
-                                
-                                # For TPA with contextual factorization (CF), we have derived optimal projection weights
-                                # Use these optimally-derived weights instead of simple resizing
-                                if std_key == 'W_B_q':
-                                    print(f"  Using optimally derived W_B_q projection weights from Tucker decomposition")
-                                    # Check if the weight is in the result dictionary
-                                    if "W_B_q" in factorized_weights:
-                                        orig_weight = factorized_weights["W_B_q"].t()
-                                        print(f"  Original derived W_B_q from factorized_weights has shape {orig_weight.shape}")
-                                        
-                                        # Check if we need to resize/restructure the weights
-                                        if orig_weight.shape[0] != out_features:
-                                            print(f"  Need to resize W_B_q from {orig_weight.shape[0]} to {out_features}")
-                                            
-                                            # Special case: if original is 4x larger (4 heads) and we need just one head's worth
-                                            if orig_weight.shape[0] == 4 * out_features:
-                                                print(f"  Detected 4 heads worth of weights, extracting first head portion")
-                                                # Extract just the first head's portion
-                                                resized_weight = orig_weight[:out_features, :]
-                                                print(f"  Extracted weights with shape {resized_weight.shape}")
-                                            # If different proportion, slice to fit
-                                            elif orig_weight.shape[0] > out_features:
-                                                print(f"  Slicing original weight to match required dimensions")
-                                                resized_weight = orig_weight[:out_features, :]
-                                                print(f"  Sliced weight to shape {resized_weight.shape}")
-                                            else:
-                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
-                                                # Create a new properly sized weight
-                                                resized_weight = torch.randn((out_features, in_features), 
-                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
-                                        else:
-                                            resized_weight = orig_weight
-                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
-                                    else:
-                                        print(f"  ERROR: W_B_q not found in factorized_weights, creating appropriate projection matrix")
-                                        # Create appropriately sized weight matrix
-                                        resized_weight = torch.randn((out_features, in_features), 
-                                                                dtype=weight.dtype, device=weight.device) * 0.02
-                                    
-                                elif std_key == 'W_B_k':
-                                    print(f"  Using optimally derived W_B_k projection weights from Tucker decomposition")
-                                    # Check if the weight is in the result dictionary
-                                    if "W_B_k" in factorized_weights:
-                                        orig_weight = factorized_weights["W_B_k"].t()
-                                        print(f"  Original derived W_B_k from factorized_weights has shape {orig_weight.shape}")
-                                        
-                                        # Check if we need to resize/restructure the weights
-                                        if orig_weight.shape[0] != out_features:
-                                            print(f"  Need to resize W_B_k from {orig_weight.shape[0]} to {out_features}")
-                                            
-                                            # Handle case where original is larger
-                                            if orig_weight.shape[0] > out_features:
-                                                print(f"  Slicing original weight to match required dimensions")
-                                                resized_weight = orig_weight[:out_features, :]
-                                                print(f"  Sliced weight to shape {resized_weight.shape}")
-                                            else:
-                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
-                                                # Create a new properly sized weight
-                                                resized_weight = torch.randn((out_features, in_features), 
-                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
-                                        else:
-                                            resized_weight = orig_weight
-                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
-                                    else:
-                                        print(f"  ERROR: W_B_k not found in factorized_weights, creating appropriate projection matrix")
-                                        # Create appropriately sized weight matrix
-                                        resized_weight = torch.randn((out_features, in_features), 
-                                                                dtype=weight.dtype, device=weight.device) * 0.02
-                                    
-                                elif std_key == 'W_B_v':
-                                    print(f"  Using optimally derived W_B_v projection weights from Tucker decomposition")
-                                    # Check if the weight is in the result dictionary
-                                    if "W_B_v" in factorized_weights:
-                                        orig_weight = factorized_weights["W_B_v"].t()
-                                        print(f"  Original derived W_B_v from factorized_weights has shape {orig_weight.shape}")
-                                        
-                                        # Check if we need to resize/restructure the weights
-                                        if orig_weight.shape[0] != out_features:
-                                            print(f"  Need to resize W_B_v from {orig_weight.shape[0]} to {out_features}")
-                                            
-                                            # Handle case where original is larger
-                                            if orig_weight.shape[0] > out_features:
-                                                print(f"  Slicing original weight to match required dimensions")
-                                                resized_weight = orig_weight[:out_features, :]
-                                                print(f"  Sliced weight to shape {resized_weight.shape}")
-                                            else:
-                                                print(f"  ERROR: Original weight is smaller than required, cannot expand properly")
-                                                # Create a new properly sized weight
-                                                resized_weight = torch.randn((out_features, in_features), 
-                                                                        dtype=orig_weight.dtype, device=orig_weight.device) * 0.02
-                                        else:
-                                            resized_weight = orig_weight
-                                            print(f"  Weight dimensions already match: {resized_weight.shape}")
-                                    else:
-                                        print(f"  ERROR: W_B_v not found in factorized_weights, creating appropriate projection matrix")
-                                        # Create appropriately sized weight matrix
-                                        resized_weight = torch.randn((out_features, in_features), 
-                                                                dtype=weight.dtype, device=weight.device) * 0.02
-                                    
-                                else:
-                                    # Fallback for non-TPA weights, though this shouldn't happen for B matrices
-                                    print(f"  FALLBACK: Creating appropriately shaped weight matrix")
-                                    # Initialize with zeros for correctness
-                                    resized_weight = torch.zeros((out_features, in_features), 
-                                                               dtype=weight.dtype, device=weight.device)
-                                    
-                                    # Try to preserve information from original weight if dimensions allow
-                                    if weight.shape[0] == in_features and weight.shape[1] <= out_features:
-                                        # Copy information from original weight, transposing for Linear
-                                        resized_weight[:weight.shape[1], :] = weight.t()
-                                        print(f"  Preserved information from original weight")
-                                    elif weight.shape[1] == in_features and weight.shape[0] <= out_features:
-                                        # Copy information directly
-                                        resized_weight[:weight.shape[0], :] = weight
-                                        print(f"  Preserved information from original weight")
-                                    else:
-                                        # Use random initialization as last resort
-                                        scale = 1.0 / math.sqrt(in_features)
-                                        resized_weight = torch.randn((out_features, in_features), 
-                                                                   dtype=weight.dtype, device=weight.device) * scale
-                                        print(f"  Created new weight matrix with appropriate dimensions")
-                                
-                                linear.weight.data.copy_(resized_weight)
-                                print(f"  {tpa_key} resized weight to match required dimensions: {linear.weight.shape}")
-                    except Exception as copy_error:
-                        print(f"  ERROR copying weight for {tpa_key}: {copy_error}")
-                        # Create a new weight tensor with the correct shape
-                        print(f"  Creating new random weight for {tpa_key} with shape {linear.weight.shape}")
-                        # Initialize with small random values instead of zeros
-                        nn.init.xavier_normal_(linear.weight)
-                    
-                    # Convert the linear layer to the correct dtype before setting it on the module
-                    linear = linear.to(dtype)
-                    print(f"  Converted {tpa_key} to dtype {dtype}")
-                    
-                    # Set the Linear module on the TPA module
-                    setattr(tpa_module, tpa_key, linear)
-                    print(f"  Created {tpa_key} with shape {linear.weight.shape}")
-                    
-                    # Check for zeros in the weights
-                    is_all_zeros = linear.weight.abs().sum().item() == 0
-                    if is_all_zeros:
-                        print(f"  CRITICAL WARNING: {tpa_key} contains ALL ZEROS - model will not work correctly!")
-                    
-                    # # Log weight statistics
-                    # w_mean = linear.weight.abs().mean().item()
-                    # w_std = linear.weight.std().item()
-                    # w_zero_percent = (linear.weight == 0).float().mean().item() * 100
-                    # print(f"  {tpa_key} stats: mean={w_mean:.8f}, std={w_std:.8f}, zero_percent={w_zero_percent:.2f}%")
-                    #
-            # Mark the TPA module as using factorized weights
-            tpa_module.use_factorized_weights = True
-    
-    # Store layer-specific ranks in config for KV cache creation
-    if layer_ranks:
-        print(f"Storing layer-specific ranks in model config: {layer_ranks}")
-        if not hasattr(config, 'model_structure'):
-            config.model_structure = {}
-        config.model_structure["layer_ranks"] = layer_ranks
-        
-        # Update the model's config to match
-        tpa_model.config = config
-    
+    # --- Final Steps ---
     # Set the tokenizer if available
     if hasattr(standard_model, 'tokenizer'):
         tpa_model.tokenizer = standard_model.tokenizer
-    # print out distro of weights in each layer
-    for name, module in tpa_model.named_modules():
-        if hasattr(module, 'use_factorized_weights') and module.use_factorized_weights:
-            print(f"  Found factorized module: {name}")
-            for key in dir(module):
-                if key.startswith(('W_A_', 'W_B_')):
-                    weight = getattr(module, key)
-                    if hasattr(weight, 'data'):
-                        weight_data = weight.data
-                    elif hasattr(weight, 'weight'):
-                        weight_data = weight.weight
-                    else:
-                        print(f"  Warning: Could not get tensor data for {key}")
-                        continue
-                    # print(f"  {key} weight distribution: {weight_data.abs().mean().item():.4f} mean, {weight_data.abs().std().item():.4f} std")
+        print("  Copied tokenizer.")
+
+    # Optional: Verification step to compare outputs (requires careful input matching)
 
     end_time = time.time()
-    print(f"TPA model creation co5mplete in {end_time - start_time:.2f} seconds")
-    
+    print(f"TPA model creation complete in {end_time - start_time:.2f} seconds")
     return tpa_model
