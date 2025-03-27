@@ -558,6 +558,53 @@ class GemmaModel(nn.Module):
                 raise ValueError(f'Unknown architecture: {config.architecture}')
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Reshapes frequency tensor for broadcasting compatibility with attention tensors.
+
+        Args:
+            freqs_cis: Frequency tensor of shape [sequence_length, dim // 2]
+                       or potentially [1, sequence_length, 1, dim // 2] after unsqueezing.
+                       It's complex-valued.
+            x: Target tensor for broadcasting, e.g., keys or queries, typically with shape
+               [batch_size, sequence_length, num_heads_or_rank, dim] or similar.
+               We primarily need its ndim and sequence length dimension index.
+
+        Returns:
+            Reshaped frequency tensor compatible with x.
+        """
+        ndim = x.ndim
+        assert 1 < ndim
+
+        # freqs_cis starts as [seq_len, dim // 2]
+        # We need to match x's dimensions like [batch, seq_len, heads/rank, dim]
+        # The typical RoPE application broadcasts over batch and heads/rank.
+
+        # Assume seq_len is the first dimension in freqs_cis as computed
+        # Assume seq_len is the second dimension in x (index 1)
+        # This might need adjustment if tensor layouts differ.
+        assert freqs_cis.shape[0] == x.shape[1], \
+            f"Sequence length mismatch: freqs_cis has {freqs_cis.shape[0]}, x has {x.shape[1]}"
+
+        # Target shape needs singleton dimensions for batch and heads/rank
+        # Target shape example: [1, seq_len, 1, dim // 2] to broadcast with [batch, seq_len, heads/rank, dim]
+        # (Note: RoPE operates on the last dim reshaped to pairs, hence dim // 2)
+
+        # Add singleton dim for batch at the beginning
+        freqs_cis_reshaped = freqs_cis.unsqueeze(0) # Shape: [1, seq_len, dim // 2]
+
+        # Add singleton dims for any dimensions between batch/seq_len and the feature dim
+        # In our B_k case, x has shape [batch, seq, rank, head_dim]. ndim=4.
+        # We need singletons for dimensions not present in freqs_cis (batch and rank).
+        # Batch is dim 0 (added above), Seq is dim 1 (matches), Rank is dim 2.
+        if ndim > 3:
+            # Add singleton dims for dimensions 2 to ndim-2 (exclusive of last dim)
+            for _ in range(ndim - 3): # Example: ndim=4 -> range(1) -> add 1 dim at index 2
+                freqs_cis_reshaped = freqs_cis_reshaped.unsqueeze(2)
+                # Shape becomes: [1, seq_len, 1, dim // 2] for ndim=4
+
+        return freqs_cis_reshaped
+
     def forward(
         self,
         hidden_states: torch.Tensor,
