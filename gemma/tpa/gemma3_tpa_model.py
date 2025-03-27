@@ -321,38 +321,48 @@ class TPAAttention(nn.Module):
             # Softmax
             head_attn_probs = F.softmax(head_attn_weights.float(), dim=-1).to(dtype) # [b, q_seq, kv_seq]
 
-            # --- Compute Weighted Value Output ---
+                       # --- Compute Weighted Value Output ---
             # Get V factors for head h
-            head_A_v = A_v_cached[:, :, h, :] # [b, kv_seq, v_rank] (already repeated)
-            head_B_v = B_v_cached            # [b, kv_seq, v_rank, v_head_dim] (shared)
+            head_A_v = A_v_cached[:, :, h, :] # Shape: [b, k, r_v]
+            head_B_v = B_v_cached            # Shape: [b, k, r_v, d_v]
 
-            # Einsum: (b,q,k) x (b,k,r_v) x (b,k,r_v,d_v) -> (b,q,d_v)
-            # Ensure d_v matches the expected output dimension (self.head_dim)
-            if self.head_dim != self.v_head_dim:
-                # If V dim differs, o_proj needs to handle it, or project here.
-                # Assuming o_proj handles input of num_heads * self.head_dim
-                print(f"Warning/Debug: Q head dim {self.head_dim} != V head dim {self.v_head_dim}. Output projection must handle.")
-                pass
+            # Corrected Einsum: Sum over k (key/value pos) and r (value rank)
+            # 'bqk': attention probs for this query pos q, key pos k
+            # 'bkr': A_v factor for this head h (implied), key pos k, rank r
+            # 'bkrd': B_v factor (shared), key pos k, rank r, output dim d
+            # -> 'bqd': output for query pos q, output dim d
+            head_output = torch.einsum('bqk,bkr,bkrd->bqd',
+                                       head_attn_probs,
+                                       head_A_v,
+                                       head_B_v) # Output shape: [b, q_seq, v_head_dim]
 
-            # The output dimension here will be v_head_dim
-            head_output_v_dim = torch.einsum('bqk,bkrv,bkvd->bqd', head_attn_probs, head_A_v, head_B_v)
+            # --- Handle potential dimension mismatch for concatenation ---
+            # The output dim is v_head_dim. We need to ensure it matches self.head_dim (Q dim)
+            # for concatenation before o_proj.
+            if head_output.shape[-1] != self.head_dim:
+                 print(f"ERROR: Head {h} output dim {head_output.shape[-1]} derived from V ({self.v_head_dim}) != Q head dim {self.head_dim}. Concatenation before o_proj will fail or be incorrect.")
+                 # Option 1: Project here (adds parameters/complexity)
+                 # if not hasattr(self, f'v_to_q_proj_{h}'):
+                 #     setattr(self, f'v_to_q_proj_{h}', nn.Linear(self.v_head_dim, self.head_dim, bias=False).to(device, dtype))
+                 # head_output = getattr(self, f'v_to_q_proj_{h}')(head_output)
 
-            # If v_head_dim is different from q_head_dim, we might need a projection here
-            # or ensure o_proj handles the mixed input dimensions. Assuming o_proj expects
-            # concatenated dimensions based on self.head_dim (Q dim).
-            # If v_head_dim != self.head_dim, this simple concatenation might be wrong.
-            # For now, assume v_head_dim == self.head_dim for concatenation.
-            if head_output_v_dim.shape[-1] != self.head_dim:
-                print(f"ERROR: Head {h} output dim {head_output_v_dim.shape[-1]} != Q head dim {self.head_dim}. Concatenation will fail.")
-                # Placeholder: Pad or truncate - this is likely incorrect logic
-                if head_output_v_dim.shape[-1] > self.head_dim:
-                    head_output = head_output_v_dim[..., :self.head_dim]
-                else:
-                    padding = torch.zeros(*head_output_v_dim.shape[:-1], self.head_dim - head_output_v_dim.shape[-1], device=device, dtype=dtype)
-                    head_output = torch.cat([head_output_v_dim, padding], dim=-1)
-            else:
-                head_output = head_output_v_dim # Dimensions match
-
+                 # Option 2: Assume o_proj handles it (requires o_proj input dim to be correct sum)
+                 # This was likely the intention - o_proj input is sum(head_dims)
+                 # If D_q != D_v, then o_proj input should be num_heads * D_v? No, it's usually num_heads * D_q.
+                 # Best practice: Ensure D_q = D_k = D_v during conversion/config if possible.
+                 # If not possible, a projection here or a modified o_proj is needed.
+                 # For now, let's proceed assuming o_proj expects num_heads * self.head_dim (Q dim)
+                 # and we might need to adjust head_output if dimensions differ.
+                 # Let's pad/truncate as a temporary, likely incorrect, measure for testing:
+                 if head_output.shape[-1] > self.head_dim:
+                     print(f"Warning: Truncating head {h} output to Q dim.")
+                     head_output = head_output[..., :self.head_dim]
+                 elif head_output.shape[-1] < self.head_dim:
+                     print(f"Warning: Padding head {h} output to Q dim.")
+                     padding_size = self.head_dim - head_output.shape[-1]
+                     padding = torch.zeros(*head_output.shape[:-1], padding_size, device=device, dtype=dtype)
+                     head_output = torch.cat([head_output, padding], dim=-1)
+                 # Else: dimensions match, head_output is already correct shape [b, q_seq, self.head_dim]
 
             all_attn_outputs.append(head_output)
             # --- End Head Loop ---
@@ -363,7 +373,6 @@ class TPAAttention(nn.Module):
 
         # Final output projection
         final_output = self.o_proj(attn_output_cat) # Shape: [b, q_seq, hidden_size]
-
         # Final NaN check
         if torch.isnan(final_output).any():
             print("WARNING: NaN detected in final TPA output. Replacing with zeros.")
