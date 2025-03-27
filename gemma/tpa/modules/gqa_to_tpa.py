@@ -198,9 +198,11 @@ def gqa_to_tpa_conversion(
     # Determine final ranks to use
     if use_dynamic_ranks:
         # actual_q_rank = min(max_practical_rank, math.floor(q_recommended_rank / 4), max_q_rank)
-        actual_q_rank = 153 # manual override for testing
-        actual_k_rank = min(max_practical_rank, k_recommended_rank, max_k_rank)
-        actual_v_rank = min(max_practical_rank, v_recommended_rank, max_v_rank)
+        actual_q_rank = 96 # manual override for testing
+        # actual_k_rank = min(max_practical_rank, k_recommended_rank, max_k_rank)
+        # actual_v_rank = min(max_practical_rank, v_recommended_rank, max_v_rank)
+        actual_k_rank = 48 # manual override for testing
+        actual_v_rank = 48 # manual override for testing
         print(f"USING OPTIMAL COMPONENT-SPECIFIC RANKS: Q={actual_q_rank}, K={actual_k_rank}, V={actual_v_rank}")
         print(f"These ranks are determined by energy-based analysis to balance accuracy and efficiency")
     else:
