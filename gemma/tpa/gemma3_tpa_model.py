@@ -734,11 +734,10 @@ class GemmaForCausalLMwithSVDTPA(nn.Module):
                 top_ks=topk_tensor,
             ) # Shape [batch_size, 1]
 
-            next_token = next_token.squeeze(1) # Shape [batch_size]
-
             # Update generated tokens, only for sequences that haven't stopped
             next_token = torch.where(stop_generation, torch.tensor(self.tokenizer.pad_id, device=device), next_token)
             all_token_ids[:, current_pos] = next_token
+
             tokens_generated += 1
 
             # Check for EOS and update stop mask
