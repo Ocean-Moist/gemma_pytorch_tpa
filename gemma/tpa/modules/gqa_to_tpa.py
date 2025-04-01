@@ -139,10 +139,12 @@ def compute_svd_tpa_factors(
 
     # --- 8. Compute B_const buffer component (Corresponds to Vh) ---
     # Formula: B_const proportional to sqrt(R) * S_r * Vh_r
-    # Need sqrt(S_r) here for B
-    sqrt_S_r = torch.sqrt(torch.clamp(S_r, min=1e-12)) # Calculate sqrt(S_r) here
-    b_const_buffer_component = sqrt_rank_val * sqrt_S_r.unsqueeze(1) * Vh_r # Shape: [rank, head_dim]
+    # ***** CORRECTION APPLIED HERE *****
+    # Use S_r directly, not sqrt(S_r)
+    b_const_buffer_component = sqrt_rank_val * S_r.unsqueeze(1) * Vh_r # Shape: [rank, head_dim]
+    # Applying S_r.unsqueeze(1) to make S_r [rank, 1] broadcastable with Vh_r [rank, head_dim]
     b_const_buffer_component = b_const_buffer_component.contiguous()
+    # ***** END OF CORRECTION *****
 
     # --- 9. (Optional) Compute and Log Reconstruction Error ---
     # This adds overhead, can be disabled for speed after verification
