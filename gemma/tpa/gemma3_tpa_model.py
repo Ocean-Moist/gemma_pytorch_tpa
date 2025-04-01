@@ -249,22 +249,22 @@ class SVDTPAAttention(nn.Module):
             full_freqs_cis_k = full_freqs_cis[:, :self.k_head_dim // 2]
         freqs_cis_k_step = full_freqs_cis_k.index_select(0, k_pos_indices)
 
-        # !!!!! DEBUG: SKIP RoPE !!!!!
-        print("DEBUG: Skipping RoPE application.")
-        q = q_unrotated # Use unrotated Q
-        k = k_unrotated # Use unrotated K
-        # !!!!! END DEBUG !!!!!
+        # # !!!!! DEBUG: SKIP RoPE !!!!!
+        # print("DEBUG: Skipping RoPE application.")
+        # q = q_unrotated # Use unrotated Q
+        # k = k_unrotated # Use unrotated K
+        # # !!!!! END DEBUG !!!!!
 
-        # # Reshape freqs for broadcast
-        # q_rot = q_unrotated # Shape [b, q_s, h, d_q]
-        # k_rot = k_unrotated # Shape [b, kv_s, h, d_k]
-        # freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
-        # freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
-        #
-        # # Apply RoPE separately
-        # q = apply_rotary_emb(q_rot, freqs_cis_q_b)
-        # k = apply_rotary_emb(k_rot, freqs_cis_k_b)
-        #
+        # Reshape freqs for broadcast
+        q_rot = q_unrotated # Shape [b, q_s, h, d_q]
+        k_rot = k_unrotated # Shape [b, kv_s, h, d_k]
+        freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
+        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
+
+        # Apply RoPE separately
+        q = apply_rotary_emb(q_rot, freqs_cis_q_b)
+        k = apply_rotary_emb(k_rot, freqs_cis_k_b)
+
 
         # --- 7. Optional QK Norm ---
         # (QK Norm logic remains the same)
