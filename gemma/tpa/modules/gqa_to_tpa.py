@@ -514,6 +514,30 @@ def create_tpa_model_from_standard(
         k_rank = k_rank
         v_rank = v_rank
 
+    # ============================================================
+    # <<< INSERT KEY PRINTING CODE HERE >>>
+    # ============================================================
+    print("\n--- Standard Model State Dictionary Keys ---")
+    standard_sd = standard_model.state_dict()
+    standard_keys = list(standard_sd.keys())
+    print(f"Total keys: {len(standard_keys)}")
+    # Print first and last few keys for brevity, or all if needed
+    keys_to_print = 20 # Adjust how many keys to print
+    if len(standard_keys) <= keys_to_print * 2:
+        for key in standard_keys:
+            print(f"  - {key}")
+    else:
+        print("  (Printing first and last few keys...)")
+        for key in standard_keys[:keys_to_print]:
+            print(f"  - {key}")
+        print("  ...")
+        for key in standard_keys[-keys_to_print:]:
+            print(f"  - {key}")
+    print("--- End Standard Model Keys ---\n")
+    # ============================================================
+    # <<< END KEY PRINTING CODE >>>
+    # ============================================================
+    
     # --- 1. Factorize Weights (All Layers) & Update Config ---
     print("Factorizing weights for all layers to determine final config...")
     all_factorized_weights_data = {} # Store factorized data for each layer
