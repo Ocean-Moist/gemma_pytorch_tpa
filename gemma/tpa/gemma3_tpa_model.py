@@ -275,20 +275,19 @@ class SVDTPAAttention(nn.Module):
         k_pos_indices = torch.arange(kv_seq_len, device=device)
         freqs_cis_k_step = freqs_cis_k_full.index_select(0, k_pos_indices)
 
-        # Apply RoPE using gemma_model helper function
-        # Note: gemma_model.apply_rotary_emb expects input shape [b, s, h, d] or similar
-        # and freqs_cis reshaped for broadcast.
-        q_rot = q_unrotated # Shape [b, q_s, h, d] - matches expected
-        k_rot = k_unrotated # Shape [b, kv_s, h, d]
+        # Apply RoPE using gemma_model helper function (called separately)
+        q_rot = q_unrotated # Shape [b, q_s, h, d_q]
+        k_rot = k_unrotated # Shape [b, kv_s, h, d_k]
 
         # Reshape freqs for broadcast
         freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
         freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
 
-        # Apply RoPE
-        q, k = gemma_model.apply_rotary_emb(q_rot, k_rot, freqs_cis_q_b, freqs_cis_k_b)
+        # Apply RoPE separately to Query and Key
+        q = gemma_model.apply_rotary_emb(q_rot, freqs_cis_q_b)
+        k = gemma_model.apply_rotary_emb(k_rot, freqs_cis_k_b)
         # q shape: [b, q_s, h, d_q], k shape: [b, kv_s, h, d_k]
-
+        
         # --- 7. Optional QK Norm (Post-RoPE) ---
         if self.query_norm is not None and self.key_norm is not None:
             q = self.query_norm(q)
