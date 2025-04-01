@@ -149,7 +149,8 @@ class SVDTPAAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            full_freqs_cis: torch.Tensor, # Renamed for clarity
+            # Argument rename to reflect it's the FULL buffer
+            full_freqs_cis: torch.Tensor,
             kv_write_indices: torch.Tensor,
             kv_cache: Optional[Tuple] = None, # Ignored
             mask: Optional[torch.Tensor] = None,
@@ -159,30 +160,16 @@ class SVDTPAAttention(nn.Module):
         device = hidden_states.device
         dtype = hidden_states.dtype
 
-        # --- DEBUG START ---
-        print("\n--- SVDTPAAttention Forward Pass START ---")
-        print(f"Input hidden_states shape: {hidden_states.shape}")
-        print(f"kv_write_indices: {kv_write_indices}")
-        print(f"full_freqs_cis shape: {full_freqs_cis.shape}")
-        print(f"mask shape: {mask.shape if mask is not None else 'None'}")
-        # --- DEBUG END ---
-
         # --- 1. Project A Factors ---
-        A_q_factors = self.W_A_q(hidden_states) # Shape [b, q_s, total_q_rank]
+        # (A factor projection code remains the same)
+        A_q_factors = self.W_A_q(hidden_states)
         A_k = self.W_A_k(hidden_states)
         A_v = self.W_A_v(hidden_states)
         A_k = A_k.view(bsz, q_seq_len, self.num_kv_heads, self.k_rank)
         A_v = A_v.view(bsz, q_seq_len, self.num_kv_heads, self.v_rank)
 
-        # --- DEBUG START ---
-        print(f"\n[1. Project A] Shapes:")
-        print(f"  A_q_factors (raw linear output): {A_q_factors.shape}")
-        print(f"  A_k reshaped: {A_k.shape}")
-        print(f"  A_v reshaped: {A_v.shape}")
-        # --- DEBUG END ---
-
         # --- 2. KV Cache Update ---
-        # (Cache update logic remains the same - Assuming it's correct for now)
+        # (Cache update logic remains the same)
         if kv_write_indices is None: kv_write_indices = torch.arange(q_seq_len, device=device)
         max_cache_len = self.cache_kA.shape[1] if self.cache_kA is not None else 0
         needed_cache_size = kv_write_indices.max().item() + 1 if kv_write_indices.numel() > 0 else q_seq_len
@@ -202,309 +189,150 @@ class SVDTPAAttention(nn.Module):
                 self.cache_vA[:bsz].index_copy_(1, indices_to_use, A_v_to_cache)
 
         # --- 3. Read K/V A-Factors ---
+        # (Read logic remains the same)
         kv_seq_len = needed_cache_size
         kv_seq_len = min(kv_seq_len, max_cache_len)
         A_k_cached = self.cache_kA[:bsz, :kv_seq_len]
         A_v_cached = self.cache_vA[:bsz, :kv_seq_len]
 
-        # --- DEBUG START ---
-        print(f"\n[3. Read A Cache] Shapes:")
-        print(f"  kv_seq_len determined: {kv_seq_len}")
-        print(f"  A_k_cached: {A_k_cached.shape}")
-        print(f"  A_v_cached: {A_v_cached.shape}")
-        # --- DEBUG END ---
-
         # --- 4. GQA Repeat A ---
+        # (Repeat logic remains the same)
         if self.num_kv_heads < self.num_heads:
-            # --- DEBUG START ---
-            print(f"\n[4. GQA Repeat A] Repeating KV heads...")
-            print(f"  Using group_indices: {self.group_indices} (shape: {self.group_indices.shape})")
-            # --- DEBUG END ---
             A_k_repeated = A_k_cached[:, :, self.group_indices, :]
             A_v_repeated = A_v_cached[:, :, self.group_indices, :]
         else:
             A_k_repeated = A_k_cached
             A_v_repeated = A_v_cached
 
-        # --- DEBUG START ---
-        print(f"  A_k_repeated shape: {A_k_repeated.shape}")
-        print(f"  A_v_repeated shape: {A_v_repeated.shape}")
-        # --- DEBUG END ---
-
-        # --- 5. Reconstruct Unrotated Q, K, V ---
-        # --- DEBUG START ---
-        print(f"\n[5. Reconstruct Unrotated QKV] Shapes & Params:")
-        print(f"  Q Reconstruction:")
-        print(f"    A_q_factors shape (input to loop): {A_q_factors.shape}") # Expected [b, q_s, total_q_rank]
-        print(f"    B_const_q buffer shape: {self.B_const_q.shape}")       # Expected [h, q_max_rank, d_q]
-        print(f"    q_head_offsets: {self.q_head_offsets}")
-        print(f"    q_per_head_ranks: {self.q_per_head_ranks}")
-        print(f"    Target Q Head Dim (self.head_dim): {self.head_dim}")
-        # --- DEBUG END ---
+        # --- 5. Reconstruct Q, K, V ---
+        # (Reconstruction logic remains the same)
         q_unrotated_list = []
+        # ... (loop and einsum for q) ...
         for h in range(self.num_heads):
             head_rank = self.q_per_head_ranks[h]
-            if head_rank == 0:
-                # Handle zero rank case gracefully
-                zero_q_head = torch.zeros(bsz, q_seq_len, self.head_dim, device=device, dtype=dtype)
-                q_unrotated_list.append(zero_q_head)
-                # --- DEBUG START ---
-                if h < 2: print(f"    Head {h}: Rank 0, adding zeros.")
-                # --- DEBUG END ---
-                continue
-
+            if head_rank == 0: continue
             start_A_idx = self.q_head_offsets[h]
             end_A_idx = self.q_head_offsets[h+1]
-            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx] # Shape [b, q_s, head_rank]
-            head_B_const_q = self.B_const_q[h, :head_rank, :]   # Shape [head_rank, d_q]
-
-            # --- DEBUG START ---
-            if h < 2: # Print shapes for first few heads
-                print(f"    Head {h}:")
-                print(f"      head_A_q shape: {head_A_q.shape}")
-                print(f"      head_B_const_q shape: {head_B_const_q.shape}")
-                print(f"      Using Rank: {head_rank}")
-            # --- DEBUG END ---
-
-            q_head = torch.einsum('bqr,rd->bqd', head_A_q, head_B_const_q) / head_rank # Output: [b, q_s, d_q]
+            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx]
+            head_B_const_q = self.B_const_q[h, :head_rank, :]
+            q_head = torch.einsum('bqr,rd->bqd', head_A_q, head_B_const_q) / head_rank
             q_unrotated_list.append(q_head)
         if not q_unrotated_list: raise ValueError("No query heads reconstructed.")
-        q_unrotated = torch.stack(q_unrotated_list, dim=2) # Output: [b, q_s, h, d_q]
+        q_unrotated = torch.stack(q_unrotated_list, dim=2)
+        k_unrotated = torch.einsum('bkhr,hrd->bkhd', A_k_repeated, self.B_const_k[self.group_indices]) / self.k_rank
+        v = torch.einsum('bkhr,hrd->bkhd', A_v_repeated, self.B_const_v[self.group_indices]) / self.v_rank
 
-        # --- DEBUG START ---
-        print(f"  K/V Reconstruction:")
-        print(f"    A_k_repeated shape: {A_k_repeated.shape}") # Expected [b, kv_s, h, k_rank]
-        print(f"    A_v_repeated shape: {A_v_repeated.shape}") # Expected [b, kv_s, h, v_rank]
-        # Expand B_const for GQA using group_indices before printing shape
-        B_const_k_expanded = self.B_const_k[self.group_indices] # Expected [h, k_rank, d_k]
-        B_const_v_expanded = self.B_const_v[self.group_indices] # Expected [h, v_rank, d_v]
-        print(f"    B_const_k (expanded) shape: {B_const_k_expanded.shape}")
-        print(f"    B_const_v (expanded) shape: {B_const_v_expanded.shape}")
-        print(f"    Target K Head Dim (self.k_head_dim): {self.k_head_dim}")
-        print(f"    Target V Head Dim (self.v_head_dim): {self.v_head_dim}")
-        print(f"    Using K Rank (self.k_rank): {self.k_rank}")
-        print(f"    Using V Rank (self.v_rank): {self.v_rank}")
-        # --- DEBUG END ---
-
-        # Check for zero ranks before einsum
-        if self.k_rank > 0:
-            k_unrotated = torch.einsum('bkhr,hrd->bkhd', A_k_repeated, B_const_k_expanded) / self.k_rank
-        else:
-            k_unrotated = torch.zeros(bsz, kv_seq_len, self.num_heads, self.k_head_dim, device=device, dtype=dtype)
-            print("    WARNING: K Rank is 0, using zeros.")
-
-        if self.v_rank > 0:
-            v = torch.einsum('bkhr,hrd->bkhd', A_v_repeated, B_const_v_expanded) / self.v_rank
-        else:
-            v = torch.zeros(bsz, kv_seq_len, self.num_heads, self.v_head_dim, device=device, dtype=dtype)
-            print("    WARNING: V Rank is 0, using zeros.")
-
-
-        # --- DEBUG START ---
-        print(f"  Reconstructed shapes:")
-        print(f"    q_unrotated: {q_unrotated.shape}") # Expected [b, q_s, h, d_q]
-        print(f"    k_unrotated: {k_unrotated.shape}") # Expected [b, kv_s, h, d_k]
-        print(f"    v          : {v.shape}")          # Expected [b, kv_s, h, d_v]
-        # --- DEBUG END ---
 
         # --- 6. Apply RoPE (Post-Reconstruction) ---
+        # NOW index the FULL frequency buffer using ABSOLUTE positions
+
         # Indices for the CURRENT input query tokens (absolute positions)
-        # If q_seq_len is 1 (decode), this should just be the single write index
-        if q_seq_len == 1:
-            current_q_pos_indices = kv_write_indices
-        else: # Prefill case
-            current_q_pos_indices = torch.arange(
-                kv_write_indices.min(), kv_write_indices.max() + 1, device=device
-            )
+        current_q_pos_indices = torch.arange(
+            kv_write_indices.min(), kv_write_indices.max() + 1, device=device
+        )
         # Indices for ALL keys/values in the cache (absolute positions)
         k_pos_indices = torch.arange(kv_seq_len, device=device)
 
         # Select frequencies from the FULL buffer using these absolute position indices
+        # Ensure indices are within the bounds of the full buffer
         max_freq_len = full_freqs_cis.shape[0]
         current_q_pos_indices = current_q_pos_indices.clamp(max=max_freq_len - 1)
         k_pos_indices = k_pos_indices.clamp(max=max_freq_len - 1)
 
+        # Index the full buffer passed as argument
         freqs_cis_q_step = full_freqs_cis.index_select(0, current_q_pos_indices)
 
+        # Reshape/slice full_freqs_cis for K dim if needed
         if self.head_dim == self.k_head_dim:
             full_freqs_cis_k = full_freqs_cis
         else:
             full_freqs_cis_k = full_freqs_cis[:, :self.k_head_dim // 2]
         freqs_cis_k_step = full_freqs_cis_k.index_select(0, k_pos_indices)
 
-        # --- DEBUG START ---
-        print(f"\n[6. Apply RoPE] Shapes & Indices:")
-        print(f"  current_q_pos_indices: {current_q_pos_indices}")
-        print(f"  k_pos_indices: {k_pos_indices}")
-        print(f"  freqs_cis_q_step shape: {freqs_cis_q_step.shape}") # Expected [q_s, d_q//2] complex
-        print(f"  freqs_cis_k_step shape: {freqs_cis_k_step.shape}") # Expected [kv_s, d_k//2] complex
-        # --- DEBUG END ---
+        # # !!!!! DEBUG: SKIP RoPE !!!!!
+        # print("DEBUG: Skipping RoPE application.")
+        # q = q_unrotated # Use unrotated Q
+        # k = k_unrotated # Use unrotated K
+        # # !!!!! END DEBUG !!!!!
 
-        # Reshape Q/K before RoPE
-        q_rot_input = q_unrotated # Shape [b, q_s, h, d_q]
-        k_rot_input = k_unrotated # Shape [b, kv_s, h, d_k]
+        # Reshape freqs for broadcast
+        q_rot = q_unrotated # Shape [b, q_s, h, d_q]
+        k_rot = k_unrotated # Shape [b, kv_s, h, d_k]
+        freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
+        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
 
-        # --- DEBUG START ---
-        print(f"  Shapes before apply_rotary_emb:")
-        print(f"    q_rot_input: {q_rot_input.shape}")
-        print(f"    k_rot_input: {k_rot_input.shape}")
-        # --- DEBUG END ---
+        # Apply RoPE separately
+        q = apply_rotary_emb(q_rot, freqs_cis_q_b)
+        k = apply_rotary_emb(k_rot, freqs_cis_k_b)
 
-        # Reshape freqs for broadcast using the *helper* from gemma_model
-        # NOTE: Using the imported helper here
-        try:
-            from ..model import reshape_for_broadcast # Assuming relative import works
-        except ImportError:
-            print("ERROR: Could not import reshape_for_broadcast helper!")
-            # Define a dummy or raise error
-            def reshape_for_broadcast(f, x): return f # No-op if import fails
-
-        freqs_cis_q_b = reshape_for_broadcast(freqs_cis_q_step, q_rot_input)
-        freqs_cis_k_b = reshape_for_broadcast(freqs_cis_k_step, k_rot_input)
-
-        # --- DEBUG START ---
-        print(f"  Shapes after reshape_for_broadcast:")
-        print(f"    freqs_cis_q_b: {freqs_cis_q_b.shape}") # Expected like [1, q_s, 1, d_q//2]
-        print(f"    freqs_cis_k_b: {freqs_cis_k_b.shape}") # Expected like [1, kv_s, 1, d_k//2]
-        # --- DEBUG END ---
-
-        # Apply RoPE using the *helper*
-        # NOTE: Assuming apply_rotary_emb helper takes [b, s, h, d]
-        try:
-            # Use the RoPE function imported or defined in this file's scope
-            q = apply_rotary_emb(q_rot_input, freqs_cis_q_b)
-            k = apply_rotary_emb(k_rot_input, freqs_cis_k_b)
-        except NameError:
-            print("ERROR: apply_rotary_emb function not found!")
-            q = q_rot_input # Skip RoPE if function missing
-            k = k_rot_input
-
-        # --- DEBUG START ---
-        print(f"  Shapes after apply_rotary_emb:")
-        print(f"    q (rotated): {q.shape}")
-        print(f"    k (rotated): {k.shape}")
-        # --- DEBUG END ---
 
         # --- 7. Optional QK Norm ---
-        # (No changes needed here)
+        # (QK Norm logic remains the same)
         if self.query_norm is not None and self.key_norm is not None:
             q = self.query_norm(q)
             k = self.key_norm(k)
 
         # --- 8. Standard Attention Computation ---
-        # Transpose for attention calculation: [b, h, s, d]
+        # (Attention computation remains the same)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-
-        # --- DEBUG START ---
-        print(f"\n[8. Attention Calc] Shapes before matmul:")
-        print(f"  q transposed: {q.shape}") # Expected [b, h, q_s, d_q]
-        print(f"  k transposed: {k.shape}") # Expected [b, h, kv_s, d_k]
-        print(f"  v transposed: {v.shape}") # Expected [b, h, kv_s, d_v]
-        print(f"  Using scaling: {self.scaling}")
-        # --- DEBUG END ---
-
         if q.shape[-1] != k.shape[-1]:
-            # This should ideally not happen if head dims are consistent
-            print(f"ERROR: Q dim {q.shape[-1]} != K dim {k.shape[-1]} in attention calculation!")
-            # Attempt to truncate K to match Q dim for calculation (might be wrong semantically)
-            k = k[..., :q.shape[-1]]
-            print(f"  Attempting fix by truncating K to shape: {k.shape}")
-            # raise ValueError(f"Q dim {q.shape[-1]} != K dim {k.shape[-1]}")
-
+            raise ValueError(f"Q dim {q.shape[-1]} != K dim {k.shape[-1]}")
         attn_scores = torch.matmul(q, k.transpose(2, 3)) * self.scaling
 
+
         # --- Masking, Softcapping ---
-        # --- DEBUG START ---
-        print(f"\n[Masking] Shapes:")
-        print(f"  attn_scores shape: {attn_scores.shape}") # Expected [b, h, q_s, kv_s]
-        # Determine effective mask based on attn_type
-        current_effective_mask = mask # Default to global mask
+        # (Masking/Softcapping logic remains the same, using masks passed down)
         if self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING and self.config.sliding_window_size is not None and local_mask is not None:
-            print(f"  Using LOCAL mask, shape: {local_mask.shape if local_mask is not None else 'None'}")
-            current_effective_mask = local_mask
+            current_effective_mask = local_mask # Already sliced in top-level forward
         else:
-            print(f"  Using GLOBAL mask, shape: {mask.shape if mask is not None else 'None'}")
-        # --- DEBUG END ---
+            current_effective_mask = mask # Already sliced in top-level forward
 
         if current_effective_mask is not None:
-            # Ensure mask dimensions match scores
-            # Mask usually [b, 1, q_s, kv_s] or [b, q_s, kv_s]
-            mask_q_len = current_effective_mask.shape[-2]
-            mask_kv_len = current_effective_mask.shape[-1]
-            score_q_len = attn_scores.shape[-2]
-            score_kv_len = attn_scores.shape[-1]
+            # Add head dim for broadcasting if necessary
+            if current_effective_mask.dim() == 3: # Shape [b, q_s, kv_s]
+                current_effective_mask = current_effective_mask.unsqueeze(1) # -> [b, 1, q_s, kv_s]
 
-            # Slice mask if needed to match current query/key lengths
-            effective_mask_slice = current_effective_mask[..., :score_q_len, :score_kv_len]
-
-            # Add head dimension if mask is [b, q_s, kv_s]
-            if effective_mask_slice.dim() == 3:
-                effective_mask_slice = effective_mask_slice.unsqueeze(1)
-
-            # Check final shapes before adding
-            if attn_scores.shape == effective_mask_slice.shape:
-                attn_scores = attn_scores + effective_mask_slice
-                # --- DEBUG START ---
-                print(f"  Applied mask with shape: {effective_mask_slice.shape}")
-                # --- DEBUG END ---
+            # Check shape before adding
+            if attn_scores.shape[-2:] == current_effective_mask.shape[-2:]: # Compare q_s, kv_s dims
+                attn_scores = attn_scores + current_effective_mask
             else:
-                print(f"  WARNING: Mask shape mismatch! Scores: {attn_scores.shape}, Effective Mask Slice: {effective_mask_slice.shape}. Skipping mask application.")
+                print(f"Warning: Mask shape mismatch during attention. Scores: {attn_scores.shape}, Mask: {current_effective_mask.shape}. Skipping mask.")
+
 
         if getattr(self.config, 'attn_logit_softcapping', None) is not None:
             softcap = self.config.attn_logit_softcapping
             attn_scores = torch.tanh(attn_scores / softcap) * softcap
         attn_probs = F.softmax(attn_scores.float(), dim=-1).to(dtype=dtype)
 
+
         # --- Weighted Value Summation ---
-        # --- DEBUG START ---
-        print(f"\n[Value Sum] Shapes:")
-        print(f"  attn_probs: {attn_probs.shape}") # Expected [b, h, q_s, kv_s]
-        print(f"  v (transposed): {v.shape}")      # Expected [b, h, kv_s, d_v]
-        # --- DEBUG END ---
-        attn_output = torch.matmul(attn_probs, v) # Output: [b, h, q_s, d_v]
+        # (Value summation remains the same)
+        attn_output = torch.matmul(attn_probs, v)
+
 
         # --- 9. Final Projection ---
-        # Transpose back: [b, q_s, h, d_v]
+        # (Final projection logic remains the same, including dim checks/warnings)
         attn_output = attn_output.transpose(1, 2).contiguous()
-
-        # --- DEBUG START ---
-        print(f"\n[9. Final Projection] Shapes:")
-        print(f"  attn_output transposed: {attn_output.shape}")
-        # --- DEBUG END ---
-
-        # Reshape for final linear layer
-        output_expected_input_dim = self.num_heads * self.head_dim # o_proj expects input based on Q dim
-        output_actual_dim = attn_output.shape[-1] * self.num_heads # Actual dim based on V dim
-        attn_output_reshaped = attn_output.view(bsz, q_seq_len, -1) # Shape [b, q_s, h*d_v]
-
-        # --- DEBUG START ---
-        print(f"  attn_output reshaped: {attn_output_reshaped.shape}")
-        print(f"  o_proj input dim expected: {output_expected_input_dim}")
-        print(f"  o_proj layer: {self.o_proj}")
-        # --- DEBUG END ---
-
-        # WARNING: This assumes o_proj input dim matches h*d_v. If d_v != d_q, this WILL fail.
-        # The conversion code should ensure d_v == d_q or handle the o_proj layer appropriately.
-        if attn_output_reshaped.shape[-1] != self.o_proj.in_features:
-            print(f"FATAL ERROR: Dimension mismatch before o_proj! Input has {attn_output_reshaped.shape[-1]}, o_proj expects {self.o_proj.in_features}. Check head_dim vs v_head_dim.")
-            # Pad or truncate (likely incorrect) or raise error
-            # For debugging, let's just raise
-            raise ValueError("Dimension mismatch for o_proj")
-
+        output_expected_dim = self.num_heads * self.head_dim
+        output_actual_dim = self.num_heads * self.v_head_dim
+        if output_actual_dim != output_expected_dim:
+            print(f"ERROR/Warning: Final attention output dim {output_actual_dim} != expected o_proj input {output_expected_dim}.")
+            # Handle mismatch if necessary (e.g., pad/truncate or project)
+            attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_actual_dim) # Might fail o_proj
+        else:
+            attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_expected_dim)
         final_output = self.o_proj(attn_output_reshaped)
 
-        # --- DEBUG START ---
-        print(f"  final_output shape: {final_output.shape}") # Expected [b, q_s, hidden_size]
+
+        # (NaN check remains the same)
         if torch.isnan(final_output).any():
-            print("  WARNING: NaN detected in final SVDTPA output!")
+            print("WARNING: NaN detected in final SVDTPA output. Replacing with zeros.")
             final_output = torch.nan_to_num(final_output, nan=0.0)
-        print("--- SVDTPAAttention Forward Pass END ---")
-        # --- DEBUG END ---
 
         return final_output
-    
+
 class SVDTPADecoderLayer(nn.Module):
     """Gemma decoder layer using SVDTPA attention."""
 
