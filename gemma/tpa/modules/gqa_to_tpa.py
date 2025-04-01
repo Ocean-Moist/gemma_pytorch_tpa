@@ -156,9 +156,9 @@ def compute_svd_tpa_factors(
             if reconstructed.shape == target_weight.shape:
                 # Use float32 for error calculation stability
                 error = torch.norm(target_weight.float() - reconstructed.float()) / torch.norm(target_weight.float())
-                # print(f"  {name} SVD component reconstruction error (rank {rank}): {error.item():.6f}") # Reduced verbosity
+                print(f"  {name} SVD component reconstruction error (rank {rank}): {error.item():.6f}") # Reduced verbosity
             else:
-                # print(f"  Skipping error calculation for {name} due to shape mismatch after adjustments.") # Reduced verbosity
+                print(f"  Skipping error calculation for {name} due to shape mismatch after adjustments.") # Reduced verbosity
                 pass
         except Exception as e:
             print(f"  Error during reconstruction verification for {name}: {e}")
