@@ -84,7 +84,7 @@ from gemma import tokenizer as gemma_tokenizer
 # and gqa_to_tpa.py contains create_tpa_model_from_standard
 try:
     from gemma.tpa.modules.gqa_to_tpa import create_tpa_model_from_standard
-    from gemma.tpa.svdtpa_model import GemmaForCausalLMwithSVDTPA
+    from gemma.tpa.gemma3_tpa_model import GemmaForCausalLMwithSVDTPA
     tpa_modules_available = True
 except ImportError as e:
     print(f"Warning: Could not import SVD-TPA modules: {e}")
