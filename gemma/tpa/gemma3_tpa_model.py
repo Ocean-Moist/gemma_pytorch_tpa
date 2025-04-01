@@ -284,10 +284,10 @@ class SVDTPAAttention(nn.Module):
         freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
 
         # Apply RoPE separately to Query and Key
-        q = gemma_model.apply_rotary_emb(q_rot, freqs_cis_q_b)
-        k = gemma_model.apply_rotary_emb(k_rot, freqs_cis_k_b)
+        q = apply_rotary_emb(q_rot, freqs_cis_q_b)
+        k = apply_rotary_emb(k_rot, freqs_cis_k_b)
         # q shape: [b, q_s, h, d_q], k shape: [b, kv_s, h, d_k]
-        
+
         # --- 7. Optional QK Norm (Post-RoPE) ---
         if self.query_norm is not None and self.key_norm is not None:
             q = self.query_norm(q)
@@ -855,5 +855,38 @@ class GemmaForCausalLMwithSVDTPA(nn.Module):
 
 # Expose helpers needed by external modules like generate
 precompute_freqs_cis = gemma_model.precompute_freqs_cis
-apply_rotary_emb = gemma_model.apply_rotary_emb
+def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    """Applies the rotary embedding to tensors with shape [bsz, seq_len, num_heads, head_dim]."""
+    # x shape: [bsz, seq_len, num_heads, head_dim]
+    # freqs_cis shape: broadcastable, e.g., [1, seq_len, 1, head_dim//2] complex
+
+    # Reshape x to [bsz, seq_len, num_heads, head_dim//2, 2] and convert to complex
+    x_reshaped = x.float().reshape(*x.shape[:-1], -1, 2)
+    x_complex = torch.view_as_complex(x_reshaped)
+    # x_complex shape: [bsz, seq_len, num_heads, head_dim//2]
+
+    # Ensure freqs_cis is broadcastable. Expected shape e.g., [1, seq_len, 1, head_dim//2]
+    # The reshape_for_broadcast helper should handle this.
+    if freqs_cis.shape != (1, x.shape[1], 1, x.shape[-1] // 2) and freqs_cis.shape != (x.shape[1], x.shape[-1] // 2) :
+        # Add specific check for expected broadcast shape or original shape
+        # If it's just [seq_len, dim//2], reshape it here
+        if freqs_cis.shape == (x.shape[1], x.shape[-1] // 2):
+            print("Reshaping freqs_cis inside apply_rotary_emb")
+            freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) # Add batch and head dims
+        # else: # Add more robust shape checking if needed
+        #    print(f"Warning: Unexpected freqs_cis shape {freqs_cis.shape} in apply_rotary_emb")
+
+
+    # Apply rotary embedding through complex multiplication
+    x_rotated_complex = x_complex * freqs_cis
+    # x_rotated_complex shape: [bsz, seq_len, num_heads, head_dim//2]
+
+    # Convert back to real representation
+    x_rotated_real = torch.view_as_real(x_rotated_complex)
+    # x_rotated_real shape: [bsz, seq_len, num_heads, head_dim//2, 2]
+
+    # Reshape back to original head_dim
+    x_out = x_rotated_real.reshape(*x.shape) # Reshape back to [bsz, seq_len, num_heads, head_dim]
+
+    return x_out.type_as(x) # Cast back to original dtype
 reshape_for_broadcast = gemma_model.reshape_for_broadcast
