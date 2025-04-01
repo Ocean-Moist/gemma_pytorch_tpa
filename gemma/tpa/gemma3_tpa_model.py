@@ -257,8 +257,8 @@ class SVDTPAAttention(nn.Module):
         freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
 
         # Apply RoPE separately
-        q = gemma_model.apply_rotary_emb(q_rot, freqs_cis_q_b)
-        k = gemma_model.apply_rotary_emb(k_rot, freqs_cis_k_b)
+        q = apply_rotary_emb(q_rot, freqs_cis_q_b)
+        k = apply_rotary_emb(k_rot, freqs_cis_k_b)
 
 
         # --- 7. Optional QK Norm ---
