@@ -537,7 +537,7 @@ def create_tpa_model_from_standard(
     # ============================================================
     # <<< END KEY PRINTING CODE >>>
     # ============================================================
-    
+
     # --- 1. Factorize Weights (All Layers) & Update Config ---
     print("Factorizing weights for all layers to determine final config...")
     all_factorized_weights_data = {} # Store factorized data for each layer
@@ -611,7 +611,7 @@ def create_tpa_model_from_standard(
 
     # --- 3. Copy Non-Attention Weights ---
     print("Copying non-attention weights...")
-    standard_sd = standard_model.state_dict()
+    standard_sd = standard_model.state_dict() # Already have this from key printing
     tpa_sd = tpa_model.state_dict()
     weights_to_copy = {}
 
@@ -619,15 +619,18 @@ def create_tpa_model_from_standard(
         # Skip original attention projections handled by factorization
         if 'self_attn.' in name and ('qkv_proj' in name or 'o_proj' in name):
             continue
+        # Skip RoPE buffers if present
+        if name in ['local_freqs_cis', 'global_freqs_cis', 'freqs_cis']:
+            continue
 
         # Handle embedder name difference
-        original_embedder_name = 'model.embedder.weight'
+        original_embedder_name = 'embedder.weight' # <<< CORRECTED NAME
         target_embedder_name = 'text_token_embedder.weight' # Name in TPA model
         if name == original_embedder_name:
             if target_embedder_name in tpa_sd:
                 if tpa_sd[target_embedder_name].shape == param.shape:
                     weights_to_copy[target_embedder_name] = param.data.clone().to(dtype=dtype, device=torch_device)
-                    # print(f"  Mapping {name} -> {target_embedder_name}") # Reduced verbosity
+                    print(f"  Mapping {name} -> {target_embedder_name}") # Added print for confirmation
                 else:
                     print(f"  Warning: Shape mismatch for embedder {name} -> {target_embedder_name}. Std: {param.shape}, TPA: {tpa_sd[target_embedder_name].shape}. Skipping.")
             else:
@@ -640,14 +643,17 @@ def create_tpa_model_from_standard(
                 weights_to_copy[name] = param.data.clone().to(dtype=dtype, device=torch_device)
             else:
                 print(f"  Warning: Shape mismatch for {name}. Standard: {param.shape}, TPA: {tpa_sd[name].shape}. Skipping.")
-        # else:
-        #      print(f"  Info: Parameter {name} not found in TPA state_dict.") # Optional: for debugging
+        else:
+            # Add a print here to see which standard keys DON'T exist in the TPA model
+            print(f"  Info: Parameter {name} from standard model not found in TPA state_dict.") # Optional: for debugging
 
     # Load the collected weights
+    print(f"Loading {len(weights_to_copy)} tensors into TPA model...") # Print count before loading
     load_result = tpa_model.load_state_dict(weights_to_copy, strict=False)
-    print(f"  Copied {len(weights_to_copy)} non-attention tensors.")
+    print(f"  Finished loading non-attention tensors.") # Print after
     if load_result.missing_keys:
-        print(f"  Warning: Missing keys in TPA model after loading non-attn weights: {load_result.missing_keys[:5]}...") # Show only first few
+        # This should now ONLY show the TPA-specific weights/buffers
+        print(f"  Expected Missing keys (TPA factors): {load_result.missing_keys[:5]}...") # Show only first few
     if load_result.unexpected_keys:
         print(f"  Warning: Unexpected keys found during loading: {load_result.unexpected_keys[:5]}...")
 
