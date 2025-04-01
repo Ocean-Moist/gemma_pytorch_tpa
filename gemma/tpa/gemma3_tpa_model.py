@@ -702,7 +702,7 @@ class GemmaForCausalLMwithSVDTPA(nn.Module):
             prompts = [prompts]
 
         batch_size = len(prompts)
-        prompt_tokens_list = [self.tokenizer.encode(p, add_bos=True) for p in prompts] # Add BOS
+        prompt_tokens_list = [self.tokenizer.encode(p, bos=True) for p in prompts] # Use 'bos' argument
         min_prompt_len = min(len(p) for p in prompt_tokens_list)
         max_prompt_len = max(len(p) for p in prompt_tokens_list)
         max_seq_len = self.config.max_position_embeddings
