@@ -1,22 +1,20 @@
-###############################################################################
-# gemma3_tpa_model.py
-###############################################################################
+# File: svdtpa_model.py
 """
-Inference-only Gemma model implementation with Tensor Product Attention (TPA).
+Inference-only Gemma model implementation with SVD-based Tensor Product Attention (SVD-TPA / Constant B-Factor TPA).
 """
-
-import gc
-import json
-import os
-from typing import List, Sequence, Tuple, Union, Mapping, Any
 
 import torch
 from torch import nn
+import torch.nn.functional as F
+import math
+from typing import List, Tuple, Union, Mapping, Optional
 
-from .. import model as gemma_model
+# Assuming these imports point to the correct modules relative to this file
+from .. import config as gemma_config
+from .. import model as gemma_model # For helpers like RMSNorm, Embedding, MLP, RoPE
 from .. import tokenizer
 
-
+# Note: RMSNorm is defined below again for self-containment, but could use gemma_model.RMSNorm
 class RMSNorm(nn.Module):
     """RMS Normalization module."""
     def __init__(
@@ -31,381 +29,350 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(dim))
 
     def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        # Compute in float32 for stability
+        return x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float())
+        output = self._norm(x)
+        # Gemma 1 applies weight first, Gemma 2 applies after norm
         if self.add_unit_offset:
+            # Gemma 1 style: scale = 1 + weight
             output = output * (1 + self.weight.float())
         else:
+            # Gemma 2 style: scale = weight
             output = output * self.weight.float()
         return output.type_as(x)
 
 
-import torch
-from torch import nn
-import torch.nn.functional as F
-
-from .. import config as gemma_config
-
-
-class TPAAttention(nn.Module):
+class SVDTPAAttention(nn.Module):
     """
-    Tensor Product Attention (TPA) with factor-only approach and per-head Q factors.
-    Handles GQA and uses factorized KV cache.
+    SVD-based Tensor Product Attention (Constant B-Factor).
+    Caches only A factors, reconstructs Q/K/V using constant B factors, applies RoPE post-reconstruction.
     """
 
     def __init__(self, config: gemma_config.GemmaConfig, attn_type: gemma_config.AttentionType):
         super().__init__()
         self.config = config
-        self.attn_type = attn_type
+        self.attn_type = attn_type # For potential future use (e.g., sliding window mask)
 
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = getattr(config, "num_key_value_heads", self.num_heads)
         self.hidden_size = config.hidden_size
 
-        # Retrieve actual head dimensions (must be set in config after factorization)
-        self.head_dim = getattr(config, 'q_head_dim', config.head_dim) # Primary head dim for Q
+        # --- Retrieve Actual Head Dimensions (Set by conversion) ---
+        self.head_dim = getattr(config, 'q_head_dim', config.head_dim)
         self.k_head_dim = getattr(config, 'k_head_dim', self.head_dim)
         self.v_head_dim = getattr(config, 'v_head_dim', self.head_dim)
 
-        # --- Retrieve TPA ranks and layout info from config ---
-        # These MUST be populated after factorization by create_tpa_model_from_standard
-        default_q_rank = getattr(config, 'q_rank', 6) # Use q_rank as fallback for per-head/max
-        self.q_per_head_ranks = getattr(config, 'q_per_head_ranks', [default_q_rank] * self.num_heads)
-        self.q_max_head_rank = getattr(config, 'q_max_head_rank', default_q_rank)
-        # Calculate offsets based on max_rank if not provided, assuming contiguous layout
-        default_offsets = [i * self.q_max_head_rank for i in range(self.num_heads + 1)]
-        self.q_head_offsets = getattr(config, 'q_head_offsets', default_offsets)
-        self.total_q_rank = sum(self.q_per_head_ranks)
+        # --- Retrieve TPA Ranks and Layout Info (Set by conversion) ---
+        self.q_per_head_ranks = getattr(config, 'q_per_head_ranks', [])
+        self.q_max_head_rank = getattr(config, 'q_max_head_rank', 0)
+        self.q_head_offsets = getattr(config, 'q_head_offsets', [])
+        self.total_q_rank = getattr(config, 'total_q_rank', 0) # Sum of actual per-head ranks used
 
-        self.k_rank = getattr(config, 'k_rank', 2)
-        self.v_rank = getattr(config, 'v_rank', 2)
-        # --- End TPA Info ---
+        self.k_rank = getattr(config, 'k_rank', 0) # Max rank used across K groups
+        self.v_rank = getattr(config, 'v_rank', 0) # Max rank used across V groups
 
-        # optional query/key normalization:
+        if not self.q_per_head_ranks or self.q_max_head_rank == 0 or not self.q_head_offsets or self.total_q_rank == 0 or self.k_rank == 0 or self.v_rank == 0:
+            print("WARNING: SVDTPAAttention initialized with missing rank/offset info in config. "
+                  "Ensure config is updated after factorization.")
+            # Provide minimal defaults to avoid crashing, but model won't work correctly
+            self.q_per_head_ranks = [1] * self.num_heads
+            self.q_max_head_rank = 1
+            self.q_head_offsets = list(range(self.num_heads + 1))
+            self.total_q_rank = self.num_heads
+            self.k_rank = 1
+            self.v_rank = 1
+
+
+        # --- A-Factor Linear Layers ONLY ---
+        # W_A_q projects hidden_state to the concatenated ranks of all Q heads
+        self.W_A_q = nn.Linear(self.hidden_size, self.total_q_rank, bias=False)
+        # W_A_k projects hidden_state to concatenated ranks of all K groups
+        self.W_A_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.k_rank, bias=False)
+        # W_A_v projects hidden_state to concatenated ranks of all V groups
+        self.W_A_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.v_rank, bias=False)
+
+        # --- Constant B-Factor Buffers ONLY ---
+        # These are populated during weight loading from the conversion results
+        self.register_buffer('B_const_q', torch.zeros(self.num_heads, self.q_max_head_rank, self.head_dim))
+        self.register_buffer('B_const_k', torch.zeros(self.num_kv_heads, self.k_rank, self.k_head_dim))
+        self.register_buffer('B_const_v', torch.zeros(self.num_kv_heads, self.v_rank, self.v_head_dim))
+
+        # --- Output Projection ---
+        # Input dim must match concatenated head outputs (num_heads * Q head_dim)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        # --- Optional QK Norm ---
         self.query_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps) # Use Q head dim
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
         self.key_norm = (
-            RMSNorm(self.k_head_dim, eps=config.rms_norm_eps) # Use K head dim
+            RMSNorm(self.k_head_dim, eps=config.rms_norm_eps)
             if getattr(config, 'use_qk_norm', False)
             else None
         )
 
-        # Scaling factor
-        if config.query_pre_attn_scalar is not None:
+        # --- Scaling ---
+        if getattr(config, 'query_pre_attn_scalar', None) is not None:
+            # Gemma 2/3 uses a pre-attention scalar
             self.scaling = (config.query_pre_attn_scalar) ** -0.5
         else:
-            self.scaling = self.head_dim ** -0.5 # Scale by Q head dim
+            # Gemma 1 style scaling
+            self.scaling = self.head_dim ** -0.5
 
-        # --- Define CORRECTLY SIZED Linear layers ---
-        # W_A_q projects to the sum of ranks across all heads
-        self.W_A_q = nn.Linear(self.hidden_size, self.total_q_rank, bias=False)
+        # --- A-Factor Only KV Cache ---
+        self.cache_kA: Optional[torch.Tensor] = None
+        self.cache_vA: Optional[torch.Tensor] = None
 
-        self.W_A_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.k_rank, bias=False)
-        self.W_A_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.v_rank, bias=False)
+        # --- GQA Helpers ---
+        self.heads_per_kv_group = self.num_heads // self.num_kv_heads
+        # Create buffer for group index mapping for efficient repeat_interleave
+        self.register_buffer('group_indices', torch.arange(self.num_kv_heads).repeat_interleave(self.heads_per_kv_group), persistent=False)
 
-        # W_B_q projects to the large layout storing all head-specific B factors
-        # Output dim = num_heads * max_rank_per_head * q_head_dim
-        self.W_B_q_output_dim = self.num_heads * self.q_max_head_rank * self.head_dim
-        self.W_B_q = nn.Linear(self.hidden_size, self.W_B_q_output_dim, bias=False)
 
-        # K and V B-factors use their respective head dimensions and ranks
-        self.W_B_k = nn.Linear(self.hidden_size, self.k_rank * self.k_head_dim, bias=False)
-        self.W_B_v = nn.Linear(self.hidden_size, self.v_rank * self.v_head_dim, bias=False)
-        # --- End Linear Layer Definitions ---
-
-        # Final output projection
-        # Input dim must match concatenated head outputs (num_heads * Q head_dim)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-
-        # Optional attributes
-        self.attn_logit_softcapping = getattr(config, 'attn_logit_softcapping', None)
-        self.sliding_window_size = getattr(config, 'sliding_window_size', None)
-
-        # Factor-only caches: (batch_size, seq_len, #kv_heads, rank or head_dim)
-        self.cache_kA = None
-        self.cache_kB = None
-        self.cache_vA = None
-        self.cache_vB = None
-
-    def _init_kv_cache(self, batch_size, max_seq_len):
-        """Initialize factorized KV cache using correct K/V head dims and ranks."""
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype # Use model's dtype
-
-        # Use actual k/v head dims and ranks
+    def _init_kv_cache(self, batch_size: int, max_seq_len: int, dtype: torch.dtype, device: torch.device):
+        """Initialize factorized KV cache storing only A factors."""
+        # Cache shapes: [batch_size, max_seq_len, num_kv_heads, rank]
         self.cache_kA = torch.zeros((batch_size, max_seq_len, self.num_kv_heads, self.k_rank),
-                                    device=device, dtype=dtype)
-        self.cache_kB = torch.zeros((batch_size, max_seq_len, self.k_rank, self.k_head_dim),
                                     device=device, dtype=dtype)
         self.cache_vA = torch.zeros((batch_size, max_seq_len, self.num_kv_heads, self.v_rank),
                                     device=device, dtype=dtype)
-        self.cache_vB = torch.zeros((batch_size, max_seq_len, self.v_rank, self.v_head_dim),
-                                    device=device, dtype=dtype)
+        # print(f"Initialized SVDTPA KV Cache (A-Factors only): kA={self.cache_kA.shape}, vA={self.cache_vA.shape}")
+
 
     def forward(
             self,
             hidden_states: torch.Tensor,      # [batch_size, q_seq_len, hidden_size]
-            freqs_cis: torch.Tensor,          # [q_seq_len, q_head_dim/2] complex (for Q)
+            freqs_cis: torch.Tensor,          # [q_seq_len, q_head_dim/2] complex (absolute positions)
             kv_write_indices: torch.Tensor,   # [seq_len_in_this_step] cache positions to write
-            kv_cache: Tuple[torch.Tensor, torch.Tensor], # For shape info and compatibility if needed
-            mask: torch.Tensor,               # [batch, 1, q_seq_len, kv_seq_len] causal/padding mask
-            local_mask: torch.Tensor = None,  # Optional: [batch, 1, q_seq_len, kv_seq_len] sliding window
-    ):
+            kv_cache: Optional[Tuple] = None, # Ignore standard kv_cache tuple, we use internal A-cache
+            mask: Optional[torch.Tensor] = None, # [batch, 1, q_seq_len, kv_seq_len] causal/padding mask
+            local_mask: Optional[torch.Tensor] = None, # Optional: [batch, 1, q_seq_len, kv_seq_len] sliding window
+    ) -> torch.Tensor:
         bsz, q_seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        dtype = hidden_states.dtype # Use input dtype
+        dtype = hidden_states.dtype # Use input dtype for computations
 
-        # --- 1. Factor Projections ---
-        # Project hidden states to get the factors for Q, K, V for the current step
-        A_q_factors = self.W_A_q(hidden_states)      # [b, q_seq, total_q_rank]
-        B_q_factors_flat = self.W_B_q(hidden_states) # [b, q_seq, num_heads * max_q_rank * q_head_dim]
-        A_k = self.W_A_k(hidden_states)              # [b, q_seq, num_kv_heads * k_rank]
-        B_k = self.W_B_k(hidden_states)              # [b, q_seq, k_rank * k_head_dim]
-        A_v = self.W_A_v(hidden_states)              # [b, q_seq, num_kv_heads * v_rank]
-        B_v = self.W_B_v(hidden_states)              # [b, q_seq, v_rank * v_head_dim]
+        # --- 1. Project Hidden States to get A Factors ---
+        A_q_factors = self.W_A_q(hidden_states) # [b, q_s, total_q_rank]
+        A_k = self.W_A_k(hidden_states)         # [b, q_s, num_kv_heads * k_rank]
+        A_v = self.W_A_v(hidden_states)         # [b, q_s, num_kv_heads * v_rank]
 
-        # Reshape K, V factors for caching
+        # Reshape K, V A-factors for caching
         A_k = A_k.view(bsz, q_seq_len, self.num_kv_heads, self.k_rank)
-        B_k = B_k.view(bsz, q_seq_len, self.k_rank, self.k_head_dim)
         A_v = A_v.view(bsz, q_seq_len, self.num_kv_heads, self.v_rank)
-        B_v = B_v.view(bsz, q_seq_len, self.v_rank, self.v_head_dim)
 
-        # --- 2. Apply RoPE to K factors BEFORE Caching ---
-        # RoPE for K uses k_head_dim. Reshape freqs_cis if needed (it's based on q_head_dim).
-        if self.head_dim == self.k_head_dim:
-            freqs_cis_k = freqs_cis # Dimensions match
-        else:
-            # Need to regenerate or slice freqs_cis for k_head_dim. Assuming precomputed for q_head_dim.
-            # Simple slice if k_head_dim < head_dim. More complex otherwise.
-            print(f"Warning: RoPE dimension mismatch Q({self.head_dim}) vs K({self.k_head_dim}). Slicing freqs_cis.")
-            freqs_cis_k = freqs_cis[:, :self.k_head_dim // 2] # Slice if precomputed for larger Q dim
-
-        # Reshape freqs_cis_k for broadcasting over rank dim of B_k
-        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k, B_k[:, :, 0, :])
-        B_k = gemma_model.apply_rotary_emb(B_k, freqs_cis_k_b)
-
-        # --- 3. KV Cache Update ---
-        if kv_write_indices is None: # Handle case where indices are not provided (e.g., prefill)
+        # --- 2. KV Cache Update (A-Factors Only) ---
+        if kv_write_indices is None: # Handle prefill case
             kv_write_indices = torch.arange(q_seq_len, device=device)
 
         # Initialize cache if needed
-        if self.cache_kA is None or bsz > self.cache_kA.shape[0]:
-            # Determine max_seq_len (e.g., from config or a known upper bound)
-            max_seq_len = getattr(self.config, 'max_position_embeddings', 2048)
-            if kv_cache is not None and len(kv_cache) > 0 and kv_cache[0] is not None:
-                max_seq_len = max(max_seq_len, kv_cache[0].shape[1]) # Use cache size if larger
-            self._init_kv_cache(bsz, max_seq_len)
+        # Determine max_seq_len (e.g., from config or cache if exists)
+        max_cache_len = self.cache_kA.shape[1] if self.cache_kA is not None else 0
+        needed_cache_size = kv_write_indices.max().item() + 1 if kv_write_indices.numel() > 0 else q_seq_len
+        if self.cache_kA is None or bsz > self.cache_kA.shape[0] or needed_cache_size > max_cache_len:
+            max_seq_len_config = getattr(self.config, 'max_position_embeddings', 2048)
+            new_max_len = max(max_seq_len_config, needed_cache_size, max_cache_len)
+            self._init_kv_cache(bsz, new_max_len, dtype, device)
+            max_cache_len = new_max_len
 
-        # Ensure caches are on the correct device/dtype
-        self.cache_kA = self.cache_kA.to(device=device, dtype=A_k.dtype)
-        self.cache_kB = self.cache_kB.to(device=device, dtype=B_k.dtype)
-        self.cache_vA = self.cache_vA.to(device=device, dtype=A_v.dtype)
-        self.cache_vB = self.cache_vB.to(device=device, dtype=B_v.dtype)
+        # Write current step's A_k, A_v factors to cache
+        # Clamp indices to ensure they are within cache bounds
+        current_kv_write_indices = kv_write_indices.clamp(max=max_cache_len - 1)
+        valid_idx_mask = kv_write_indices < max_cache_len # Mask for which parts of A_k/A_v to actually write
 
-        # Write current step's K/V factors to cache
-        # Ensure indices don't go out of bounds
-        max_cache_len = self.cache_kA.shape[1]
-        valid_indices = kv_write_indices < max_cache_len
-        if not valid_indices.all():
-            print(f"Warning: KV write indices exceed cache size ({max_cache_len}). Clamping.")
-            kv_write_indices = kv_write_indices.clamp(max=max_cache_len - 1)
-            # Only write valid parts if some indices were invalid
-            A_k = A_k[:, valid_indices, :, :]
-            B_k = B_k[:, valid_indices, :, :]
-            A_v = A_v[:, valid_indices, :, :]
-            B_v = B_v[:, valid_indices, :, :]
+        if current_kv_write_indices.numel() > 0:
+            # Select only the valid parts of A_k, A_v corresponding to valid indices
+            A_k_to_cache = A_k[:, valid_idx_mask, :, :]
+            A_v_to_cache = A_v[:, valid_idx_mask, :, :]
+            indices_to_use = current_kv_write_indices[valid_idx_mask]
 
-        if kv_write_indices.numel() > 0: # Only write if there are indices
-            self.cache_kA[:bsz].index_copy_(1, kv_write_indices, A_k)
-            self.cache_kB[:bsz].index_copy_(1, kv_write_indices, B_k)
-            self.cache_vA[:bsz].index_copy_(1, kv_write_indices, A_v)
-            self.cache_vB[:bsz].index_copy_(1, kv_write_indices, B_v)
+            if indices_to_use.numel() > 0:
+                # Use index_copy_ which handles potential non-contiguous indices
+                self.cache_kA[:bsz].index_copy_(1, indices_to_use, A_k_to_cache)
+                self.cache_vA[:bsz].index_copy_(1, indices_to_use, A_v_to_cache)
 
-        # --- 4. Read K/V Factors from Cache ---
-        # Determine the actual sequence length in the cache to attend to
-        kv_seq_len = kv_write_indices.max().item() + 1 if kv_write_indices.numel() > 0 else q_seq_len
-        kv_seq_len = min(kv_seq_len, max_cache_len) # Ensure it doesn't exceed cache size
+        # --- 3. Read K/V A-Factors from Cache ---
+        # Determine the actual sequence length currently stored in the cache
+        kv_seq_len = needed_cache_size
+        kv_seq_len = min(kv_seq_len, max_cache_len) # Don't read beyond cache
 
-        A_k_cached = self.cache_kA[:bsz, :kv_seq_len] # [b, kv_seq, #kv_heads, k_rank]
-        B_k_cached = self.cache_kB[:bsz, :kv_seq_len] # [b, kv_seq, k_rank, k_head_dim]
-        A_v_cached = self.cache_vA[:bsz, :kv_seq_len] # [b, kv_seq, #kv_heads, v_rank]
-        B_v_cached = self.cache_vB[:bsz, :kv_seq_len] # [b, kv_seq, v_rank, v_head_dim]
+        A_k_cached = self.cache_kA[:bsz, :kv_seq_len] # [b, kv_seq, num_kv_heads, k_rank]
+        A_v_cached = self.cache_vA[:bsz, :kv_seq_len] # [b, kv_seq, num_kv_heads, v_rank]
 
-        # --- 5. GQA Handling: Repeat K/V 'A' Factors ---
+        # --- 4. GQA Handling: Repeat Cached K/V 'A' Factors ---
         if self.num_kv_heads < self.num_heads:
-            heads_per_kv = self.num_heads // self.num_kv_heads
-            A_k_cached = A_k_cached.repeat_interleave(heads_per_kv, dim=2) # [b, kv_seq, #heads, k_rank]
-            A_v_cached = A_v_cached.repeat_interleave(heads_per_kv, dim=2) # [b, kv_seq, #heads, v_rank]
-            # B_k_cached and B_v_cached are shared within the group, no repeat needed
+            # Use efficient indexing with precomputed group_indices buffer
+            A_k_repeated = A_k_cached[:, :, self.group_indices, :] # [b, kv_seq, num_heads, k_rank]
+            A_v_repeated = A_v_cached[:, :, self.group_indices, :] # [b, kv_seq, num_heads, v_rank]
+        else:
+            A_k_repeated = A_k_cached # Shape [b, kv_seq, num_heads, k_rank]
+            A_v_repeated = A_v_cached # Shape [b, kv_seq, num_heads, v_rank]
 
-        # --- 6. Per-Head Attention Computation ---
-        all_attn_outputs = []
-        # Reshape freqs_cis for Q (uses q_head_dim)
-        freqs_cis_q = gemma_model.reshape_for_broadcast(freqs_cis, B_q_factors_flat[:, :, :self.head_dim])
+        # --- 5. Reconstruct Q, K, V (using A factors and B_const buffers) ---
 
+        # Reconstruct Q (per head)
+        q_unrotated_list = []
         for h in range(self.num_heads):
-            # --- Get Q factors for head h ---
-            # Slice A_q based on cumulative ranks
+            head_rank = self.q_per_head_ranks[h]
+            if head_rank == 0: continue # Skip if rank is zero for this head
+
+            # Slice A_q factor for this head
             start_A_idx = self.q_head_offsets[h]
             end_A_idx = self.q_head_offsets[h+1]
-            head_rank = self.q_per_head_ranks[h]
-            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx] # [b, q_seq, head_rank]
+            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx] # [b, q_s, head_rank]
 
-            # Slice B_q from the flat tensor using max_rank offset
-            start_B_idx = h * self.q_max_head_rank * self.head_dim
-            # Only take the dimensions corresponding to the actual head_rank
-            end_B_idx = start_B_idx + head_rank * self.head_dim
-            head_B_q_flat = B_q_factors_flat[:, :, start_B_idx:end_B_idx] # [b, q_seq, head_rank * head_dim]
-            # Reshape to add rank dimension
-            head_B_q = head_B_q_flat.view(bsz, q_seq_len, head_rank, self.head_dim) # [b, q_seq, head_rank, q_head_dim]
+            # Slice B_const buffer for this head (up to actual rank used)
+            # B_const_q buffer shape: [num_heads, q_max_head_rank, q_head_dim]
+            head_B_const_q = self.B_const_q[h, :head_rank, :] # [head_rank, q_head_dim]
 
-            # --- Apply RoPE to head_B_q ---
-            # RoPE uses q_head_dim, freqs_cis_q is already prepared
-            head_B_q_rotated = gemma_model.apply_rotary_emb(head_B_q, freqs_cis_q)
+            # Einsum for reconstruction: (b, q_s, r) x (r, d) -> (b, q_s, d)
+            q_head = torch.einsum('bqr,rd->bqd', head_A_q, head_B_const_q) / head_rank
+            q_unrotated_list.append(q_head)
 
-            # --- Get K factors for head h ---
-            # A_k is already repeated for GQA; select the h-th head slice
-            head_A_k = A_k_cached[:, :, h, :] # [b, kv_seq, k_rank]
-            # B_k is shared across the group; use the full B_k_cached
-            # Note: B_k already had RoPE applied before caching
-            head_B_k = B_k_cached            # [b, kv_seq, k_rank, k_head_dim]
+        if not q_unrotated_list:
+            raise ValueError("No query heads were reconstructed (all ranks might be zero).")
 
-            # --- Optional QK Norm ---
-            if self.query_norm is not None and self.key_norm is not None:
-                # Apply norm efficiently if possible, or loop if necessary
-                normed_B_q = torch.stack([self.query_norm(head_B_q_rotated[:,:,r,:]) for r in range(head_rank)], dim=2)
-                normed_B_k = torch.stack([self.key_norm(head_B_k[:,:,r,:]) for r in range(self.k_rank)], dim=2)
+        q_unrotated = torch.stack(q_unrotated_list, dim=2) # [b, q_s, num_heads, q_head_dim]
+
+        # Reconstruct K
+        # B_const_k shape: [num_kv_heads, k_rank, k_head_dim]
+        # We need to map the repeated A_k_repeated heads back to their KV group B_const
+        # A_k_repeated: [b, kv_s, num_heads, k_rank]
+        # B_const_k[self.group_indices]: [num_heads, k_rank, k_head_dim] (indexed buffer)
+        # Einsum: (b, k, h, r) x (h, r, d) -> (b, k, h, d)
+        k_unrotated = torch.einsum('bkhr,hrd->bkhd', A_k_repeated, self.B_const_k[self.group_indices]) / self.k_rank
+
+        # Reconstruct V
+        # B_const_v shape: [num_kv_heads, v_rank, v_head_dim]
+        # A_v_repeated: [b, kv_s, num_heads, v_rank]
+        # B_const_v[self.group_indices]: [num_heads, v_rank, v_head_dim]
+        # Einsum: (b, k, h, r) x (h, r, d) -> (b, k, h, d)
+        v = torch.einsum('bkhr,hrd->bkhd', A_v_repeated, self.B_const_v[self.group_indices]) / self.v_rank
+
+        # --- 6. Apply RoPE (Post-Reconstruction) ---
+        # Reshape freqs_cis for Q dim
+        # freqs_cis has shape [q_seq_len, q_head_dim/2] complex
+        # Need to select indices corresponding to current input positions
+        current_pos_indices = torch.arange(kv_write_indices.min(), kv_write_indices.max() + 1, device=device)
+        freqs_cis_q_step = freqs_cis.index_select(0, current_pos_indices)
+
+        # Reshape freqs_cis for K dim if different
+        if self.head_dim == self.k_head_dim:
+            freqs_cis_k_full = freqs_cis # Use original freqs for K up to kv_seq_len
+        else:
+            # Slice the main freqs_cis buffer for K's dimension
+            print(f"SVDTPA RoPE: Slicing freqs_cis for K dim ({self.k_head_dim} vs Q dim {self.head_dim})")
+            freqs_cis_k_full = freqs_cis[:, :self.k_head_dim // 2]
+
+        # Select K frequencies for the relevant cached positions
+        k_pos_indices = torch.arange(kv_seq_len, device=device)
+        freqs_cis_k_step = freqs_cis_k_full.index_select(0, k_pos_indices)
+
+        # Apply RoPE using gemma_model helper function
+        # Note: gemma_model.apply_rotary_emb expects input shape [b, s, h, d] or similar
+        # and freqs_cis reshaped for broadcast.
+        q_rot = q_unrotated # Shape [b, q_s, h, d] - matches expected
+        k_rot = k_unrotated # Shape [b, kv_s, h, d]
+
+        # Reshape freqs for broadcast
+        freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
+        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
+
+        # Apply RoPE
+        q, k = gemma_model.apply_rotary_emb(q_rot, k_rot, freqs_cis_q_b, freqs_cis_k_b)
+        # q shape: [b, q_s, h, d_q], k shape: [b, kv_s, h, d_k]
+
+        # --- 7. Optional QK Norm (Post-RoPE) ---
+        if self.query_norm is not None and self.key_norm is not None:
+            q = self.query_norm(q)
+            k = self.key_norm(k)
+
+        # --- 8. Standard Attention Computation ---
+        # Transpose for score calculation: q[b, h, q_s, d_q], k[b, h, kv_s, d_k]
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2) # v[b, h, kv_s, d_v]
+
+        # Ensure dimensions match for matmul
+        if q.shape[-1] != k.shape[-1]:
+            raise ValueError(f"Query head dim {q.shape[-1]} != Key head dim {k.shape[-1]} after RoPE/Norm. Cannot compute scores.")
+
+        # Compute scores: (b, h, q_s, d) @ (b, h, d, kv_s) -> (b, h, q_s, kv_s)
+        attn_scores = torch.matmul(q, k.transpose(2, 3)) * self.scaling
+
+        # --- Masking, Softcapping ---
+        if self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING and self.config.sliding_window_size is not None and local_mask is not None:
+            # Select relevant part of local mask
+            current_local_mask = local_mask[:bsz, 0, :q_seq_len, :kv_seq_len].unsqueeze(1) # Add head dim
+            if attn_scores.shape == current_local_mask.shape:
+                attn_scores = attn_scores + current_local_mask
             else:
-                normed_B_q = head_B_q_rotated
-                normed_B_k = head_B_k
+                print(f"Warning: Local mask shape mismatch. Scores: {attn_scores.shape}, Mask: {current_local_mask.shape}. Skipping.")
+        elif mask is not None:
+            # Select relevant part of causal/padding mask
+            current_mask = mask[:bsz, 0, :q_seq_len, :kv_seq_len].unsqueeze(1) # Add head dim
+            if attn_scores.shape == current_mask.shape:
+                attn_scores = attn_scores + current_mask
+            else:
+                print(f"Warning: Causal/Padding mask shape mismatch. Scores: {attn_scores.shape}, Mask: {current_mask.shape}. Skipping.")
 
-            # --- Compute B_dots (inner products of B factors) ---
-            # Einsum: (b, q, r_q, d_q) x (b, k, r_k, d_k) -> (b, q, k, r_q, r_k)
-            # Ensure head dimensions d_q and d_k match or handle mismatch
-            if self.head_dim != self.k_head_dim:
-                # This requires a projection or padding strategy if dims differ.
-                # Assuming dims match based on factorization design.
-                print(f"Warning/Debug: Q head dim {self.head_dim} != K head dim {self.k_head_dim}. Assuming compatibility.")
-                pass
-            head_B_dots = torch.einsum('bqrd,bksd->bqkrs', normed_B_q, normed_B_k) * self.scaling
+        # Softcapping (optional)
+        if getattr(self.config, 'attn_logit_softcapping', None) is not None:
+            softcap = self.config.attn_logit_softcapping
+            attn_scores = torch.tanh(attn_scores / softcap) * softcap
 
-            # --- Compute Attention Scores ---
-            # Einsum: (b,q,r_q) x (b,k,r_k) x (b,q,k,r_q,r_k) -> (b,q,k)
-            head_attn_weights = torch.einsum('bqr,bks,bqkrs->bqk', head_A_q, head_A_k, head_B_dots)
+        # Softmax
+        attn_probs = F.softmax(attn_scores.float(), dim=-1).to(dtype=dtype) # [b, h, q_s, kv_s]
 
-            # --- Masking, Softcapping, Softmax ---
-            if self.attn_logit_softcapping is not None:
-                # Apply softcapping element-wise
-                head_attn_weights = torch.tanh(head_attn_weights / self.attn_logit_softcapping) * self.attn_logit_softcapping
+        # --- Weighted Value Summation ---
+        # (b, h, q_s, kv_s) @ (b, h, kv_s, d_v) -> (b, h, q_s, d_v)
+        attn_output = torch.matmul(attn_probs, v)
 
-            # Determine mask to apply for this head
-            current_mask = None
-            if self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING and self.sliding_window_size is not None and local_mask is not None:
-                # Select the correct kv_seq_len for the mask
-                current_mask = local_mask[:bsz, 0, :q_seq_len, :kv_seq_len]
-            elif mask is not None:
-                current_mask = mask[:bsz, 0, :q_seq_len, :kv_seq_len]
+        # --- 9. Final Projection ---
+        # Transpose and reshape: (b, h, q_s, d_v) -> (b, q_s, h, d_v) -> (b, q_s, h*d_v)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        # Important: Reshape using V's head dim, but o_proj expects input based on Q's head dim
+        output_expected_dim = self.num_heads * self.head_dim
+        output_actual_dim = self.num_heads * self.v_head_dim
 
-            # Apply mask if available
-            if current_mask is not None:
-                if head_attn_weights.shape == current_mask.shape:
-                    head_attn_weights = head_attn_weights + current_mask
-                else:
-                    print(f"Warning: Mask shape mismatch. Attn: {head_attn_weights.shape}, Mask: {current_mask.shape}. Skipping mask.")
+        if output_actual_dim != output_expected_dim:
+            # This indicates Q head dim != V head dim. The o_proj layer was likely
+            # initialized expecting Q head dim. Reshaping directly will be wrong.
+            print(f"ERROR: Final attention output dim {output_actual_dim} (from V) "
+                  f"does not match expected o_proj input dim {output_expected_dim} (from Q).")
+            # Need a strategy: project attn_output to match, or reinitialize o_proj.
+            # For now, attempt reshape and let o_proj potentially fail if sizes mismatch.
+            # A robust solution requires adjusting o_proj or adding a projection.
+            print("WARNING: Attempting reshape, but o_proj might fail due to dim mismatch.")
+            # If possible, resize the output to match o_proj input dim
+            if attn_output.shape[-1] == self.v_head_dim:
+                # Try reshaping assuming o_proj is correct size
+                attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_actual_dim)
+                # If needed, add a projection layer here dynamically (complex)
+                # Or, more simply, ensure q_head_dim == v_head_dim during conversion.
+            else: # Should not happen if einsum is correct
+                raise RuntimeError("Unexpected shape before final reshape.")
 
-            # Softmax
-            head_attn_probs = F.softmax(head_attn_weights.float(), dim=-1).to(dtype) # [b, q_seq, kv_seq]
+        else:
+            # Dimensions match, reshape is safe
+            attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_expected_dim)
 
-                       # --- Compute Weighted Value Output ---
-            # Get V factors for head h
-            head_A_v = A_v_cached[:, :, h, :] # Shape: [b, k, r_v]
-            head_B_v = B_v_cached            # Shape: [b, k, r_v, d_v]
+        final_output = self.o_proj(attn_output_reshaped) # Shape: [b, q_seq, hidden_size]
 
-            # Corrected Einsum: Sum over k (key/value pos) and r (value rank)
-            # 'bqk': attention probs for this query pos q, key pos k
-            # 'bkr': A_v factor for this head h (implied), key pos k, rank r
-            # 'bkrd': B_v factor (shared), key pos k, rank r, output dim d
-            # -> 'bqd': output for query pos q, output dim d
-            head_output = torch.einsum('bqk,bkr,bkrd->bqd',
-                                       head_attn_probs,
-                                       head_A_v,
-                                       head_B_v) # Output shape: [b, q_seq, v_head_dim]
-
-            # --- Handle potential dimension mismatch for concatenation ---
-            # The output dim is v_head_dim. We need to ensure it matches self.head_dim (Q dim)
-            # for concatenation before o_proj.
-            if head_output.shape[-1] != self.head_dim:
-                 print(f"ERROR: Head {h} output dim {head_output.shape[-1]} derived from V ({self.v_head_dim}) != Q head dim {self.head_dim}. Concatenation before o_proj will fail or be incorrect.")
-                 # Option 1: Project here (adds parameters/complexity)
-                 # if not hasattr(self, f'v_to_q_proj_{h}'):
-                 #     setattr(self, f'v_to_q_proj_{h}', nn.Linear(self.v_head_dim, self.head_dim, bias=False).to(device, dtype))
-                 # head_output = getattr(self, f'v_to_q_proj_{h}')(head_output)
-
-                 # Option 2: Assume o_proj handles it (requires o_proj input dim to be correct sum)
-                 # This was likely the intention - o_proj input is sum(head_dims)
-                 # If D_q != D_v, then o_proj input should be num_heads * D_v? No, it's usually num_heads * D_q.
-                 # Best practice: Ensure D_q = D_k = D_v during conversion/config if possible.
-                 # If not possible, a projection here or a modified o_proj is needed.
-                 # For now, let's proceed assuming o_proj expects num_heads * self.head_dim (Q dim)
-                 # and we might need to adjust head_output if dimensions differ.
-                 # Let's pad/truncate as a temporary, likely incorrect, measure for testing:
-                 if head_output.shape[-1] > self.head_dim:
-                     print(f"Warning: Truncating head {h} output to Q dim.")
-                     head_output = head_output[..., :self.head_dim]
-                 elif head_output.shape[-1] < self.head_dim:
-                     print(f"Warning: Padding head {h} output to Q dim.")
-                     padding_size = self.head_dim - head_output.shape[-1]
-                     padding = torch.zeros(*head_output.shape[:-1], padding_size, device=device, dtype=dtype)
-                     head_output = torch.cat([head_output, padding], dim=-1)
-                 # Else: dimensions match, head_output is already correct shape [b, q_seq, self.head_dim]
-
-            all_attn_outputs.append(head_output)
-            # --- End Head Loop ---
-
-        # --- 7. Concatenate Head Outputs & Final Projection ---
-        # Concatenate along the last dimension
-        attn_output_cat = torch.cat(all_attn_outputs, dim=-1) # Shape: [b, q_seq, num_heads * self.head_dim]
-
-        # Final output projection
-        final_output = self.o_proj(attn_output_cat) # Shape: [b, q_seq, hidden_size]
         # Final NaN check
         if torch.isnan(final_output).any():
-            print("WARNING: NaN detected in final TPA output. Replacing with zeros.")
+            print("WARNING: NaN detected in final SVDTPA output. Replacing with zeros.")
             final_output = torch.nan_to_num(final_output, nan=0.0)
 
         return final_output
 
-    def _apply_rotary_emb_to_B(self, B: torch.Tensor, freqs_cis: torch.Tensor):
-        """
-        Factor-only RoPE: apply rotary to each rank slice of B.
-        B shape: [b, seq, rank, head_dim]
-        freqs_cis shape: [seq, head_dim//2].
-        """
-        bsz, seq_len, rank, hd = B.shape
-        if hd % 2 != 0:
-            raise ValueError("Head dim must be even to apply rotary embeddings")
 
-        B_out = torch.zeros_like(B)
-        for t in range(seq_len):
-            freqs = freqs_cis[t]
-            for r in range(rank):
-                b_slice = B[:, t, r, :]
-                b_complex = torch.view_as_complex(b_slice.float().reshape(bsz, -1, 2))
-                b_rotated = b_complex * freqs
-                b_rotated = b_rotated.view(bsz, -1, 2)
-                b_rotated = torch.view_as_real(b_rotated)
-                b_rotated = b_rotated.reshape(bsz, hd)
-                B_out[:, t, r, :] = b_rotated.type_as(B)
-        return B_out
-
-
-class TPADecoderLayer(nn.Module):
-    """Gemma decoder layer using TPA attention."""
+class SVDTPADecoderLayer(nn.Module):
+    """Gemma decoder layer using SVDTPA attention."""
 
     def __init__(
             self,
@@ -414,10 +381,12 @@ class TPADecoderLayer(nn.Module):
     ):
         super().__init__()
         self.attn_type = attn_type
-        self.self_attn = TPAAttention(
+        # Instantiate the corrected SVDTPAAttention
+        self.self_attn = SVDTPAAttention(
             config=config,
             attn_type=self.attn_type,
         )
+        # Use standard MLP and norms from gemma_model
         self.mlp = gemma_model.GemmaMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -427,6 +396,7 @@ class TPADecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
+        # Keep optional norms based on config (Gemma 2/3 style)
         self.pre_feedforward_layernorm = (
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if getattr(config, 'use_pre_ffw_norm', False)
@@ -443,36 +413,43 @@ class TPADecoderLayer(nn.Module):
             hidden_states: torch.Tensor,
             freqs_cis: torch.Tensor,
             kv_write_indices: torch.Tensor,
-            kv_cache: Tuple[torch.Tensor, torch.Tensor],
-            mask: torch.Tensor,
-            local_mask: torch.Tensor,
+            # kv_cache is ignored by SVDTPAAttention, pass None or placeholder
+            kv_cache: Optional[Tuple] = None,
+            mask: torch.Tensor = None,
+            local_mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        # --- Self Attention Block ---
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
+        attn_input = self.input_layernorm(hidden_states)
+        attn_output = self.self_attn(
+            hidden_states=attn_input,
             freqs_cis=freqs_cis,
             kv_write_indices=kv_write_indices,
-            kv_cache=kv_cache,
+            kv_cache=None, # SVDTPAAttention uses internal cache
             mask=mask,
             local_mask=local_mask,
         )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        # Gemma 2/3 Post-Attention LayerNorm style
+        normed_attn_output = self.post_attention_layernorm(attn_output)
+        hidden_states = residual + normed_attn_output # Add residual *after* post-norm
 
+        # --- MLP Block ---
         residual = hidden_states
+        mlp_input = hidden_states
+        # Optional Pre-FFW Norm
         if self.pre_feedforward_layernorm is not None:
-            hidden_states = self.pre_feedforward_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+            mlp_input = self.pre_feedforward_layernorm(mlp_input)
+        mlp_output = self.mlp(mlp_input)
+        # Optional Post-FFW Norm
         if self.post_feedforward_layernorm is not None:
-            hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+            mlp_output = self.post_feedforward_layernorm(mlp_output) # Norm the MLP output
+        hidden_states = residual + mlp_output # Add residual
 
         return hidden_states
 
 
-class TPAModel(nn.Module):
-    """Gemma model with TPA attention."""
+class SVDTPAModel(nn.Module):
+    """Gemma model backbone using SVDTPADecoderLayer."""
 
     def __init__(self, config: gemma_config.GemmaConfig):
         super().__init__()
@@ -481,18 +458,14 @@ class TPAModel(nn.Module):
 
         self.layers = nn.ModuleList()
         for i in range(config.num_hidden_layers):
-            if config.architecture in (
-                    gemma_config.Architecture.GEMMA_2,
-                    gemma_config.Architecture.GEMMA_3,
-            ):
-                attn_type = (
-                    config.attn_types[i % len(config.attn_types)]
-                    if config.attn_types is not None
-                    else gemma_config.AttentionType.GLOBAL
-                )
-                self.layers.append(TPADecoderLayer(config, attn_type))
-            else:
-                raise ValueError(f'Unsupported architecture: {config.architecture}')
+            # Determine attn_type for this layer (Gemma 2/3 logic)
+            attn_type = (
+                config.attn_types[i % len(config.attn_types)]
+                if getattr(config, 'attn_types', None) is not None
+                else gemma_config.AttentionType.GLOBAL
+            )
+            self.layers.append(SVDTPADecoderLayer(config, attn_type))
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -500,17 +473,18 @@ class TPAModel(nn.Module):
             hidden_states: torch.Tensor,
             freqs_cis: Mapping[gemma_config.AttentionType, torch.Tensor],
             kv_write_indices: torch.Tensor,
-            kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-            mask: torch.Tensor,
-            local_mask: torch.Tensor,
+            # kv_caches is ignored, SVDTPA layers manage internal cache
+            kv_caches: Optional[List[Tuple]] = None,
+            mask: Optional[torch.Tensor] = None,
+            local_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,
-                freqs_cis=freqs_cis.get(layer.attn_type),
+                freqs_cis=freqs_cis.get(layer.attn_type), # Pass freqs for the layer's type
                 kv_write_indices=kv_write_indices,
-                kv_cache=kv_caches[i],
+                kv_cache=None, # Pass None, layer ignores it
                 mask=mask,
                 local_mask=local_mask,
             )
@@ -518,137 +492,177 @@ class TPAModel(nn.Module):
         return hidden_states
 
 
-class GemmaForCausalLMwithTPA(nn.Module):
-    """Gemma model for causal language modeling with TPA attention."""
+class GemmaForCausalLMwithSVDTPA(nn.Module):
+    """Top-level Gemma model for causal LM using SVDTPA attention."""
     def __init__(
             self,
             config: gemma_config.GemmaConfig,
     ):
         super().__init__()
-        self.dtype = config.get_dtype()
         self.config = config
+        self.dtype = config.get_dtype() # Get dtype from config helper
         max_seq_len = config.max_position_embeddings
-        head_dim = config.head_dim
+        # Use potentially different head dims from config
+        q_head_dim = getattr(config, 'q_head_dim', config.head_dim)
+        # k_head_dim = getattr(config, 'k_head_dim', config.head_dim) # Not needed directly here
         vocab_size = config.vocab_size
-        self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
+
+        # --- Tokenizer ---
+        # Load tokenizer based on path in config
+        tokenizer_path = getattr(config, 'tokenizer', None)
+        if tokenizer_path and isinstance(tokenizer_path, str):
+            try:
+                self.tokenizer = tokenizer.Tokenizer(tokenizer_path)
+            except FileNotFoundError:
+                print(f"Warning: Tokenizer file not found at {tokenizer_path}. Using placeholder.")
+                # Create a dummy tokenizer or raise error if essential
+                self.tokenizer = None # Or handle appropriately
+        else:
+            print("Warning: Tokenizer path not found in config. Tokenizer not loaded.")
+            self.tokenizer = None
+
+        # --- Embeddings ---
         self.text_token_embedder = gemma_model.Embedding(vocab_size, config.hidden_size, config.quant)
 
-        # Use our TPA model instead of standard GemmaModel
-        self.model = TPAModel(config)
-        self.head_dim = config.head_dim
+        # --- Backbone Model ---
+        self.model = SVDTPAModel(config) # Use the SVDTPA backbone
 
-        self.sampler = gemma_model.Sampler(vocab_size, config)
+        # --- LM Head / Sampler ---
+        # Note: Gemma shares weights between embedding and LM head
+        self.sampler = gemma_model.Sampler(vocab_size, config) # Uses embedding weights
 
-        if config.rope_wave_length is None:
-            raise ValueError('rope_wave_length must be provided for Gemma3.')
-        rope_lengths = config.rope_wave_length
-        defaults = {
-            gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
-            gemma_config.AttentionType.GLOBAL: 10_000,
-        }
-        self._register_freqs_cis('local_freqs_cis', head_dim, max_seq_len,
-                                 theta=rope_lengths.get(
-                                     gemma_config.AttentionType.LOCAL_SLIDING,
-                                     defaults[gemma_config.AttentionType.LOCAL_SLIDING]
-                                 ))
-        self._register_freqs_cis('global_freqs_cis', head_dim, max_seq_len,
-                                 theta=rope_lengths.get(
-                                     gemma_config.AttentionType.GLOBAL,
-                                     defaults[gemma_config.AttentionType.GLOBAL]
-                                 ),
-                                 rope_scaling_factor=config.rope_scaling_factor)
+        # --- Precompute RoPE Frequencies ---
+        # Use Q head dim for RoPE computation
+        rope_head_dim = q_head_dim
+        if config.architecture in (
+                gemma_config.Architecture.GEMMA_2, gemma_config.Architecture.GEMMA_3
+        ):
+            if getattr(config, 'rope_wave_length', None) is None:
+                # Try default theta if wavelength missing
+                print("Warning: rope_wave_length missing in config for Gemma 2/3. Using theta=10000.")
+                config.rope_wave_length = {} # Avoid error below
+
+            rope_lengths = config.rope_wave_length
+            defaults = {
+                gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
+                gemma_config.AttentionType.GLOBAL: 10_000,
+            }
+            # Register potentially different freqs for local/global attention types
+            self._register_freqs_cis('local_freqs_cis', rope_head_dim, max_seq_len,
+                                     theta=rope_lengths.get(gemma_config.AttentionType.LOCAL_SLIDING, defaults[gemma_config.AttentionType.LOCAL_SLIDING]))
+            self._register_freqs_cis('global_freqs_cis', rope_head_dim, max_seq_len,
+                                     theta=rope_lengths.get(gemma_config.AttentionType.GLOBAL, defaults[gemma_config.AttentionType.GLOBAL]),
+                                     rope_scaling_factor=getattr(config, 'rope_scaling_factor', 1))
+        else: # Gemma 1 style
+            self._register_freqs_cis('freqs_cis', rope_head_dim, max_seq_len,
+                                     theta=getattr(config, 'rope_theta', 10000)) # Use rope_theta from config if present
 
     def _register_freqs_cis(
             self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000, rope_scaling_factor: int = 1
     ):
-        self.register_buffer(
-            name,
-            gemma_model.precompute_freqs_cis(head_dim, max_seq_len * 2,
-                                             theta=theta, rope_scaling_factor=rope_scaling_factor)
-        )
+        """Helper to register RoPE frequencies buffer."""
+        try:
+            freqs_cis_data = gemma_model.precompute_freqs_cis(
+                head_dim,
+                max_seq_len * 2, # Precompute longer for potential extrapolation
+                theta=theta,
+                rope_scaling_factor=rope_scaling_factor
+            )
+            self.register_buffer(name, freqs_cis_data)
+            print(f"Registered RoPE buffer '{name}' with shape {freqs_cis_data.shape}")
+        except Exception as e:
+            print(f"ERROR registering RoPE buffer '{name}': {e}")
+            # Register an empty buffer to avoid crashing downstream if init fails
+            self.register_buffer(name, torch.empty(0))
+
 
     @torch.no_grad()
     def forward(self,
                 input_token_ids: torch.Tensor,
-                input_positions: torch.Tensor = None,
-                kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = None,
-                mask: torch.Tensor = None,
-                output_positions: torch.Tensor = None,
-                temperatures: Union[torch.Tensor, None] = None,
-                top_ps: torch.Tensor = None,
-                top_ks: torch.Tensor = None,
-                local_mask: torch.Tensor = None,
-                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+                input_positions: torch.Tensor,
+                kv_write_indices: torch.Tensor, # Indices for THIS step
+                # kv_caches is NOT used by SVDTPA layers, pass None
+                kv_caches: Optional[List[Tuple]] = None,
+                mask: Optional[torch.Tensor] = None,
+                output_positions: Optional[torch.Tensor] = None, # Positions to sample logits from
+                temperatures: Optional[torch.Tensor] = None,
+                top_ps: Optional[torch.Tensor] = None,
+                top_ks: Optional[torch.Tensor] = None,
+                local_mask: Optional[torch.Tensor] = None,
+                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]: # Returns next_tokens, logits
 
-        # Debug printing
-        # print(f"DEBUG TPA FORWARD: input_token_ids shape: {input_token_ids.shape}, device: {input_token_ids.device}")
-        # print(f"DEBUG TPA FORWARD: input_positions: {input_positions}, device: {input_positions.device}")
+        device = input_token_ids.device
 
-        # Ensure freqs_cis buffers on same device
-        if self.local_freqs_cis.device != input_positions.device:
-            self.local_freqs_cis = self.local_freqs_cis.to(input_positions.device)
-            self.global_freqs_cis = self.global_freqs_cis.to(input_positions.device)
+        # --- Prepare RoPE Frequencies ---
+        freqs_cis_map = {}
+        if hasattr(self, 'freqs_cis'): # Gemma 1 style
+            if self.freqs_cis.device != device: self.freqs_cis = self.freqs_cis.to(device)
+            current_freqs_cis = self.freqs_cis.index_select(0, input_positions)
+            freqs_cis_map[gemma_config.AttentionType.GLOBAL] = current_freqs_cis
+            freqs_cis_map[gemma_config.AttentionType.LOCAL_SLIDING] = current_freqs_cis
+        else: # Gemma 2/3 style
+            if hasattr(self, 'local_freqs_cis'):
+                if self.local_freqs_cis.device != device: self.local_freqs_cis = self.local_freqs_cis.to(device)
+                freqs_cis_map[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, input_positions)
+            if hasattr(self, 'global_freqs_cis'):
+                if self.global_freqs_cis.device != device: self.global_freqs_cis = self.global_freqs_cis.to(device)
+                freqs_cis_map[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, input_positions)
 
-        freqs_cis = {}
-        freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, input_positions)
-        freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, input_positions)
-
-        # Move text_token_embedder if needed
-        if hasattr(self.text_token_embedder, 'weight') and self.text_token_embedder.weight.device != input_token_ids.device:
-            self.text_token_embedder = self.text_token_embedder.to(input_token_ids.device)
-
+        # --- Embeddings ---
+        if self.text_token_embedder.weight.device != device:
+            self.text_token_embedder = self.text_token_embedder.to(device)
         hidden_states = self.text_token_embedder(input_token_ids)
-
+        # Normalize embeddings
         normalizer = torch.tensor(self.config.hidden_size ** 0.5,
-                                  dtype=hidden_states.dtype,
-                                  device=hidden_states.device)
+                                  dtype=self.dtype, device=device)
         hidden_states = hidden_states * normalizer
 
-        # We will pass kv_write_indices as input_positions:
-        kv_write_indices = input_positions
+        # --- Adjust Masks for Current Step ---
+        # The mask shape needs to align with the attention scores: [b, h, q_s, kv_s]
+        # q_s is input_token_ids.shape[1]
+        # kv_s is the current cache length = kv_write_indices.max() + 1
+        q_len = input_token_ids.shape[1]
+        kv_len = kv_write_indices.max().item() + 1 if kv_write_indices.numel() > 0 else q_len
 
-        # ----------------------------------------------------------------
-        # FIX: slice or index the last dimension of mask and local_mask
-        # so that their shape matches attn_weights [b, heads, q_len, kv_len].
-        # kv_len is kv_write_indices[-1]+1 if we have new tokens
-        # or 0 if empty. Then the last dimension of mask becomes kv_len.
+        current_mask = None
         if mask is not None:
-            # Typically we already do something like:
-            # mask = mask.index_select(2, input_positions)
-            # but we must also slice the last dim to kv_len:
-            if kv_write_indices.numel() > 0:
-                kv_len = kv_write_indices[-1].item() + 1
-            else:
-                kv_len = 0
-            # shape: [batch, 1, q_len, max_seq_len] -> [batch, 1, q_len, kv_len]
-            mask = mask[..., :kv_len]
+            # Original mask shape: [b, 1, max_s, max_s]
+            # Select for current query positions and key positions
+            current_mask = mask[:, :, :q_len, :kv_len] # Shape [b, 1, q_s, kv_s]
 
+        current_local_mask = None
         if local_mask is not None:
-            if kv_write_indices.numel() > 0:
-                kv_len = kv_write_indices[-1].item() + 1
-            else:
-                kv_len = 0
-            local_mask = local_mask[..., :kv_len]
-        # ----------------------------------------------------------------
+            current_local_mask = local_mask[:, :, :q_len, :kv_len] # Shape [b, 1, q_s, kv_s]
 
-        # Also ensure entire TPA model is on the correct device
-        input_device = input_token_ids.device
-        if next(self.model.parameters()).device != input_device:
-            self.model = self.model.to(input_device)
-            self.sampler = self.sampler.to(input_device)
+        # --- Pass through SVDTPA Backbone ---
+        if next(self.model.parameters()).device != device:
+            self.model = self.model.to(device)
 
         hidden_states = self.model(
             hidden_states=hidden_states,
-            freqs_cis=freqs_cis,
+            freqs_cis=freqs_cis_map, # Pass the map of freqs
             kv_write_indices=kv_write_indices,
-            kv_caches=kv_caches,
-            mask=mask,
-            local_mask=local_mask,
+            kv_caches=None, # Pass None, SVDTPA layers manage internal cache
+            mask=current_mask,
+            local_mask=current_local_mask,
         )
 
+        # --- Sampling ---
         embedder_weight = self.text_token_embedder.weight
         if self.config.quant:
-            embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+            # Dequantize embedding weights for sampler if needed
+            if hasattr(self.text_token_embedder, 'weight_scaler'):
+                embedder_weight = embedder_weight * self.text_token_embedder.weight_scaler.unsqueeze(-1)
+            else:
+                print("Warning: Quantized model missing weight_scaler for embedder.")
+
+        # Ensure sampler is on correct device
+        if next(self.sampler.parameters(), torch.tensor(0)).device != device:
+            self.sampler = self.sampler.to(device)
+
+        # Determine output positions if not provided (sample from the last token)
+        if output_positions is None:
+            output_positions = torch.tensor([q_len - 1], device=device, dtype=torch.long)
 
         next_tokens, logits = self.sampler(
             embedding=embedder_weight,
@@ -658,131 +672,186 @@ class GemmaForCausalLMwithTPA(nn.Module):
             top_ps=top_ps,
             top_ks=top_ks,
         )
-        return next_tokens, logits
+        return next_tokens, logits # Return only next token and logits
 
-    def create_attention_mask(self, input_ids, sequence_length):
-        """
-        Creates a causal attention mask (standard for auto-regressive models).
-        """
-        batch_size = input_ids.shape[0]
-        # Create causal mask
-        mask = torch.tril(torch.ones((batch_size, 1, sequence_length, sequence_length),
-                                     dtype=torch.bool, device=input_ids.device))
-        # Possibly create local mask for sliding window
-        if self.config.sliding_window_size is not None:
-            local_mask = torch.logical_and(
-                mask,
-                torch.triu(
-                    torch.ones((1, 1, sequence_length, sequence_length), dtype=torch.bool, device=input_ids.device),
-                    diagonal=-(self.config.sliding_window_size - 1)
-                )
-            )
-        else:
-            local_mask = None
-        return mask, local_mask
-
+    # --- Keep generate method (needs adaptation if tokenizer is missing) ---
+    @torch.no_grad()
     def generate(
             self,
             prompts: Union[str, Sequence[str]],
             device: Any = None,
-            max_tokens: int = 100,
-            temperature: Union[float, None] = 1.0,
+            max_tokens: int = 100, # Renamed from output_len for clarity
+            temperature: Optional[float] = 1.0,
             top_p: float = 0.95,
             top_k: int = 64,
     ) -> Union[str, Sequence[str]]:
-        # If a single prompt is provided, treat it as a batch of 1.
+        """Generates responses using the SVDTPA model."""
+
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer not loaded. Cannot use generate method.")
+
         if device is None:
             device = next(self.parameters()).device
+        self.to(device) # Ensure model is on the target device
 
-        if isinstance(prompts, str):
+        is_str_prompt = isinstance(prompts, str)
+        if is_str_prompt:
             prompts = [prompts]
-            single_prompt = True
-        else:
-            single_prompt = False
 
         batch_size = len(prompts)
-        prompt_tokens = [self.tokenizer.encode(prompt) for prompt in prompts]
-        min_prompt_len = min(len(p) for p in prompt_tokens)
-        max_prompt_len = max(len(p) for p in prompt_tokens)
-        total_seq_len = max_prompt_len + max_tokens
-        if total_seq_len > self.config.max_position_embeddings:
-            total_seq_len = self.config.max_position_embeddings
-            max_tokens = total_seq_len - max_prompt_len
+        prompt_tokens_list = [self.tokenizer.encode(p, add_bos=True) for p in prompts] # Add BOS
+        min_prompt_len = min(len(p) for p in prompt_tokens_list)
+        max_prompt_len = max(len(p) for p in prompt_tokens_list)
+        max_seq_len = self.config.max_position_embeddings
 
-        boolean_mask, local_boolean_mask = self.create_attention_mask(
-            torch.zeros((batch_size, total_seq_len), dtype=torch.long, device=device),
-            total_seq_len
-        )
-        min_dtype = torch.finfo(self.dtype).min
-        mask_tensor = torch.where(boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device))
-        if local_boolean_mask is not None:
-            local_mask_tensor = torch.where(local_boolean_mask, 0, torch.tensor(min_dtype, dtype=torch.float32, device=device))
-        else:
-            local_mask_tensor = None
+        # --- Input/Output Tensors ---
+        # total_len is the maximum length needed in the cache and output tensor
+        total_len = min(max_seq_len, max_prompt_len + max_tokens)
 
-        kv_caches = []
-        for _ in range(self.config.num_hidden_layers):
-            size = (batch_size, total_seq_len, self.config.num_attention_heads, self.head_dim)
-            dtype = self.config.get_dtype()
-            k_cache = torch.zeros(size=size, dtype=dtype, device=device)
-            v_cache = torch.zeros(size=size, dtype=dtype, device=device)
-            kv_caches.append((k_cache, v_cache))
+        # Stores all generated token IDs (prompt + generation)
+        all_token_ids = torch.full((batch_size, total_len), self.tokenizer.pad_id, dtype=torch.long, device=device)
+        for i, tokens in enumerate(prompt_tokens_list):
+            all_token_ids[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long, device=device)
 
-        input_token_ids_tensor = torch.full((batch_size, min_prompt_len), self.tokenizer.pad_id,
-                                            dtype=torch.int64, device=device)
-        token_ids_tensor = torch.full((batch_size, total_seq_len), self.tokenizer.pad_id,
-                                      dtype=torch.int64, device=device)
+        # --- KV Cache Init ---
+        # SVDTPA Attention layers manage their own cache internally, we don't need to pass explicit caches.
+        # However, we need to clear the internal caches before starting generation.
+        for layer in self.model.layers:
+            if isinstance(layer.self_attn, SVDTPAAttention):
+                layer.self_attn.cache_kA = None
+                layer.self_attn.cache_vA = None
 
-        for i, p in enumerate(prompt_tokens):
-            token_ids_tensor[i, :len(p)] = torch.tensor(p, dtype=torch.long, device=device)
-            input_token_ids_tensor[i, :min_prompt_len] = token_ids_tensor[i, :min_prompt_len]
+        # --- Attention Mask ---
+        # Create a full causal mask up to total_len
+        causal_mask = torch.full((1, 1, total_len, total_len), -torch.inf, device=device, dtype=self.dtype)
+        causal_mask = torch.triu(causal_mask, diagonal=1)
+        # local_mask TBD if needed
 
-        input_positions_tensor = torch.arange(0, min_prompt_len, dtype=torch.int64, device=device)
-        prompt_mask_tensor = token_ids_tensor != self.tokenizer.pad_id
-        curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
-        curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor) if local_mask_tensor is not None else None
-        output_positions_tensor = torch.LongTensor([min_prompt_len - 1]).to(device)
-        temperatures_tensor = None if temperature is None else torch.FloatTensor([temperature] * batch_size).to(device)
-        top_ps_tensor = torch.FloatTensor([top_p] * batch_size).to(device)
-        top_ks_tensor = torch.LongTensor([top_k] * batch_size).to(device)
-        output_index = torch.tensor(min_prompt_len, dtype=torch.int64, device=device)
+        # --- Generation Loop ---
+        tokens_generated = 0
+        input_pos = 0 # Tracks the starting position for the next forward pass
 
-        for i in range(max_tokens):
-            next_token_ids, _ = self(
-                input_token_ids=input_token_ids_tensor,
-                input_positions=input_positions_tensor,
-                kv_caches=kv_caches,
-                mask=curr_mask_tensor,
-                output_positions=output_positions_tensor,
-                temperatures=temperatures_tensor,
-                top_ps=top_ps_tensor,
-                top_ks=top_ks_tensor,
-                local_mask=curr_local_mask_tensor,
+        # Prefill phase
+        if min_prompt_len > 0:
+            prefill_ids = all_token_ids[:, :max_prompt_len]
+            prefill_pos = torch.arange(0, max_prompt_len, device=device)
+            write_indices = prefill_pos
+            output_pos = torch.tensor([max_prompt_len - 1], device=device) # Sample only the last token
+
+            _, _ = self( # Ignore output token during prefill
+                input_token_ids=prefill_ids,
+                input_positions=prefill_pos,
+                kv_write_indices=write_indices,
+                mask=causal_mask[:, :, :max_prompt_len, :max_prompt_len],
+                output_positions=output_pos,
+                temperatures=None, # No sampling needed during prefill
+                top_ps=None,
+                top_ks=None,
             )
+            input_pos = max_prompt_len # Set starting position for decoding
 
-            curr_prompt_mask = prompt_mask_tensor.index_select(1, output_index).squeeze(dim=1)
-            curr_token_ids = token_ids_tensor.index_select(1, output_index).squeeze(dim=1)
-            output_token_ids = torch.where(curr_prompt_mask, curr_token_ids, next_token_ids).unsqueeze(dim=1)
-            token_ids_tensor.index_copy_(1, output_index, output_token_ids)
+        # Decode phase
+        stop_generation = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        for current_pos_offset in range(max_tokens):
+            current_pos = input_pos + current_pos_offset
+            if current_pos >= total_len: break # Stop if we reach max length
 
-            if (output_token_ids == self.tokenizer.eos_id).all():
+            # Prepare inputs for the current step (decode 1 token)
+            decode_input_ids = all_token_ids[:, current_pos-1:current_pos] # Previous token is input
+            decode_pos = torch.tensor([current_pos - 1], device=device)
+            write_indices = decode_pos
+            output_pos = torch.tensor([0], device=device) # We sample from the output of this single step
+
+            # Select the correct mask slice for this step: query=current_pos-1, keys up to current_pos
+            mask_slice = causal_mask[:, :, current_pos-1:current_pos, :current_pos]
+
+            # Prepare sampling parameters
+            temp_tensor = torch.tensor([temperature] * batch_size, device=device) if temperature is not None else None
+            topp_tensor = torch.tensor([top_p] * batch_size, device=device)
+            topk_tensor = torch.tensor([top_k] * batch_size, device=device, dtype=torch.long)
+
+            next_token, _ = self(
+                input_token_ids=decode_input_ids,
+                input_positions=decode_pos,
+                kv_write_indices=write_indices,
+                mask=mask_slice,
+                output_positions=output_pos,
+                temperatures=temp_tensor,
+                top_ps=topp_tensor,
+                top_ks=topk_tensor,
+            ) # Shape [batch_size, 1]
+
+            next_token = next_token.squeeze(1) # Shape [batch_size]
+
+            # Update generated tokens, only for sequences that haven't stopped
+            next_token = torch.where(stop_generation, torch.tensor(self.tokenizer.pad_id, device=device), next_token)
+            all_token_ids[:, current_pos] = next_token
+            tokens_generated += 1
+
+            # Check for EOS and update stop mask
+            stop_generation = stop_generation | (next_token == self.tokenizer.eos_id)
+            if stop_generation.all():
                 break
 
-            input_token_ids_tensor = output_token_ids
-            input_positions_tensor = output_index.unsqueeze(dim=-1)
-            curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
-            curr_local_mask_tensor = local_mask_tensor.index_select(2, input_positions_tensor) if local_mask_tensor is not None else None
-            output_positions_tensor = torch.tensor(0, dtype=torch.int64, device=device)
-            output_index = output_index + 1
-
-        token_ids = token_ids_tensor.tolist()
+        # --- Detokenization ---
         results = []
-        for i, tokens in enumerate(token_ids):
-            prompt_len = len(prompt_tokens[i])
-            output = tokens[prompt_len:prompt_len + max_tokens]
-            if self.tokenizer.eos_id in output:
-                eos_index = output.index(self.tokenizer.eos_id)
-                output = output[:eos_index]
-            results.append(self.tokenizer.decode(output))
+        for i, tokens in enumerate(all_token_ids.tolist()):
+            prompt_len = len(prompt_tokens_list[i])
+            # Extract generated part (after prompt, up to where generation stopped or max_len)
+            start = prompt_len
+            end = min(prompt_len + tokens_generated, total_len)
+            generated_tokens = tokens[start:end]
 
-        return results[0] if single_prompt else results
+            # Trim at EOS if found
+            if self.tokenizer.eos_id in generated_tokens:
+                eos_index = generated_tokens.index(self.tokenizer.eos_id)
+                generated_tokens = generated_tokens[:eos_index]
+
+            results.append(self.tokenizer.decode(generated_tokens))
+
+        return results[0] if is_str_prompt else results
+
+    def load_weights(self, model_path: str):
+        # Standard weight loading logic (copied from gemma_model)
+        # Assumes SVDTPA model state_dict matches saved factorized weights
+        if os.path.isfile(model_path):
+            print(f"Loading SVDTPA weights from single file: {model_path}")
+            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+            if 'model_state_dict' in state_dict: state_dict = state_dict['model_state_dict']
+            load_result = self.load_state_dict(state_dict, strict=False)
+        elif os.path.isdir(model_path):
+            index_path = os.path.join(model_path, 'pytorch_model.bin.index.json')
+            if not os.path.exists(index_path):
+                raise FileNotFoundError(f"Cannot find weights index file in directory: {index_path}")
+            print(f"Loading SVDTPA weights from sharded checkpoint: {model_path}")
+            with open(index_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            shard_files = list(set(index["weight_map"].values()))
+            loaded_keys = set()
+            for shard_file in shard_files:
+                shard_path = os.path.join(model_path, shard_file)
+                state_dict = torch.load(shard_path, map_location="cpu", weights_only=True)
+                load_result = self.load_state_dict(state_dict, strict=False)
+                loaded_keys.update(state_dict.keys())
+                del state_dict
+                gc.collect()
+            # Final check for missing keys after loading all shards
+            all_model_keys = set(self.state_dict().keys())
+            missing_keys = list(all_model_keys - loaded_keys)
+            if missing_keys: load_result.missing_keys.extend(missing_keys) # Add any truly missing keys
+
+        else:
+            raise FileNotFoundError(f"Model path not found: {model_path}")
+
+        # Report loading status
+        if load_result.missing_keys:
+            print(f"Warning: Missing keys during SVDTPA weight loading: {load_result.missing_keys[:10]}...")
+        if load_result.unexpected_keys:
+            print(f"Warning: Unexpected keys during SVDTPA weight loading: {load_result.unexpected_keys[:10]}...")
+        print("SVDTPA weights loaded.")
+
+
+# Expose helpers needed by external modules like generate
+precompute_freqs_cis = gemma_model.precompute_freqs_cis
+apply_rotary_emb = gemma_model.apply_rotary_emb
+reshape_for_broadcast = gemma_model.reshape_for_broadcast
