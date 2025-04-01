@@ -254,7 +254,7 @@ class SVDTPAAttention(nn.Module):
         q = q_unrotated # Use unrotated Q
         k = k_unrotated # Use unrotated K
         # !!!!! END DEBUG !!!!!
-        
+
         # # Reshape freqs for broadcast
         # q_rot = q_unrotated # Shape [b, q_s, h, d_q]
         # k_rot = k_unrotated # Shape [b, kv_s, h, d_k]

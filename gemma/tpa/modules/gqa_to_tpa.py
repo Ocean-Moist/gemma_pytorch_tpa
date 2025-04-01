@@ -148,7 +148,7 @@ def compute_svd_tpa_factors(
 
     # --- 9. (Optional) Compute and Log Reconstruction Error ---
     # This adds overhead, can be disabled for speed after verification
-    verify_recon = False # Set to True to enable verification logging
+    verify_recon = True # Set to True to enable verification logging
     if verify_recon:
         try:
             reconstructed = U_r @ torch.diag(S_r) @ Vh_r
