@@ -131,13 +131,16 @@ def compute_svd_tpa_factors(
     sqrt_rank_val = math.sqrt(rank) if rank > 0 else 1.0
 
     # --- 7. Compute W_A weights component (Corresponds to U) ---
-    # Formula: sqrt(R) * U_r * sqrt(S_r)
-    wa_untransposed = sqrt_rank_val * U_r * sqrt_S_r.unsqueeze(0) # Shape: [hidden_dim, rank]
+    # Formula: W_A^T should be proportional to sqrt(R) * U_r
+    # OLD: wa_untransposed = sqrt_rank_val * U_r * sqrt_S_r.unsqueeze(0) # Incorrect scaling
+    wa_untransposed = sqrt_rank_val * U_r                     # Correct scaling based on derivation
     # Weights for nn.Linear(hidden_dim, rank_or_total_rank) should be [rank_or_total_rank, hidden_dim]
     wa_weights_component = wa_untransposed.t().contiguous() # Shape: [rank, hidden_dim]
 
     # --- 8. Compute B_const buffer component (Corresponds to Vh) ---
-    # Formula: sqrt(R) * sqrt(S_r) * Vh_r (where Vh_r is now [rank, head_dim])
+    # Formula: B_const proportional to sqrt(R) * S_r * Vh_r
+    # Need sqrt(S_r) here for B
+    sqrt_S_r = torch.sqrt(torch.clamp(S_r, min=1e-12)) # Calculate sqrt(S_r) here
     b_const_buffer_component = sqrt_rank_val * sqrt_S_r.unsqueeze(1) * Vh_r # Shape: [rank, head_dim]
     b_const_buffer_component = b_const_buffer_component.contiguous()
 
