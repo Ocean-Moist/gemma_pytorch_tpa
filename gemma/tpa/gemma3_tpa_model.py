@@ -2,12 +2,15 @@
 """
 Inference-only Gemma model implementation with SVD-based Tensor Product Attention (SVD-TPA / Constant B-Factor TPA).
 """
+import gc
+import json
+import os
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 import math
-from typing import List, Tuple, Union, Mapping, Optional
+from typing import List, Tuple, Union, Mapping, Optional, Sequence, Any
 
 # Assuming these imports point to the correct modules relative to this file
 from .. import config as gemma_config
