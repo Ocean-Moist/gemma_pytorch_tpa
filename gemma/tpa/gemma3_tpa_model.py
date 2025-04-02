@@ -195,136 +195,136 @@ class SVDTPAAttention(nn.Module):
         A_k_cached = self.cache_kA[:bsz, :kv_seq_len]
         A_v_cached = self.cache_vA[:bsz, :kv_seq_len]
 
-        # --- 4. GQA Repeat A ---
-        # (Repeat logic remains the same)
-        if self.num_kv_heads < self.num_heads:
-            A_k_repeated = A_k_cached[:, :, self.group_indices, :]
-            A_v_repeated = A_v_cached[:, :, self.group_indices, :]
-        else:
-            A_k_repeated = A_k_cached
-            A_v_repeated = A_v_cached
+        # --- 4. Reconstruct K and V (Per Group - BEFORE RoPE/Repeating) ---
+        # Uses cached A factors and constant B buffers for the specific groups
+        # A_k_cached: [b, kv_s, N_kv, Rk], B_const_k: [N_kv, Rk, Dk] -> k_group: [b, kv_s, N_kv, Dk]
+        k_group_unrotated = torch.einsum('bkgr,grd->bkgd', A_k_cached, self.B_const_k) / self.k_rank
+        # A_v_cached: [b, kv_s, N_kv, Rv], B_const_v: [N_kv, Rv, Dv] -> v_group: [b, kv_s, N_kv, Dv]
+        v_group = torch.einsum('bkgr,grd->bkgd', A_v_cached, self.B_const_v) / self.v_rank
 
-        # --- 5. Reconstruct Q, K, V ---
-        # (Reconstruction logic remains the same)
+        # --- 5. Reconstruct Q (Per Head - BEFORE RoPE) ---
+        # Uses A_q factors projected in this step and constant B_q buffers
         q_unrotated_list = []
-        # ... (loop and einsum for q) ...
         for h in range(self.num_heads):
             head_rank = self.q_per_head_ranks[h]
-            if head_rank == 0: continue
+            if head_rank == 0:
+                # Handle zero rank case if necessary (e.g., append zeros or skip head)
+                # For now, assume ranks are > 0 from conversion
+                q_head = torch.zeros(bsz, q_seq_len, self.head_dim, device=device, dtype=dtype)
+                q_unrotated_list.append(q_head)
+                continue
             start_A_idx = self.q_head_offsets[h]
             end_A_idx = self.q_head_offsets[h+1]
-            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx]
-            head_B_const_q = self.B_const_q[h, :head_rank, :]
+            # A_q_factors shape: [b, q_s, total_q_rank]
+            head_A_q = A_q_factors[:, :, start_A_idx:end_A_idx] # Shape [b, q_s, head_rank]
+            head_B_const_q = self.B_const_q[h, :head_rank, :]    # Shape [head_rank, Dq]
+            # Einsum: [b, q_s, head_rank] x [head_rank, Dq] -> [b, q_s, Dq]
             q_head = torch.einsum('bqr,rd->bqd', head_A_q, head_B_const_q) / head_rank
             q_unrotated_list.append(q_head)
+
         if not q_unrotated_list: raise ValueError("No query heads reconstructed.")
-        q_unrotated = torch.stack(q_unrotated_list, dim=2)
-        k_unrotated = torch.einsum('bkhr,hrd->bkhd', A_k_repeated, self.B_const_k[self.group_indices]) / self.k_rank
-        v = torch.einsum('bkhr,hrd->bkhd', A_v_repeated, self.B_const_v[self.group_indices]) / self.v_rank
+        # Stack along the head dimension
+        q_head_unrotated = torch.stack(q_unrotated_list, dim=2) # Shape [b, q_s, N_h, Dq]
 
+        # --- 6. Apply GQA Repetition (AFTER reconstructing K/V groups) ---
+        # Repeat the *reconstructed* group K/V tensors to match Q heads
+        if self.num_kv_heads < self.num_heads:
+            # k_group_unrotated: [b, kv_s, N_kv, Dk] -> [b, kv_s, N_h, Dk]
+            k_repeated_unrotated = k_group_unrotated.repeat_interleave(self.heads_per_kv_group, dim=2)
+            # v_group: [b, kv_s, N_kv, Dv] -> [b, kv_s, N_h, Dv]
+            v_repeated = v_group.repeat_interleave(self.heads_per_kv_group, dim=2)
+        else:
+            k_repeated_unrotated = k_group_unrotated
+            v_repeated = v_group
 
-        # --- 6. Apply RoPE (Post-Reconstruction) ---
-        # NOW index the FULL frequency buffer using ABSOLUTE positions
-
-        # Indices for the CURRENT input query tokens (absolute positions)
-        current_q_pos_indices = torch.arange(
-            kv_write_indices.min(), kv_write_indices.max() + 1, device=device
-        )
-        # Indices for ALL keys/values in the cache (absolute positions)
+        # --- 7. Apply RoPE (Post-Reconstruction to Q heads and Repeated K) ---
+        # (Frequency calculation and indexing logic remains the same)
+        current_q_pos_indices = torch.arange(kv_write_indices.min(), kv_write_indices.max() + 1, device=device)
         k_pos_indices = torch.arange(kv_seq_len, device=device)
-
-        # Select frequencies from the FULL buffer using these absolute position indices
-        # Ensure indices are within the bounds of the full buffer
         max_freq_len = full_freqs_cis.shape[0]
         current_q_pos_indices = current_q_pos_indices.clamp(max=max_freq_len - 1)
         k_pos_indices = k_pos_indices.clamp(max=max_freq_len - 1)
-
-        # Index the full buffer passed as argument
         freqs_cis_q_step = full_freqs_cis.index_select(0, current_q_pos_indices)
-
-        # Reshape/slice full_freqs_cis for K dim if needed
         if self.head_dim == self.k_head_dim:
             full_freqs_cis_k = full_freqs_cis
         else:
             full_freqs_cis_k = full_freqs_cis[:, :self.k_head_dim // 2]
         freqs_cis_k_step = full_freqs_cis_k.index_select(0, k_pos_indices)
 
-        # # !!!!! DEBUG: SKIP RoPE !!!!!
-        # print("DEBUG: Skipping RoPE application.")
-        # q = q_unrotated # Use unrotated Q
-        # k = k_unrotated # Use unrotated K
-        # # !!!!! END DEBUG !!!!!
-
         # Reshape freqs for broadcast
-        q_rot = q_unrotated # Shape [b, q_s, h, d_q]
-        k_rot = k_unrotated # Shape [b, kv_s, h, d_k]
-        freqs_cis_q_b = gemma_model.reshape_for_broadcast(freqs_cis_q_step, q_rot)
-        freqs_cis_k_b = gemma_model.reshape_for_broadcast(freqs_cis_k_step, k_rot)
+        # Target shapes: q_head_unrotated [b, q_s, h, Dq], k_repeated_unrotated [b, kv_s, h, Dk]
+        freqs_cis_q_b = reshape_for_broadcast(freqs_cis_q_step, q_head_unrotated)
+        freqs_cis_k_b = reshape_for_broadcast(freqs_cis_k_step, k_repeated_unrotated)
 
-        # Apply RoPE separately
-        q = apply_rotary_emb(q_rot, freqs_cis_q_b)
-        k = apply_rotary_emb(k_rot, freqs_cis_k_b)
+        # Apply RoPE using the apply_rotary_emb helper
+        q_final = apply_rotary_emb(q_head_unrotated, freqs_cis_q_b)
+        k_final = apply_rotary_emb(k_repeated_unrotated, freqs_cis_k_b)
+        # V does not get RoPE
+        v_final = v_repeated
 
-
-        # --- 7. Optional QK Norm ---
-        # (QK Norm logic remains the same)
+        # --- 8. Optional QK Norm ---
+        # (QK Norm logic remains the same, applied AFTER RoPE)
         if self.query_norm is not None and self.key_norm is not None:
-            q = self.query_norm(q)
-            k = self.key_norm(k)
+            q_final = self.query_norm(q_final)
+            k_final = self.key_norm(k_final)
 
-        # --- 8. Standard Attention Computation ---
-        # (Attention computation remains the same)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # --- 9. Standard Attention Computation ---
+        # Prepare for matmul: [b, h, seq, dim]
+        q = q_final.transpose(1, 2)   # [b, h, q_s, Dq]
+        k = k_final.transpose(1, 2)   # [b, h, kv_s, Dk]
+        v = v_final.transpose(1, 2)   # [b, h, kv_s, Dv]
+
+        # Check dimensions (especially if Dq != Dk)
         if q.shape[-1] != k.shape[-1]:
-            raise ValueError(f"Q dim {q.shape[-1]} != K dim {k.shape[-1]}")
-        attn_scores = torch.matmul(q, k.transpose(2, 3)) * self.scaling
+            # This case needs handling if head dims differ significantly.
+            # For now, assume Dq == Dk as derived from config.head_dim typically.
+            print(f"Warning: Q dim {q.shape[-1]} != K dim {k.shape[-1]} during attention.")
+            # Might need projection or error here depending on model design
 
+        # Calculate scores
+        attn_scores = torch.matmul(q, k.transpose(2, 3)) * self.scaling # [b, h, q_s, kv_s]
 
         # --- Masking, Softcapping ---
-        # (Masking/Softcapping logic remains the same, using masks passed down)
+        # (Masking/Softcapping logic remains the same)
         if self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING and self.config.sliding_window_size is not None and local_mask is not None:
-            current_effective_mask = local_mask # Already sliced in top-level forward
+            current_effective_mask = local_mask
         else:
-            current_effective_mask = mask # Already sliced in top-level forward
+            current_effective_mask = mask
 
         if current_effective_mask is not None:
-            # Add head dim for broadcasting if necessary
-            if current_effective_mask.dim() == 3: # Shape [b, q_s, kv_s]
-                current_effective_mask = current_effective_mask.unsqueeze(1) # -> [b, 1, q_s, kv_s]
-
-            # Check shape before adding
-            if attn_scores.shape[-2:] == current_effective_mask.shape[-2:]: # Compare q_s, kv_s dims
+            if current_effective_mask.dim() == 3:
+                current_effective_mask = current_effective_mask.unsqueeze(1)
+            if attn_scores.shape[-2:] == current_effective_mask.shape[-2:]:
                 attn_scores = attn_scores + current_effective_mask
             else:
-                print(f"Warning: Mask shape mismatch during attention. Scores: {attn_scores.shape}, Mask: {current_effective_mask.shape}. Skipping mask.")
-
+                # This might happen if q_seq_len or kv_seq_len mismatch mask dims
+                print(f"Warning: Mask shape mismatch during attention. Scores: {attn_scores.shape}, Mask: {current_effective_mask.shape}. Check slicing in top-level forward. Skipping mask.")
 
         if getattr(self.config, 'attn_logit_softcapping', None) is not None:
             softcap = self.config.attn_logit_softcapping
             attn_scores = torch.tanh(attn_scores / softcap) * softcap
-        attn_probs = F.softmax(attn_scores.float(), dim=-1).to(dtype=dtype)
-
+        attn_probs = F.softmax(attn_scores.float(), dim=-1).to(dtype=dtype) # [b, h, q_s, kv_s]
 
         # --- Weighted Value Summation ---
-        # (Value summation remains the same)
+        # Matmul: [b, h, q_s, kv_s] @ [b, h, kv_s, Dv] -> [b, h, q_s, Dv]
         attn_output = torch.matmul(attn_probs, v)
 
-
-        # --- 9. Final Projection ---
-        # (Final projection logic remains the same, including dim checks/warnings)
+        # --- 10. Final Projection ---
+        # Reshape back: [b, q_s, h, Dv]
         attn_output = attn_output.transpose(1, 2).contiguous()
-        output_expected_dim = self.num_heads * self.head_dim
-        output_actual_dim = self.num_heads * self.v_head_dim
-        if output_actual_dim != output_expected_dim:
-            print(f"ERROR/Warning: Final attention output dim {output_actual_dim} != expected o_proj input {output_expected_dim}.")
-            # Handle mismatch if necessary (e.g., pad/truncate or project)
-            attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_actual_dim) # Might fail o_proj
-        else:
-            attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_expected_dim)
-        final_output = self.o_proj(attn_output_reshaped)
+        # Check if output dim (Dv) matches expected input for o_proj (Dq)
+        output_proj_input_dim = self.num_heads * self.head_dim # Expected by o_proj based on Q dim
+        output_actual_dim = self.num_heads * self.v_head_dim   # Actual dim based on V
+        attn_output_reshaped = attn_output.view(bsz, q_seq_len, output_actual_dim)
 
+        if output_actual_dim != output_proj_input_dim:
+            # This indicates Dq != Dv, which might be intentional or an error.
+            # Standard Gemma usually has Dq=Dv=Dk=head_dim.
+            # If they differ, o_proj might need adjustment or this indicates a config issue.
+            print(f"Warning: Attention output dim ({output_actual_dim}) doesn't match o_proj input dim ({output_proj_input_dim}). Check head dimensions (Dq vs Dv).")
+            # If Dv != Dq, o_proj will likely fail here unless its in_features is output_actual_dim
+
+        final_output = self.o_proj(attn_output_reshaped) # Assumes o_proj matches output_actual_dim
 
         # (NaN check remains the same)
         if torch.isnan(final_output).any():
