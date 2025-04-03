@@ -265,6 +265,7 @@ class SVDTPAAttention(nn.Module):
         # Temporarily don't use rope
         q_final = q_head_unrotated
         k_final = k_repeated_unrotated
+        v_final = v_repeated
 
         # --- 8. Optional QK Norm ---
         # (QK Norm logic remains the same, applied AFTER RoPE)
