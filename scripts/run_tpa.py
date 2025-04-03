@@ -231,6 +231,9 @@ def main(_):
         standard_model.load_weights(FLAGS.ckpt) # Use the model's loading method
         standard_model = standard_model.to(torch_device).eval() # Move to device AFTER loading
         print("Standard GQA model loaded.")
+        if getattr(model_config, 'use_qk_norm', False):
+            print(">>> WARNING: Loaded TPA config has use_qk_norm=True. Overriding to False. <<<")
+            model_config.use_qk_norm = False
 
         # Perform conversion using create_tpa_model_from_standard
         print("Converting GQA model to SVD-TPA format...")
