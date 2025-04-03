@@ -282,6 +282,9 @@ def main(_):
                 model_config = checkpoint['config']
                 # Ensure tokenizer path is set if loading only weights
                 model_config.tokenizer = getattr(model_config, 'tokenizer', FLAGS.tokenizer_path)
+                if getattr(model_config, 'use_qk_norm', False):
+                    print(">>> WARNING: Loaded TPA config has use_qk_norm=True. Overriding to False. <<<")
+                    model_config.use_qk_norm = False
 
                 # Instantiate the SVD-TPA model
                 model = GemmaForCausalLMwithSVDTPA(model_config)
