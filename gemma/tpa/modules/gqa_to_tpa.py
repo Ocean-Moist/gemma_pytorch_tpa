@@ -580,6 +580,17 @@ def create_tpa_model_from_standard(
         )
         all_factorized_weights_data[attn_module_name] = factorized_data
 
+        # VERIFICATION: Print key rank configurations for each layer
+        layer_config = factorized_data['Config_Updates']
+        print(f"\n  === LAYER {i} RANK VERIFICATION ====")
+        print(f"  q_per_head_ranks = {layer_config['q_per_head_ranks']}")
+        print(f"  q_head_offsets = {layer_config['q_head_offsets']}")
+        print(f"  q_max_head_rank = {layer_config['q_max_head_rank']}")
+        print(f"  total_q_rank = {layer_config['total_q_rank']}")
+        print(f"  k_rank = {layer_config['k_rank']}")
+        print(f"  v_rank = {layer_config['v_rank']}")
+        print(f"  === END LAYER {i} VERIFICATION ===\n")
+
         # Store config updates from the first layer's factorization results
         if i == 0:
             representative_layer_data = factorized_data['Config_Updates']
@@ -710,6 +721,26 @@ def create_tpa_model_from_standard(
 
             # Store necessary config updates directly onto the module instance for inference
             config_updates = factor_data['Config_Updates']
+            
+            # VERIFICATION: Compare layer-specific ranks with global config ranks
+            layer_index = int(attn_module_name.split('.')[2])  # Extract layer index from module name
+            print(f"\n  === LAYER {layer_index} WEIGHT LOADING VERIFICATION ====")
+            print(f"  Module: {attn_module_name}")
+            print(f"  Layer-specific q_per_head_ranks = {config_updates['q_per_head_ranks']}")
+            print(f"  Layer-specific q_head_offsets = {config_updates['q_head_offsets']}")
+            print(f"  Layer-specific q_max_head_rank = {config_updates['q_max_head_rank']}")
+            print(f"  Layer-specific total_q_rank = {config_updates['total_q_rank']}")
+            print(f"  Layer-specific k_rank = {config_updates['k_rank']}")
+            print(f"  Layer-specific v_rank = {config_updates['v_rank']}")
+            print(f"  Global config q_per_head_ranks = {config.q_per_head_ranks}")
+            print(f"  Global config q_head_offsets = {config.q_head_offsets}")
+            print(f"  Global config q_max_head_rank = {config.q_max_head_rank}")
+            print(f"  Global config total_q_rank = {config.total_q_rank}")
+            print(f"  Global config k_rank = {config.k_rank}")
+            print(f"  Global config v_rank = {config.v_rank}")
+            print(f"  === END LAYER {layer_index} WEIGHT LOADING VERIFICATION ===\n")
+            
+            # Assign the values to the module
             tpa_module.q_per_head_ranks = config_updates['q_per_head_ranks']
             tpa_module.q_max_head_rank = config_updates['q_max_head_rank']
             tpa_module.q_head_offsets = config_updates['q_head_offsets']
