@@ -171,7 +171,9 @@ def main(_):
     np.random.seed(FLAGS.seed)
     torch.manual_seed(FLAGS.seed)
     torch_device = torch.device(FLAGS.device)
-    compute_dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
+    # compute_dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
+    # temporary fix for dtype
+    compute_dtype = torch.float32
 
     print(f"Using device: {torch_device}, Compute dtype: {compute_dtype}")
     print(f"Running Gemma variant: {FLAGS.variant}")
