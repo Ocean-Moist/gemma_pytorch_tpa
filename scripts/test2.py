@@ -447,7 +447,7 @@ def main(_):
     print(f"Settings: temp={FLAGS.temperature}, top_p={FLAGS.top_p}, top_k={FLAGS.top_k}, max_tokens={FLAGS.output_len}")
 
     # Use the standard GQA generate method
-    with _set_default_tensor_type(gqa_model_reconstructed.dtype): # Use model's compute dtype
+    with _set_default_tensor_type(compute_dtype): # Use model's compute dtype
         generate_start_time = time()
         try:
             # Use the generate method from gemma_model.py
