@@ -297,7 +297,7 @@ def main(_):
     print(f"Loading SVD-TPA model checkpoint from {FLAGS.tpa_ckpt}...")
     try:
         # Load to CPU first to avoid device mismatches during inspection
-        checkpoint = torch.load(FLAGS.tpa_ckpt, map_location='cpu')
+        checkpoint = torch.load(FLAGS.tpa_ckpt, map_location='cpu', weights_only=False)
         if 'config' not in checkpoint or 'model_state_dict' not in checkpoint:
             raise ValueError("TPA Checkpoint must contain 'config' and 'model_state_dict'.")
 
