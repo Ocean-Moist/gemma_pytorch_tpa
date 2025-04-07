@@ -256,16 +256,16 @@ class SVDTPAAttention(nn.Module):
         freqs_cis_q_b = reshape_for_broadcast(freqs_cis_q_step, q_head_unrotated)
         freqs_cis_k_b = reshape_for_broadcast(freqs_cis_k_step, k_repeated_unrotated)
 
-        # Apply RoPE using the apply_rotary_emb helper
-        q_final = apply_rotary_emb(q_head_unrotated, freqs_cis_q_b)
-        k_final = apply_rotary_emb(k_repeated_unrotated, freqs_cis_k_b)
-        # V does not get RoPE
-        v_final = v_repeated
-
-        # # Temporarily don't use rope
-        # q_final = q_head_unrotated
-        # k_final = k_repeated_unrotated
+        # # Apply RoPE using the apply_rotary_emb helper
+        # q_final = apply_rotary_emb(q_head_unrotated, freqs_cis_q_b)
+        # k_final = apply_rotary_emb(k_repeated_unrotated, freqs_cis_k_b)
+        # # V does not get RoPE
         # v_final = v_repeated
+
+        # Temporarily don't use rope
+        q_final = q_head_unrotated
+        k_final = k_repeated_unrotated
+        v_final = v_repeated
 
         # --- 8. Optional QK Norm ---
         # (QK Norm logic remains the same, applied AFTER RoPE)
