@@ -431,46 +431,6 @@ def main(_):
         original_gqa_state_dict = original_gqa_state_dict['model_state_dict']
     print("Original GQA weights loaded.")
 
-    # --- 3c. Compare Reconstructed vs. Original Weights ---
-    print("\nComparing Reconstructed GQA Weights to Original GQA Weights...")
-    comparison_results = {}
-    atol = 1e-5 # Adjust tolerance as needed for float32/bfloat16
-    rtol = 1e-4
-
-    for i in range(gqa_config.num_hidden_layers):
-        layer_prefix = f"model.layers.{i}.self_attn."
-        qkv_key = f"{layer_prefix}qkv_proj.weight"
-        o_key = f"{layer_prefix}o_proj.weight"
-
-        if qkv_key in new_gqa_state_dict and qkv_key in original_gqa_state_dict:
-            orig_w = original_gqa_state_dict[qkv_key].to(torch_device, dtype=compute_dtype)
-            recon_w = new_gqa_state_dict[qkv_key].to(torch_device, dtype=compute_dtype)
-
-            if orig_w.shape != recon_w.shape:
-                print(f"  Layer {i} QKV: Shape Mismatch! Orig: {orig_w.shape}, Recon: {recon_w.shape}")
-                continue
-
-            are_close = torch.allclose(orig_w, recon_w, atol=atol, rtol=rtol)
-            max_abs_diff = torch.max(torch.abs(orig_w - recon_w)).item()
-            mean_abs_diff = torch.mean(torch.abs(orig_w - recon_w)).item()
-            rel_frob_diff = (torch.norm(orig_w - recon_w) / (torch.norm(orig_w) + 1e-9)).item()
-
-            comparison_results[f"Layer_{i}_QKV"] = {
-                'allclose': are_close,
-                'max_abs_diff': max_abs_diff,
-                'mean_abs_diff': mean_abs_diff,
-                'rel_frob_diff': rel_frob_diff
-            }
-            print(f"  Layer {i} QKV: allclose={are_close}, max_abs_diff={max_abs_diff:.2e}, mean_abs_diff={mean_abs_diff:.2e}, rel_frob_diff={rel_frob_diff:.2e}")
-        else:
-            print(f"  Layer {i} QKV: Key missing in original or reconstructed dict.")
-
-        # Compare o_proj (should be identical if copied correctly)
-        if o_key in new_gqa_state_dict and o_key in original_gqa_state_dict:
-            orig_o = original_gqa_state_dict[o_key].to(torch_device, dtype=compute_dtype)
-            recon_o = new_gqa_state_dict[o_key].to(torch_device, dtype=compute_dtype)
-            if not torch.equal(orig_o, recon_o):
-                print(f"  Layer {i} O_PROJ: MISMATCH! Weights differ after copying.")
     # --- 3c. Copy NON-ATTENTION weights first ---
     print("Copying non-attention weights (MLP, Norms, Embeddings)...")
     for name, param in original_gqa_state_dict.items():
@@ -536,6 +496,48 @@ def main(_):
                 print(f"    ERROR: Shape mismatch for O_Proj key {o_key} between original and target GQA model.")
         else:
             print(f"    ERROR: Original O_Proj key {o_key} not found in original state dict.")
+
+    # --- 3c. Compare Reconstructed vs. Original Weights ---
+    print("\nComparing Reconstructed GQA Weights to Original GQA Weights...")
+    comparison_results = {}
+    atol = 1e-5 # Adjust tolerance as needed for float32/bfloat16
+    rtol = 1e-4
+
+    for i in range(gqa_config.num_hidden_layers):
+        layer_prefix = f"model.layers.{i}.self_attn."
+        qkv_key = f"{layer_prefix}qkv_proj.weight"
+        o_key = f"{layer_prefix}o_proj.weight"
+
+        if qkv_key in new_gqa_state_dict and qkv_key in original_gqa_state_dict:
+            orig_w = original_gqa_state_dict[qkv_key].to(torch_device, dtype=compute_dtype)
+            recon_w = new_gqa_state_dict[qkv_key].to(torch_device, dtype=compute_dtype)
+
+            if orig_w.shape != recon_w.shape:
+                print(f"  Layer {i} QKV: Shape Mismatch! Orig: {orig_w.shape}, Recon: {recon_w.shape}")
+                continue
+
+            are_close = torch.allclose(orig_w, recon_w, atol=atol, rtol=rtol)
+            max_abs_diff = torch.max(torch.abs(orig_w - recon_w)).item()
+            mean_abs_diff = torch.mean(torch.abs(orig_w - recon_w)).item()
+            rel_frob_diff = (torch.norm(orig_w - recon_w) / (torch.norm(orig_w) + 1e-9)).item()
+
+            comparison_results[f"Layer_{i}_QKV"] = {
+                'allclose': are_close,
+                'max_abs_diff': max_abs_diff,
+                'mean_abs_diff': mean_abs_diff,
+                'rel_frob_diff': rel_frob_diff
+            }
+            print(f"  Layer {i} QKV: allclose={are_close}, max_abs_diff={max_abs_diff:.2e}, mean_abs_diff={mean_abs_diff:.2e}, rel_frob_diff={rel_frob_diff:.2e}")
+        else:
+            print(f"  Layer {i} QKV: Key missing in original or reconstructed dict.")
+
+        # Compare o_proj (should be identical if copied correctly)
+        if o_key in new_gqa_state_dict and o_key in original_gqa_state_dict:
+            orig_o = original_gqa_state_dict[o_key].to(torch_device, dtype=compute_dtype)
+            recon_o = new_gqa_state_dict[o_key].to(torch_device, dtype=compute_dtype)
+            if not torch.equal(orig_o, recon_o):
+                print(f"  Layer {i} O_PROJ: MISMATCH! Weights differ after copying.")
+
     # --- 4. Load Reconstructed Weights into GQA Model ---
     print("\nLoading reconstructed weights into standard GQA model...")
     load_rec_start = time()
