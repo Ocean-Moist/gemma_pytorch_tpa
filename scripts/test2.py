@@ -336,6 +336,10 @@ def main(_):
     with _set_default_tensor_type(compute_dtype):
         gqa_model_reconstructed = gemma_model.GemmaForCausalLM(gqa_config)
         gqa_model_reconstructed = gqa_model_reconstructed.to(device=torch_device).eval()
+
+    gqa_config.use_qk_norm = False
+    print(f"Explicitly set use_qk_norm={gqa_config.use_qk_norm} for reconstructed GQA model.")
+
     print("Standard GQA model structure created.")
 
     # --- 3. Reconstruct Weights and Build New State Dict ---
