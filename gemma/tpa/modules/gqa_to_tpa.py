@@ -465,21 +465,22 @@ def split_combined_qkv_weights(combined_qkv: torch.Tensor, config) -> tuple[torc
 
 # ----- Main function to create TPA model from standard -----
 def create_tpa_model_from_standard(
-        standard_model,
-        q_rank: int = 6,  # Default TPA ranks (can be overridden)
+        standard_model: gemma_model.GemmaForCausalLM,
+        q_rank: int = 6,
         k_rank: int = 2,
         v_rank: int = 2,
-        dtype=torch.float16,
-        device="cuda",
-        use_dynamic_ranks=True,
-        fat_ranks=False # Added fat_ranks flag
-):
+        dtype: torch.dtype = torch.float16, # Use torch.dtype directly
+        device: str = "cuda",
+        use_dynamic_ranks: bool = True,
+        fat_ranks: bool = False
+) -> GemmaForCausalLMwithSVDTPA:
     """
     Creates a GemmaForCausalLMwithSVDTPA model from a standard GemmaForCausalLM.
 
     Performs factorization using gqa_to_tpa_conversion, updates the config,
-    instantiates the SVDTPA model, copies non-attention weights, and loads
-    the factorized weights (W_A weights and B_const buffers).
+    instantiates the SVDTPA model, copies non-attention weights (incl. o_proj),
+    and loads the factorized weights (W_A weights and B_const buffers) along
+    with layer-specific rank info onto each TPA module instance.
 
     Args:
         standard_model: A GemmaForCausalLM model to convert.
@@ -488,8 +489,8 @@ def create_tpa_model_from_standard(
         v_rank: Base rank for value factorization.
         dtype: Data type for the final TPA model parameters.
         device: Device for computation and the final model.
-        use_dynamic_ranks: Whether to use dynamic ranks based on SVD.
-        fat_ranks: If True, overrides ranks with potentially larger values (e.g., 240).
+        use_dynamic_ranks: Allow conversion to dynamically determine ranks via SVD.
+        fat_ranks: Use larger fixed ranks (e.g., 240) during conversion.
 
     Returns:
         A new GemmaForCausalLMwithSVDTPA model instance.
@@ -500,268 +501,209 @@ def create_tpa_model_from_standard(
 
     if not hasattr(standard_model, 'config'):
         raise ValueError("Standard model must have a 'config' attribute.")
-    config = standard_model.config
-    # Ensure essential attrs exist for conversion and TPA model init
+
+    # --- 0. Clone Config and Prepare ---
+    # Clone the config to avoid modifying the original standard_model's config
+    config = standard_model.config.__class__(**vars(standard_model.config))
+
+    # Ensure essential attrs exist
     config.num_attention_heads = getattr(config, 'num_attention_heads', 4)
     config.num_key_value_heads = getattr(config, 'num_key_value_heads', config.num_attention_heads)
     config.hidden_size = getattr(config, 'hidden_size', 1152)
     config.head_dim = getattr(config, 'head_dim', config.hidden_size // config.num_attention_heads)
+    # Make sure tokenizer path is present
+    config.tokenizer = getattr(config, 'tokenizer', 'tokenizer/tokenizer.model')
 
-    # Override ranks if fat_ranks is True
+    # Determine target ranks
     if fat_ranks:
         print("Using FAT ranks (e.g., 240) for factorization.")
-        q_rank = 240
-        k_rank = 240
-        v_rank = 240
+        target_q_rank, target_k_rank, target_v_rank = 240, 240, 240
     else:
-        # Use provided or default ranks
-        q_rank = q_rank
-        k_rank = k_rank
-        v_rank = v_rank
+        target_q_rank, target_k_rank, target_v_rank = q_rank, k_rank, v_rank
 
-    # ============================================================
-    # <<< INSERT KEY PRINTING CODE HERE >>>
-    # ============================================================
     print("\n--- Standard Model State Dictionary Keys ---")
     standard_sd = standard_model.state_dict()
-    standard_keys = list(standard_sd.keys())
-    print(f"Total keys: {len(standard_keys)}")
-    # Print first and last few keys for brevity, or all if needed
-    keys_to_print = 20 # Adjust how many keys to print
-    if len(standard_keys) <= keys_to_print * 2:
-        for key in standard_keys:
-            print(f"  - {key}")
-    else:
-        print("  (Printing first and last few keys...)")
-        for key in standard_keys[:keys_to_print]:
-            print(f"  - {key}")
-        print("  ...")
-        for key in standard_keys[-keys_to_print:]:
-            print(f"  - {key}")
+    # ... (key printing logic - unchanged) ...
     print("--- End Standard Model Keys ---\n")
-    # ============================================================
-    # <<< END KEY PRINTING CODE >>>
-    # ============================================================
 
-    # --- 1. Factorize Weights (All Layers) & Update Config ---
-    print("Factorizing weights for all layers to determine final config...")
-    all_factorized_weights_data = {} # Store factorized data for each layer
-    representative_layer_data = None # Store data from first layer for config
+    # --- 1. Factorize Weights (All Layers) & Collect Layer-Specific Data ---
+    print("Factorizing weights for all layers...")
+    all_factorized_weights_data = {} # Store factorized data {attn_module_name: factor_data}
+    first_layer_config_updates = None
 
     num_layers = config.num_hidden_layers
     for i in range(num_layers):
         layer_name = f"model.layers.{i}"
         attn_module_name = f"{layer_name}.self_attn"
-        try:
-            module = standard_model.get_submodule(attn_module_name)
-            if not (hasattr(module, "qkv_proj") and hasattr(module, "o_proj")):
-                print(f" Skipping layer {i}: Attention module structure not recognized.")
-                continue
-        except AttributeError:
-            print(f" Skipping layer {i}: Could not find attention module {attn_module_name}.")
+        qkv_proj_key = f"{attn_module_name}.qkv_proj.weight"
+        o_proj_key = f"{attn_module_name}.o_proj.weight"
+
+        # Check if weights exist in standard model state dict
+        if qkv_proj_key not in standard_sd or o_proj_key not in standard_sd:
+            print(f" Skipping layer {i}: Weights not found in standard_model state_dict.")
             continue
 
         print(f"  Factorizing layer {i}...")
-        # Split QKV weights
-        q_weight, k_weight, v_weight = split_combined_qkv_weights(module.qkv_proj.weight, config)
-        o_weight = module.o_proj.weight # o_weight is not factorized by this function
+        qkv_weight = standard_sd[qkv_proj_key]
+        o_weight = standard_sd[o_proj_key] # Needed for factor_data but not factored itself
 
-        # Perform factorization
-        # Use float32 during factorization for precision, convert final factors to target dtype
-        factorized_data = gqa_to_tpa_conversion(
+        try:
+            q_weight, k_weight, v_weight = split_combined_qkv_weights(qkv_weight, config)
+        except Exception as e:
+            print(f"  ERROR splitting QKV for layer {i}: {e}")
+            continue
+
+        # Perform factorization (compute in float32 for precision)
+        factor_data = gqa_to_tpa_conversion(
             q_weight, k_weight, v_weight, o_weight,
             config.num_attention_heads,
             config.num_key_value_heads,
-            q_rank, k_rank, v_rank, # Pass target ranks
-            dtype=torch.float32,    # Compute factors in float32
+            target_q_rank, target_k_rank, target_v_rank,
+            dtype=torch.float32, # Compute factors in float32
             device=device,
             use_dynamic_ranks=use_dynamic_ranks,
             config=config,
         )
-        all_factorized_weights_data[attn_module_name] = factorized_data
+        all_factorized_weights_data[attn_module_name] = factor_data
 
-        # VERIFICATION: Print key rank configurations for each layer
-        layer_config = factorized_data['Config_Updates']
-        print(f"\n  === LAYER {i} RANK VERIFICATION ====")
-        print(f"  q_per_head_ranks = {layer_config['q_per_head_ranks']}")
-        print(f"  q_head_offsets = {layer_config['q_head_offsets']}")
-        print(f"  q_max_head_rank = {layer_config['q_max_head_rank']}")
-        print(f"  total_q_rank = {layer_config['total_q_rank']}")
-        print(f"  k_rank = {layer_config['k_rank']}")
-        print(f"  v_rank = {layer_config['v_rank']}")
-        print(f"  === END LAYER {i} VERIFICATION ===\n")
-
-        # Store config updates from the first layer's factorization results
+        # Store config updates from the first layer for model instantiation
         if i == 0:
-            representative_layer_data = factorized_data['Config_Updates']
-            print(f"  Representative Config Updates from Layer 0:")
-            for key, value in representative_layer_data.items():
-                setattr(config, key, value)
-                # Shorten list prints for readability
-                if isinstance(value, list) and len(value) > 10:
-                    print(f"    config.{key} = [{value[0]}, ..., {value[-1]}] (len={len(value)})")
-                else:
-                    print(f"    config.{key} = {value}")
+            first_layer_config_updates = factor_data['Config_Updates']
+            print(f"  Using Layer 0 factorization results for global config:")
+            for key, value in first_layer_config_updates.items():
+                setattr(config, key, value) # Update the main config object
+                # ... (config printing logic - unchanged) ...
 
-    if representative_layer_data is None:
+    if first_layer_config_updates is None:
         raise RuntimeError("Could not factorize any attention layers to update config.")
 
     # --- 2. Create SVD-TPA Model Instance ---
-    print("Creating SVD-TPA model instance with updated config...")
-    # Import the correct TPA model class dynamically
-    try:
-        from gemma.tpa.gemma3_tpa_model import GemmaForCausalLMwithSVDTPA, SVDTPAAttention # Assuming rename happened
-    except ImportError:
-        print("WARNING: Could not import renamed SVDTPA classes. Falling back to original names.")
-        from gemma.tpa.gemma3_tpa_model import GemmaForCausalLMwithTPA as GemmaForCausalLMwithSVDTPA
-        from gemma.tpa.gemma3_tpa_model import TPAAttention as SVDTPAAttention
-
-    # Ensure the config has the necessary tokenizer path if needed by constructor
-    if not hasattr(config, 'tokenizer'):
-        # Add a placeholder or default if needed, based on model class requirements
-        config.tokenizer = 'tokenizer/tokenizer.model' # Example path, adjust if necessary
+    print("\nCreating SVD-TPA model instance with updated global config...")
+    # The config object now contains ranks/dims derived from layer 0
+    # Ensure QK Norm is explicitly handled if needed (e.g., disable it)
+    # config.use_qk_norm = False # Example: Disable QK Norm
+    # print(f"  SVD-TPA model will use QK Norm: {config.use_qk_norm}")
 
     tpa_model = GemmaForCausalLMwithSVDTPA(config)
-    tpa_model = tpa_model.to(dtype=dtype, device=torch_device) # Move model AFTER creation
-    print(f"  SVD-TPA model created on device: {next(tpa_model.parameters()).device}, dtype: {next(tpa_model.parameters()).dtype}")
+    # Move model first, then load weights
+    tpa_model = tpa_model.to(device=torch_device, dtype=dtype).eval()
+    print(f"  SVD-TPA model created on device: {torch_device}, dtype: {dtype}")
 
-    # --- 3. Copy Non-Attention Weights ---
-    print("Copying non-attention weights...")
-    standard_sd = standard_model.state_dict() # Already have this from key printing
-    tpa_sd = tpa_model.state_dict()
-    weights_to_copy = {}
+    # --- 3. Prepare New State Dict for TPA Model ---
+    print("\nPreparing state dict for TPA model...")
+    tpa_new_sd = {}
+    tpa_target_keys = set(tpa_model.state_dict().keys()) # Keys expected by the TPA model
 
+    # Copy non-attention weights (MLP, Norms, Embeddings) using ORIGINAL standard_sd
+    copied_keys_count = 0
     for name, param in standard_sd.items():
-        # Skip original attention projections handled by factorization
-        if 'self_attn.' in name and ('qkv_proj' in name or 'o_proj' in name):
+        # Skip QKV (handled by factors) but KEEP O_PROJ for now
+        if 'self_attn.' in name and 'qkv_proj.' in name:
             continue
-        # Skip RoPE buffers if present
+        # Skip RoPE buffers (they are registered automatically)
         if name in ['local_freqs_cis', 'global_freqs_cis', 'freqs_cis']:
             continue
 
         # Handle embedder name difference
-        original_embedder_name = 'embedder.weight' # <<< CORRECTED NAME
-        target_embedder_name = 'text_token_embedder.weight' # Name in TPA model
-        if name == original_embedder_name:
-            if target_embedder_name in tpa_sd:
-                if tpa_sd[target_embedder_name].shape == param.shape:
-                    weights_to_copy[target_embedder_name] = param.data.clone().to(dtype=dtype, device=torch_device)
-                    print(f"  Mapping {name} -> {target_embedder_name}") # Added print for confirmation
-                else:
-                    print(f"  Warning: Shape mismatch for embedder {name} -> {target_embedder_name}. Std: {param.shape}, TPA: {tpa_sd[target_embedder_name].shape}. Skipping.")
-            else:
-                print(f"  Warning: Target embedder {target_embedder_name} not found in TPA model.")
-            continue # Processed embedder
+        target_name = name
+        # Standard Gemma uses 'embedder.weight', TPA model uses 'text_token_embedder.weight'
+        if name == 'embedder.weight':
+            target_name = 'text_token_embedder.weight'
 
-        # Copy other matching weights
-        if name in tpa_sd:
-            if tpa_sd[name].shape == param.shape:
-                weights_to_copy[name] = param.data.clone().to(dtype=dtype, device=torch_device)
+        # Check if the target key exists in the TPA model structure
+        if target_name in tpa_target_keys:
+            # Check shape match before adding to the new state dict
+            target_shape = tpa_model.get_parameter(target_name).shape if target_name in dict(tpa_model.named_parameters()) else tpa_model.get_buffer(target_name).shape
+            if target_shape == param.shape:
+                tpa_new_sd[target_name] = param.data.clone().to(dtype=dtype, device=torch_device)
+                copied_keys_count += 1
             else:
-                print(f"  Warning: Shape mismatch for {name}. Standard: {param.shape}, TPA: {tpa_sd[name].shape}. Skipping.")
+                print(f"  Warning: Shape mismatch for non-attention weight {name} -> {target_name}. Skipping. "
+                      f"Standard: {param.shape}, TPA: {target_shape}")
         else:
-            # Add a print here to see which standard keys DON'T exist in the TPA model
-            print(f"  Info: Parameter {name} from standard model not found in TPA state_dict.") # Optional: for debugging
+            print(f"  Info: Weight {name} from standard model not found in TPA model structure.")
 
-    # Load the collected weights
-    print(f"Loading {len(weights_to_copy)} tensors into TPA model...") # Print count before loading
-    load_result = tpa_model.load_state_dict(weights_to_copy, strict=False)
-    print(f"  Finished loading non-attention tensors.") # Print after
-    if load_result.missing_keys:
-        # This should now ONLY show the TPA-specific weights/buffers
-        print(f"  Expected Missing keys (TPA factors): {load_result.missing_keys[:5]}...") # Show only first few
-    if load_result.unexpected_keys:
-        print(f"  Warning: Unexpected keys found during loading: {load_result.unexpected_keys[:5]}...")
+    print(f"Prepared {copied_keys_count} non-attention weights for TPA state dict.")
 
-    # --- 4. Load Factorized Weights into TPA Layers ---
-    print("Loading factorized SVD-TPA weights...")
-    with torch.no_grad(): # Ensure no gradients during weight loading
+    # Add factorized weights (W_A, B_const) to the new state dict
+    factor_keys_added = 0
+    for attn_module_name, factor_data in all_factorized_weights_data.items():
+        layer_index = int(attn_module_name.split('.')[2]) # Get layer index
+
+        # Add W_A weights
+        for factor_key_part in ['q', 'k', 'v']:
+            wa_key = f"{attn_module_name}.W_A_{factor_key_part}.weight"
+            if wa_key in tpa_target_keys:
+                source_weights = factor_data['W_A_weights'][factor_key_part]
+                target_shape = tpa_model.get_parameter(wa_key).shape
+                if target_shape == source_weights.shape:
+                    tpa_new_sd[wa_key] = source_weights.to(dtype=dtype, device=torch_device)
+                    factor_keys_added += 1
+                else:
+                    print(f"  ERROR: Shape mismatch for {wa_key} in layer {layer_index}! "
+                          f"Target: {target_shape}, Source: {source_weights.shape}. Skipping.")
+            else:
+                print(f"  Warning: Target key {wa_key} not found in TPA model state dict.")
+
+        # Add B_const buffers (Buffers are part of state_dict)
+        for factor_key_part in ['q', 'k', 'v']:
+            b_key = f"{attn_module_name}.B_const_{factor_key_part}"
+            if b_key in tpa_target_keys:
+                source_buffer_data = factor_data['B_const_buffers'][factor_key_part]
+                target_shape = tpa_model.get_buffer(b_key).shape
+                if target_shape == source_buffer_data.shape:
+                    tpa_new_sd[b_key] = source_buffer_data.to(dtype=dtype, device=torch_device)
+                    factor_keys_added += 1 # Technically buffers, but count them
+                else:
+                    print(f"  ERROR: Shape mismatch for {b_key} buffer in layer {layer_index}! "
+                          f"Target: {target_shape}, Source: {source_buffer_data.shape}. Skipping.")
+            else:
+                print(f"  Warning: Target buffer key {b_key} not found in TPA model state dict.")
+
+    print(f"Added {factor_keys_added} factor weight/buffer tensors to TPA state dict.")
+
+    # --- 4. Load Final State Dict into TPA Model ---
+    print("\nLoading final state dict into TPA model...")
+    load_result = tpa_model.load_state_dict(tpa_new_sd, strict=True) # Use strict=True now
+    # If strict=True passes, all expected keys were present and loaded.
+    print("State dict loaded successfully into TPA model.")
+    # Print any unexpected messages from strict loading if they occur
+    if load_result.missing_keys: print(f"  Strict Load Warning: Missing keys: {load_result.missing_keys}")
+    if load_result.unexpected_keys: print(f"  Strict Load Warning: Unexpected keys: {load_result.unexpected_keys}")
+
+
+    # --- 5. Store Layer-Specific Rank Info on Modules ---
+    # This step is crucial for the forward pass to use the correct ranks/offsets
+    # It needs to happen AFTER the model is created and state_dict loaded (though state_dict loading doesn't affect these attributes)
+    print("\nStoring layer-specific rank info onto TPA attention modules...")
+    with torch.no_grad():
         for attn_module_name, factor_data in all_factorized_weights_data.items():
             try:
                 tpa_module = tpa_model.get_submodule(attn_module_name)
-                if not isinstance(tpa_module, SVDTPAAttention): # Check for correct (renamed) type
-                    print(f"  Warning: Submodule {attn_module_name} in TPA model is not SVDTPAAttention. Skipping.")
-                    continue
+                if not isinstance(tpa_module, SVDTPAAttention): continue
+
+                config_updates = factor_data['Config_Updates']
+                tpa_module.q_per_head_ranks = config_updates['q_per_head_ranks']
+                tpa_module.q_max_head_rank = config_updates['q_max_head_rank']
+                tpa_module.q_head_offsets = config_updates['q_head_offsets']
+                tpa_module.total_q_rank = config_updates['total_q_rank']
+                tpa_module.k_rank = config_updates['k_rank']
+                tpa_module.v_rank = config_updates['v_rank']
+                tpa_module.head_dim = config_updates['q_head_dim']
+                tpa_module.k_head_dim = config_updates['k_head_dim']
+                tpa_module.v_head_dim = config_updates['v_head_dim']
             except AttributeError:
-                print(f"  Warning: Could not find submodule {attn_module_name} in TPA model. Skipping.")
-                continue
-
-            # print(f"  Loading weights into TPA module: {attn_module_name}") # Reduced verbosity
-
-            # Load W_A weights into nn.Linear layers
-            for factor_key_part in ['q', 'k', 'v']:
-                wa_weight_key = f'W_A_{factor_key_part}'
-                linear_layer_name = wa_weight_key # e.g., 'W_A_q'
-                if hasattr(tpa_module, linear_layer_name):
-                    linear_layer = getattr(tpa_module, linear_layer_name)
-                    source_weights = factor_data['W_A_weights'][factor_key_part] # Shape [Rank, Hidden]
-
-                    if linear_layer.weight.shape == source_weights.shape:
-                        linear_layer.weight.data.copy_(source_weights.to(dtype=dtype)) # Convert to final dtype
-                        # print(f"    Loaded {linear_layer_name}.weight") # Reduced verbosity
-                    else:
-                        print(f"    ERROR: Shape mismatch loading {linear_layer_name}.weight! Target: {linear_layer.weight.shape}, Source: {source_weights.shape}")
-                else:
-                    print(f"    Warning: Linear layer {linear_layer_name} not found in {attn_module_name}.")
-
-            # Load B_const buffers
-            for factor_key_part in ['q', 'k', 'v']:
-                b_buffer_key = f'B_const_{factor_key_part}'
-                if hasattr(tpa_module, b_buffer_key):
-                    buffer_tensor = getattr(tpa_module, b_buffer_key)
-                    source_buffer_data = factor_data['B_const_buffers'][factor_key_part] # Shape [Heads/Groups, Rank, HeadDim]
-
-                    if buffer_tensor.shape == source_buffer_data.shape:
-                        buffer_tensor.data.copy_(source_buffer_data.to(dtype=dtype)) # Convert to final dtype
-                        # print(f"    Loaded {b_buffer_key} buffer") # Reduced verbosity
-                    else:
-                        print(f"    ERROR: Shape mismatch loading {b_buffer_key} buffer! Target: {buffer_tensor.shape}, Source: {source_buffer_data.shape}")
-                else:
-                    print(f"    Warning: Buffer {b_buffer_key} not found in {attn_module_name}.")
-
-            # Store necessary config updates directly onto the module instance for inference
-            config_updates = factor_data['Config_Updates']
-            
-            # VERIFICATION: Compare layer-specific ranks with global config ranks
-            layer_index = int(attn_module_name.split('.')[2])  # Extract layer index from module name
-            print(f"\n  === LAYER {layer_index} WEIGHT LOADING VERIFICATION ====")
-            print(f"  Module: {attn_module_name}")
-            print(f"  Layer-specific q_per_head_ranks = {config_updates['q_per_head_ranks']}")
-            print(f"  Layer-specific q_head_offsets = {config_updates['q_head_offsets']}")
-            print(f"  Layer-specific q_max_head_rank = {config_updates['q_max_head_rank']}")
-            print(f"  Layer-specific total_q_rank = {config_updates['total_q_rank']}")
-            print(f"  Layer-specific k_rank = {config_updates['k_rank']}")
-            print(f"  Layer-specific v_rank = {config_updates['v_rank']}")
-            print(f"  Global config q_per_head_ranks = {config.q_per_head_ranks}")
-            print(f"  Global config q_head_offsets = {config.q_head_offsets}")
-            print(f"  Global config q_max_head_rank = {config.q_max_head_rank}")
-            print(f"  Global config total_q_rank = {config.total_q_rank}")
-            print(f"  Global config k_rank = {config.k_rank}")
-            print(f"  Global config v_rank = {config.v_rank}")
-            print(f"  === END LAYER {layer_index} WEIGHT LOADING VERIFICATION ===\n")
-            
-            # Assign the values to the module
-            tpa_module.q_per_head_ranks = config_updates['q_per_head_ranks']
-            tpa_module.q_max_head_rank = config_updates['q_max_head_rank']
-            tpa_module.q_head_offsets = config_updates['q_head_offsets']
-            tpa_module.total_q_rank = config_updates['total_q_rank']
-            tpa_module.k_rank = config_updates['k_rank']
-            tpa_module.v_rank = config_updates['v_rank']
-            tpa_module.head_dim = config_updates['q_head_dim'] # Primary head dim
-            tpa_module.k_head_dim = config_updates['k_head_dim']
-            tpa_module.v_head_dim = config_updates['v_head_dim']
-            # print(f"    Stored ranks/dims on module instance {attn_module_name}") # Reduced verbosity
+                print(f"  Warning: Could not find or set attributes on submodule {attn_module_name}.")
+    print("Layer-specific rank info stored.")
 
 
     # --- Final Steps ---
-    # Set the tokenizer if available
     if hasattr(standard_model, 'tokenizer'):
         tpa_model.tokenizer = standard_model.tokenizer
-        print("  Copied tokenizer.")
+        print("Copied tokenizer.")
 
-    # Ensure model is in eval mode
-    tpa_model.eval()
+    tpa_model.eval() # Ensure eval mode
 
     end_time = time.time()
-    print(f"SVD-TPA model creation complete in {end_time - start_time:.2f} seconds")
+    print(f"\nSVD-TPA model creation complete in {end_time - start_time:.2f} seconds")
     return tpa_model
