@@ -668,7 +668,7 @@ def create_tpa_model_from_standard(
 
     # --- 4. Load Final State Dict into TPA Model ---
     print("\nLoading final state dict into TPA model...")
-    load_result = tpa_model.load_state_dict(tpa_new_sd, strict=False3) # Use strict=True now
+    load_result = tpa_model.load_state_dict(tpa_new_sd, strict=False) # Use strict=True now
     # If strict=True passes, all expected keys were present and loaded.
     print("State dict loaded successfully into TPA model.")
     # Print any unexpected messages from strict loading if they occur
