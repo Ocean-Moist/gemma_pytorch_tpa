@@ -7,6 +7,10 @@ to Tensor Product Attention (TPA) format using TensorLLM-style Tucker decomposit
 
 import tensorly as tl
 
+from gemma.model import GemmaForCausalLM
+from gemma.tpa import GemmaForCausalLMwithSVDTPA
+from gemma.tpa.gemma3_tpa_model import SVDTPAAttention
+
 # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
 tl.set_backend('pytorch')
 
@@ -465,7 +469,7 @@ def split_combined_qkv_weights(combined_qkv: torch.Tensor, config) -> tuple[torc
 
 # ----- Main function to create TPA model from standard -----
 def create_tpa_model_from_standard(
-        standard_model: gemma_model.GemmaForCausalLM,
+        standard_model: GemmaForCausalLM,
         q_rank: int = 6,
         k_rank: int = 2,
         v_rank: int = 2,
