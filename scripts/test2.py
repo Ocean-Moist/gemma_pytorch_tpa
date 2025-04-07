@@ -471,7 +471,71 @@ def main(_):
             recon_o = new_gqa_state_dict[o_key].to(torch_device, dtype=compute_dtype)
             if not torch.equal(orig_o, recon_o):
                 print(f"  Layer {i} O_PROJ: MISMATCH! Weights differ after copying.")
+    # --- 3c. Copy NON-ATTENTION weights first ---
+    print("Copying non-attention weights (MLP, Norms, Embeddings)...")
+    for name, param in original_gqa_state_dict.items():
+        # Skip ALL attention weights initially (QKV and O)
+        if 'self_attn.' in name:
+            continue
+        # Skip RoPE buffers
+        if name in ['local_freqs_cis', 'global_freqs_cis', 'freqs_cis']:
+            continue
 
+        # Handle embedder name
+        target_name = name
+        if name == 'embedder.weight': # Original GQA name
+            target_name = 'text_token_embedder.weight' # Target name might differ slightly in some versions
+            # Check if target exists, otherwise use original name maybe?
+            if target_name not in gqa_target_sd:
+                print(f"Warning: Target embedder name {target_name} not found, trying original {name}")
+                target_name = name # Fallback
+
+        if target_name in gqa_target_sd:
+            if gqa_target_sd[target_name].shape == param.shape:
+                new_gqa_state_dict[target_name] = param.data.clone().to(device=torch_device, dtype=compute_dtype)
+                copied_keys += 1
+            else:
+                shape_mismatch.append((target_name, param.shape, gqa_target_sd[target_name].shape))
+        else:
+            missing_in_gqa.append(target_name)
+
+    print(f"Copied {copied_keys} non-attention parameter tensors.")
+    if missing_in_gqa: print(f"  Warning: Orig keys not found in GQA model structure: {missing_in_gqa[:5]}...")
+    if shape_mismatch: print(f"  Warning: Shape mismatches found: {shape_mismatch[:5]}...")
+
+    # --- 3d. Reconstruct/Copy ATTENTION weights per layer ---
+    print("\nReconstructing/Copying GQA attention weights per layer...")
+    for i in range(gqa_config.num_hidden_layers):
+        layer_name = f"model.layers.{i}"
+        attn_module_name = f"{layer_name}.self_attn"
+        print(f"  Processing layer {i} attention weights...")
+
+        # Reconstruct qkv_proj.weight
+        try:
+            tpa_attn_module = tpa_model.get_submodule(attn_module_name)
+            # ... (qkv reconstruction logic as before) ...
+            qkv_rec_weight = reconstruct_gqa_weights_from_tpa(tpa_attn_module, torch_device, compute_dtype)
+            qkv_target_key = f"{attn_module_name}.qkv_proj.weight"
+            if qkv_target_key in gqa_target_sd and gqa_target_sd[qkv_target_key].shape == qkv_rec_weight.shape:
+                new_gqa_state_dict[qkv_target_key] = qkv_rec_weight
+                print(f"    Reconstructed QKV weight loaded for layer {i}")
+            else:
+                # ... (error handling) ...
+                continue
+        except Exception as e:
+            # ... (error handling) ...
+            continue
+
+        # Copy o_proj.weight DIRECTLY from ORIGINAL GQA state dict
+        o_key = f"{attn_module_name}.o_proj.weight"
+        if o_key in original_gqa_state_dict:
+            if o_key in gqa_target_sd and gqa_target_sd[o_key].shape == original_gqa_state_dict[o_key].shape:
+                new_gqa_state_dict[o_key] = original_gqa_state_dict[o_key].data.clone().to(device=torch_device, dtype=compute_dtype)
+                print(f"    Copied ORIGINAL O_Proj weight for layer {i}")
+            else:
+                print(f"    ERROR: Shape mismatch for O_Proj key {o_key} between original and target GQA model.")
+        else:
+            print(f"    ERROR: Original O_Proj key {o_key} not found in original state dict.")
     # --- 4. Load Reconstructed Weights into GQA Model ---
     print("\nLoading reconstructed weights into standard GQA model...")
     load_rec_start = time()
