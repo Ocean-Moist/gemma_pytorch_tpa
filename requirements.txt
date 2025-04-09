@@ -7,3 +7,4 @@ setuptools~=76.1.0
 tqdm~=4.66.3
 gemma~=0.1
 tensorly~=0.6.0
+safetensors~=0.5.3

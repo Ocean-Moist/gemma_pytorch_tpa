@@ -14,44 +14,45 @@
 # limitations under the License.
 
 """
-run_tpa.py
+run_isp_kv.py (Modified from run_tpa.py)
 
 Script for:
   1) Loading a standard Gemma GQA model (GemmaForCausalLM) from a checkpoint.
-  2) Converting it to SVD-based Tensor Product Attention (SVD-TPA / Constant B-Factor)
-     using the `create_tpa_model_from_standard` function if requested.
-  3) Saving the converted SVD-TPA model if requested.
-  4) Running inference (text-only) with the standard Gemma model or the converted SVD-TPA model.
+  2) Converting it to Interaction Subspace Projection KV (ISP-KV) Attention
+     using the `prepare_isp_kv_components` function if requested.
+  3) Saving the converted ISP-KV model (config + state dict with original
+     weights and basis buffers) if requested.
+  4) Running inference (text-only) with the standard Gemma model or the
+     converted ISP-KV model.
 
 Usage:
-  - Convert GQA to SVD-TPA and save:
-      python scripts/run_tpa.py \
-        --ckpt /path/to/gemma_model.ckpt \
-        --variant 1b \
+  - Convert GQA to ISP-KV and save:
+      python scripts/run_isp_kv.py \
+        --ckpt /path/to/gemma_model_dir_or_file \
+        --variant 2b \
         --prompt "Write a poem about tensors" \
         --convert \
-        --save_tpa /path/to/save/svdtpa_model.pt \
-        --q_rank 6 \
-        --k_rank 2 \
-        --v_rank 2 \
+        --save_isp_kv /path/to/save/isp_kv_model.pt \
+        --r_k 16 \
+        --r_v 16 \
         --device cuda
 
-  - Load an already converted SVD-TPA model and run inference:
-      python scripts/run_tpa.py \
-        --ckpt /path/to/svdtpa_model.pt \
-        --variant 1b \
+  - Load an already converted ISP-KV model and run inference:
+      python scripts/run_isp_kv.py \
+        --ckpt /path/to/save/isp_kv_model.pt \
+        --variant 2b \
         --prompt "Explain quantum field theory" \
         --convert=False \
         --device cuda
 
   - Run inference with the original GQA model (without conversion):
-      python scripts/run_tpa.py \
-        --ckpt /path/to/gemma_model.ckpt \
-        --variant 1b \
+      python scripts/run_isp_kv.py \
+        --ckpt /path/to/gemma_model_dir_or_file \
+        --variant 2b \
         --prompt "What is attention?" \
         --convert=False \
         --device cuda \
-        --force_gqa # Flag to ensure standard model is used even if ckpt name suggests TPA
+        --force_gqa # Flag to ensure standard model is used
 
   - Additional settings like temperature, top-p, top-k, etc. can be used.
 """
@@ -62,37 +63,37 @@ import os
 import sys
 from time import time
 import gc
+import json
 
 from absl import app
 from absl import flags
 import numpy as np
 import torch
-import tqdm
 
 # Ensure the project root is in the path to find gemma modules
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Gemma modules
+# Standard Gemma modules
 from gemma import config as gemma_config
 from gemma import model as gemma_model # Standard Gemma GQA model
 from gemma import tokenizer as gemma_tokenizer
 
-# SVD-TPA modules (Conversion and Model)
-# Assuming svdtpa_model.py contains GemmaForCausalLMwithSVDTPA
-# and gqa_to_tpa.py contains create_tpa_model_from_standard
+# ISP-KV modules (Conversion and Model)
 try:
-    from gemma.tpa.modules.gqa_to_tpa import create_tpa_model_from_standard
-    from gemma.tpa.gemma3_tpa_model import GemmaForCausalLMwithSVDTPA
-    tpa_modules_available = True
+    # Assumes prepare_isp_kv_components is in gqa_to_tpa.py (or renamed file)
+    from gemma.tpa.modules.gqa_to_tpa import prepare_isp_kv_components, split_combined_qkv_weights
+    # Assumes ISP-KV model is in gemma3_isp_kv_model.py
+    from gemma.tpa.gemma3_isp_kv_model import GemmaForCausalLMwithISP_KV
+    isp_kv_modules_available = True
 except ImportError as e:
-    print(f"Warning: Could not import SVD-TPA modules: {e}")
-    print("Conversion to TPA will not be possible.")
-    tpa_modules_available = False
+    print(f"Warning: Could not import ISP-KV modules: {e}")
+    print("Conversion to ISP-KV will not be possible.")
+    isp_kv_modules_available = False
     # Define dummy classes if needed to prevent NameErrors later
-    class GemmaForCausalLMwithSVDTPA: pass
-    def create_tpa_model_from_standard(*args, **kwargs): pass
+    class GemmaForCausalLMwithISP_KV: pass
+    def prepare_isp_kv_components(*args, **kwargs): pass
 
 
 # ------------------------------------------------------------
@@ -102,24 +103,21 @@ except ImportError as e:
 FLAGS = flags.FLAGS
 
 # Model Loading & Conversion
-flags.DEFINE_string('ckpt', None, 'Path to the checkpoint file (standard Gemma or converted SVD-TPA).', required=True)
-flags.DEFINE_string('variant', '1b', 'Model variant (e.g., 1b, 4b, 12b, etc.). Used to get base config.')
+flags.DEFINE_string('ckpt', None, 'Path to the checkpoint file or directory (standard Gemma or converted ISP-KV).', required=True)
+flags.DEFINE_string('variant', '2b', 'Model variant (e.g., 2b, 7b, etc.). Used to get base config.')
 flags.DEFINE_string('device', 'cuda' if torch.cuda.is_available() else 'cpu',
                     'Device to run the model on (cpu or cuda).')
-flags.DEFINE_boolean('quant', False, 'Use quantization? (Currently affects standard model loading).') # Note: Conversion currently outputs float
-flags.DEFINE_boolean('convert', False, 'Convert standard weights to SVD-TPA? Requires standard ckpt.')
-flags.DEFINE_string('save_tpa', None, 'Path to save converted SVD-TPA model weights and config.')
-flags.DEFINE_boolean('force_gqa', False, 'Force loading as standard GQA model, even if ckpt seems like TPA.')
+flags.DEFINE_boolean('quant', False, 'Use quantization? (Affects standard model loading). ISP-KV conversion currently outputs float/bf16.')
+flags.DEFINE_boolean('convert', False, 'Convert standard GQA weights to ISP-KV? Requires standard ckpt.')
+flags.DEFINE_string('save_isp_kv', None, 'Path to save converted ISP-KV model (config + state dict).')
+flags.DEFINE_boolean('force_gqa', False, 'Force loading as standard GQA model, even if ckpt seems like ISP-KV.')
 
-# TPA Conversion Parameters
-flags.DEFINE_integer('q_rank', 6, 'Target rank for query factorization in SVD-TPA.')
-flags.DEFINE_integer('k_rank', 2, 'Target rank for key factorization in SVD-TPA.')
-flags.DEFINE_integer('v_rank', 2, 'Target rank for value factorization in SVD-TPA.')
-flags.DEFINE_boolean('use_dynamic_ranks', True, 'Allow conversion to dynamically determine ranks based on SVD?')
-flags.DEFINE_boolean('fat_ranks', False, 'Use larger fixed ranks (e.g., 240) during conversion?')
+# ISP-KV Conversion Parameters
+flags.DEFINE_integer('r_k', 16, 'Target rank for the Key interaction subspace in ISP-KV.')
+flags.DEFINE_integer('r_v', 16, 'Target rank for the Value output subspace in ISP-KV.')
 
 # Inference Parameters
-flags.DEFINE_string('prompt', 'Write a short story about a spaceship landing on Mars.',
+flags.DEFINE_string('prompt', 'Write a short story about a lonely robot learning to paint.',
                     'Input prompt for the model.')
 flags.DEFINE_integer('output_len', 128, 'Max number of new tokens to generate.')
 flags.DEFINE_float('temperature', 0.9, 'Temperature for sampling. Use 0 for greedy decoding.')
@@ -127,7 +125,7 @@ flags.DEFINE_float('top_p', 0.95, 'Top-p sampling parameter.')
 flags.DEFINE_integer('top_k', 64, 'Top-k sampling parameter.')
 
 # Other Settings
-flags.DEFINE_string('tokenizer_path', os.path.join(project_root, 'tokenizer/tokenizer.model'), # Default relative path
+flags.DEFINE_string('tokenizer_path', os.path.join(project_root, 'tokenizer/tokenizer.model'),
                     'Path to tokenizer model.')
 flags.DEFINE_integer('seed', 12345, 'Random seed.')
 flags.DEFINE_boolean('cuda_launch_blocking', False, 'Set CUDA_LAUNCH_BLOCKING=1 for sync debugging?')
@@ -142,25 +140,31 @@ def _set_default_tensor_type(dtype: torch.dtype):
     finally:
         torch.set_default_dtype(orig)
 
-
 def get_base_config(variant: str, device: str) -> gemma_config.GemmaConfig:
     """Gets the base Gemma configuration for a given variant."""
     variant = variant.lower()
-    dtype = 'float32' if device == 'cpu' else 'bfloat16' # Default compute dtype
+    # Default compute dtype based on device
+    dtype = 'bfloat16' if device == 'cuda' and torch.cuda.is_bf16_supported() else 'float16' if device == 'cuda' else 'float32'
 
-    if variant == '1b':
-        return gemma_config.get_config_for_1b(dtype=dtype)
-    elif variant == '4b':
-        return gemma_config.get_config_for_4b(dtype=dtype)
-    elif variant == '12b':
-        # Assuming configs exist for these
-        return gemma_config.get_config_for_12b(dtype=dtype)
-    elif variant == '27b':
-        return gemma_config.get_config_for_27b(dtype=dtype)
-    else:
-        print(f"Warning: Unknown variant '{variant}'. Using 1b config as base.")
-        return gemma_config.get_config_for_1b(dtype=dtype)
-
+    try:
+        config_getter = getattr(gemma_config, f'get_config_for_{variant}')
+        return config_getter(dtype=dtype)
+    except AttributeError:
+        print(f"Warning: Config function 'get_config_for_{variant}' not found in gemma.config. Using defaults.")
+        # Provide some basic defaults if variant function missing
+        return gemma_config.GemmaConfig(
+            num_hidden_layers=18, # Example for ~2B
+            num_attention_heads=8,
+            num_key_value_heads=1,
+            hidden_size=2048,
+            intermediate_size=16384,
+            head_dim=256,
+            dtype=dtype
+            # Add other essential fields manually if needed
+        )
+    except Exception as e:
+        print(f"Error getting config for variant {variant}: {e}")
+        raise
 
 def main(_):
     if FLAGS.cuda_launch_blocking:
@@ -171,9 +175,11 @@ def main(_):
     np.random.seed(FLAGS.seed)
     torch.manual_seed(FLAGS.seed)
     torch_device = torch.device(FLAGS.device)
-    # compute_dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
-    # temporary fix for dtype
-    compute_dtype = torch.float32
+    # Determine compute dtype (prioritize bfloat16 on CUDA if available)
+    if torch_device.type == 'cuda':
+        compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        compute_dtype = torch.float32 # CPU generally uses float32
 
     print(f"Using device: {torch_device}, Compute dtype: {compute_dtype}")
     print(f"Running Gemma variant: {FLAGS.variant}")
@@ -188,6 +194,7 @@ def main(_):
     # --- Model Loading / Conversion ---
     model = None
     model_type = "Unknown"
+    model_config = None
     load_start_time = time()
 
     # Check if the checkpoint path exists
@@ -195,114 +202,198 @@ def main(_):
         print(f"ERROR: Checkpoint file/directory not found at {FLAGS.ckpt}")
         sys.exit(1)
 
-    # Determine if loading Standard GQA or attempting SVD-TPA
-    load_as_svdtpa = False
+    # Determine if loading Standard GQA or attempting ISP-KV
+    load_as_isp_kv = False
     if not FLAGS.convert and not FLAGS.force_gqa:
-        # Try to load as SVD-TPA if not converting and not forcing GQA
-        # Check if the checkpoint might contain a TPA config
-        try:
-            # Peek into the checkpoint file if it's a single file
-            if os.path.isfile(FLAGS.ckpt):
+        # Try to detect ISP-KV format by loading config if checkpoint is a single file
+        if os.path.isfile(FLAGS.ckpt):
+            try:
+                print(f"Peeking into checkpoint file {FLAGS.ckpt} to detect model type...")
                 peek_ckpt = torch.load(FLAGS.ckpt, map_location='cpu', weights_only=False) # Need config
                 if isinstance(peek_ckpt, dict) and 'config' in peek_ckpt:
-                    if hasattr(peek_ckpt['config'], 'q_rank'): # Check for a TPA-specific attribute
-                        print("Checkpoint seems to contain a config with TPA ranks. Attempting to load as SVD-TPA.")
-                        load_as_svdtpa = True
+                    # Check for ISP-KV specific attributes in the saved config
+                    if hasattr(peek_ckpt['config'], 'r_k') and hasattr(peek_ckpt['config'], 'r_v'):
+                        print("Checkpoint contains config with ISP-KV ranks (r_k, r_v). Attempting to load as ISP-KV.")
+                        load_as_isp_kv = True
+                        model_config = peek_ckpt['config'] # Use the loaded config
                 del peek_ckpt
                 gc.collect()
-            # If it's a directory, assume it's standard for now, unless conversion was explicitly done before.
-        except Exception as e:
-            print(f"Warning: Could not peek into checkpoint file {FLAGS.ckpt} to determine type: {e}")
+            except Exception as e:
+                print(f"Warning: Could not peek into checkpoint file {FLAGS.ckpt}: {e}. Assuming standard GQA.")
+        # If it's a directory, assume standard unless conversion happened before and was saved
 
     # --- Conversion Path ---
     if FLAGS.convert:
-        if not tpa_modules_available:
-            print("ERROR: Cannot convert model because SVD-TPA modules are not available.")
+        if not isp_kv_modules_available:
+            print("ERROR: Cannot convert model because ISP-KV modules are not available.")
             sys.exit(1)
 
-        print(f"\n--- Starting GQA to SVD-TPA Conversion ---")
+        print(f"\n--- Starting GQA to ISP-KV Conversion ---")
         print(f"Loading standard Gemma model from {FLAGS.ckpt}...")
 
         # Get base config and update with quantization flag
-        model_config = get_base_config(FLAGS.variant, FLAGS.device)
-        model_config.quant = FLAGS.quant # Set quant based on flag (affects standard loading)
-        model_config.tokenizer = FLAGS.tokenizer_path # Store tokenizer path in config
+        base_config = get_base_config(FLAGS.variant, FLAGS.device)
+        base_config.quant = FLAGS.quant
+        base_config.tokenizer = FLAGS.tokenizer_path
 
-        # Load standard model first
-        standard_model = gemma_model.GemmaForCausalLM(model_config)
-        standard_model.load_weights(FLAGS.ckpt) # Use the model's loading method
-        standard_model = standard_model.to(torch_device).eval() # Move to device AFTER loading
+        # Load standard model first (load weights to CPU initially)
+        standard_model = gemma_model.GemmaForCausalLM(base_config)
+        print("  Loading standard weights...")
+        standard_model.load_weights(FLAGS.ckpt) # Assumes this loads to CPU or handled internally
+        standard_model = standard_model.eval() # Set to eval mode
         print("Standard GQA model loaded.")
-        if getattr(model_config, 'use_qk_norm', False):
-            print(">>> WARNING: Loaded TPA config has use_qk_norm=True. Overriding to False. <<<")
-            model_config.use_qk_norm = False
 
-        # Perform conversion using create_tpa_model_from_standard
-        print("Converting GQA model to SVD-TPA format...")
+        # Perform conversion using prepare_isp_kv_components
+        print("Preparing ISP-KV components (bases, original weights)...")
         convert_start = time()
         try:
-            model = create_tpa_model_from_standard(
-                standard_model,
-                q_rank=FLAGS.q_rank,
-                k_rank=FLAGS.k_rank,
-                v_rank=FLAGS.v_rank,
-                dtype=compute_dtype, # Use compute dtype for the converted model
-                device=FLAGS.device,
-                use_dynamic_ranks=FLAGS.use_dynamic_ranks,
-                fat_ranks=FLAGS.fat_ranks,
+            # Pass the standard model's state dict and config
+            isp_kv_prep_data = prepare_isp_kv_components(
+                gqa_state_dict=standard_model.state_dict(), # Pass the loaded state dict
+                config=standard_model.config, # Use config from loaded model
+                r_k=FLAGS.r_k,
+                r_v=FLAGS.r_v,
+                device=FLAGS.device, # Device for SVD computation
+                dtype=compute_dtype, # Target dtype for final components
             )
-            model_type = "SVD-TPA (Converted)"
-            print(f"Conversion successful in {time() - convert_start:.2f} seconds.")
+
+            # Create the ISP-KV specific config
+            # Start with the base config and add/update ISP-KV ranks
+            model_config = standard_model.config # Use the config from the loaded standard model
+            # Add the effective global max ranks found during conversion
+            model_config.r_k = isp_kv_prep_data['global_max_ranks']['r_k']
+            model_config.r_v = isp_kv_prep_data['global_max_ranks']['r_v']
+            # Store per-layer info if needed by the model later (unlikely for forward pass)
+            # model_config.layer_specific_ranks = isp_kv_prep_data['layer_specific_data'] # Optional
+
+            print(f"ISP-KV components prepared in {time() - convert_start:.2f} seconds.")
+            print(f"  Effective global max ranks: r_k={model_config.r_k}, r_v={model_config.r_v}")
+
+            # Instantiate the ISP-KV model structure
+            print("Instantiating ISP-KV model structure...")
+            model = GemmaForCausalLMwithISP_KV(model_config)
+
+            # Construct the state dictionary for the ISP-KV model
+            print("Constructing state dictionary for ISP-KV model...")
+            isp_kv_state_dict = {}
+            layer_data = isp_kv_prep_data['layer_specific_data']
+
+            # 1. Copy non-attention weights from standard model state dict
+            standard_sd = standard_model.state_dict()
+            for name, param in standard_sd.items():
+                is_attention_weight = 'self_attn.' in name and ('qkv_proj.' in name or 'o_proj.' in name)
+                is_basis_buffer = 'V_r_basis' in name or 'Z_v_basis' in name # New buffers
+                if not is_attention_weight and not is_basis_buffer:
+                    target_name = name.replace('embedder.', 'text_token_embedder.') # Handle embedder name difference
+                    if target_name in model.state_dict(): # Check if key exists in ISP-KV model
+                        isp_kv_state_dict[target_name] = param.clone()
+
+            # 2. Add original projection weights and new basis buffers (per layer)
+            for i in range(model.config.num_hidden_layers):
+                if i not in layer_data: continue # Skip if layer was skipped during conversion
+
+                # Original weights (assuming separate Wq, Wk, Wv, Wo layers in ISP_KVAttention)
+                # If ISP_KVAttention uses combined qkv_proj, load that instead. Adjust keys accordingly.
+                qkv_orig = layer_data[i]['original_weights']['qkv_proj.weight']
+                o_orig = layer_data[i]['original_weights']['o_proj.weight']
+
+                # Option A: If ISP_KVAttention keeps qkv_proj combined layer
+                # qkv_target_key = f"model.layers.{i}.self_attn.qkv_proj.weight"
+                # if qkv_target_key in model.state_dict():
+                #      isp_kv_state_dict[qkv_target_key] = qkv_orig
+
+                # Option B: If ISP_KVAttention uses separate Wq, Wk, Wv layers
+                q_orig_split, k_orig_split, v_orig_split = split_combined_qkv_weights(qkv_orig, model.config)
+                q_target_key = f"model.layers.{i}.self_attn.W_q.weight"
+                k_target_key = f"model.layers.{i}.self_attn.W_k.weight"
+                v_target_key = f"model.layers.{i}.self_attn.W_v.weight"
+                if q_target_key in model.state_dict(): isp_kv_state_dict[q_target_key] = q_orig_split
+                if k_target_key in model.state_dict(): isp_kv_state_dict[k_target_key] = k_orig_split
+                if v_target_key in model.state_dict(): isp_kv_state_dict[v_target_key] = v_orig_split
+
+                # Output projection weight
+                o_target_key = f"model.layers.{i}.self_attn.o_proj.weight"
+                if o_target_key in model.state_dict(): isp_kv_state_dict[o_target_key] = o_orig
+
+                # Basis buffers
+                V_r_basis = layer_data[i]['basis_buffers']['V_r_basis']
+                Z_v_basis = layer_data[i]['basis_buffers']['Z_v_basis']
+                vr_target_key = f"model.layers.{i}.self_attn.V_r_basis"
+                zv_target_key = f"model.layers.{i}.self_attn.Z_v_basis"
+                if vr_target_key in model.state_dict(): isp_kv_state_dict[vr_target_key] = V_r_basis
+                if zv_target_key in model.state_dict(): isp_kv_state_dict[zv_target_key] = Z_v_basis
+
+            # Load the constructed state dictionary
+            print("Loading constructed state dictionary into ISP-KV model...")
+            load_result = model.load_state_dict(isp_kv_state_dict, strict=False)
+            print(f"  Load Result - Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}")
+
+            model = model.to(device=torch_device, dtype=compute_dtype).eval()
+            model_type = "ISP-KV (Converted)"
 
             # Save the converted model if requested
-            if FLAGS.save_tpa:
-                print(f"Saving converted SVD-TPA model to {FLAGS.save_tpa}...")
-                save_dir = os.path.dirname(FLAGS.save_tpa)
+            if FLAGS.save_isp_kv:
+                print(f"Saving converted ISP-KV model to {FLAGS.save_isp_kv}...")
+                save_dir = os.path.dirname(FLAGS.save_isp_kv)
                 if save_dir: os.makedirs(save_dir, exist_ok=True)
-                # Save both state_dict and the updated config
-                torch.save({'config': model.config, 'model_state_dict': model.state_dict()}, FLAGS.save_tpa)
-                print("SVD-TPA model saved.")
+                # Save both the ISP-KV config and the state dict
+                torch.save({'config': model.config, 'model_state_dict': model.state_dict()}, FLAGS.save_isp_kv)
+                print("ISP-KV model saved.")
 
         except Exception as e:
-            print(f"ERROR during conversion: {e}")
+            print(f"ERROR during conversion or ISP-KV model setup: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
         finally:
             # Clean up standard model
             del standard_model
+            del standard_sd
+            del isp_kv_prep_data
+            del isp_kv_state_dict
             gc.collect()
             if torch_device.type == 'cuda': torch.cuda.empty_cache()
 
-    # --- Loading Path (Standard GQA or Pre-converted SVD-TPA) ---
+    # --- Loading Path (Standard GQA or Pre-converted ISP-KV) ---
     else:
-        if load_as_svdtpa and tpa_modules_available:
-            print(f"Loading pre-converted SVD-TPA model from {FLAGS.ckpt}...")
+        if load_as_isp_kv and isp_kv_modules_available:
+            print(f"Loading pre-converted ISP-KV model from {FLAGS.ckpt}...")
             try:
-                # Load checkpoint which should contain config and state_dict
-                checkpoint = torch.load(FLAGS.ckpt, map_location='cpu') # Load to CPU first
-                if 'config' not in checkpoint or 'model_state_dict' not in checkpoint:
-                    raise ValueError("Checkpoint does not contain 'config' and 'model_state_dict'. Cannot load as SVD-TPA.")
+                # model_config should have been loaded during peeking if ckpt is file
+                if model_config is None: # If ckpt was a directory or peeking failed
+                    # Need to load config separately if saved alongside weights in dir
+                    config_path = os.path.join(FLAGS.ckpt, 'config.json') # Example path
+                    if os.path.exists(config_path):
+                        model_config = gemma_config.GemmaConfig.from_json_file(config_path) # Assumes method exists
+                    else: # Fallback to base config if no saved config found
+                        print("Warning: Could not find saved config for ISP-KV model. Using base config.")
+                        model_config = get_base_config(FLAGS.variant, FLAGS.device)
+                        # Manually add expected ranks if needed (might be inaccurate)
+                        model_config.r_k = FLAGS.r_k
+                        model_config.r_v = FLAGS.r_v
 
-                model_config = checkpoint['config']
-                # Ensure tokenizer path is set if loading only weights
+                # Ensure tokenizer path is set
                 model_config.tokenizer = getattr(model_config, 'tokenizer', FLAGS.tokenizer_path)
-                if getattr(model_config, 'use_qk_norm', False):
-                    print(">>> WARNING: Loaded TPA config has use_qk_norm=True. Overriding to False. <<<")
-                    model_config.use_qk_norm = False
 
-                # Instantiate the SVD-TPA model
-                model = GemmaForCausalLMwithSVDTPA(model_config)
-                model.load_state_dict(checkpoint['model_state_dict'], strict=False) # Allow partial loads
+                # Instantiate the ISP-KV model
+                model = GemmaForCausalLMwithISP_KV(model_config)
+
+                # Load weights (expects original W_q/k/v/o + V_r/Z_v buffers)
+                model.load_weights(FLAGS.ckpt) # Use the model's loading method
+
                 model = model.to(device=torch_device, dtype=compute_dtype).eval()
-                model_type = "SVD-TPA (Loaded)"
-                print("SVD-TPA model loaded successfully.")
+                model_type = "ISP-KV (Loaded)"
+                print("ISP-KV model loaded successfully.")
             except Exception as e:
-                print(f"ERROR loading SVD-TPA model: {e}")
-                print("Falling back to loading as standard GQA model.")
-                load_as_svdtpa = False # Force loading as GQA on error
-        else:
-            # Load as standard GQA model if not converting, forced, or TPA load failed/skipped
+                print(f"ERROR loading ISP-KV model from {FLAGS.ckpt}: {e}")
+                print("Attempting to load as standard GQA model instead.")
+                load_as_isp_kv = False # Force fallback
+                model = None # Reset model
+                gc.collect()
+                if torch_device.type == 'cuda': torch.cuda.empty_cache()
+
+        # Load as standard GQA if not converting, forced, or ISP-KV load failed/skipped
+        if not load_as_isp_kv:
             if FLAGS.force_gqa: print("Forcing load as standard GQA model.")
             print(f"Loading standard Gemma GQA model from {FLAGS.ckpt}...")
             try:
@@ -316,6 +407,8 @@ def main(_):
                 print("Standard GQA model loaded successfully.")
             except Exception as e:
                 print(f"ERROR loading standard GQA model: {e}")
+                import traceback
+                traceback.print_exc()
                 sys.exit(1)
 
     if model is None:
@@ -361,8 +454,13 @@ def main(_):
     print("="*60 + "\n")
 
     generation_time = generate_end_time - generate_start_time
-    # Simple token counting (adjust if using a more precise method)
-    num_output_tokens = len(gemma_tok.encode(output_text))
+    # Simple token counting (use tokenizer if available)
+    num_output_tokens = 0
+    if model.tokenizer:
+        num_output_tokens = len(model.tokenizer.encode(output_text))
+    else:
+        num_output_tokens = len(output_text.split()) # Fallback estimate
+
     tokens_per_sec = num_output_tokens / generation_time if generation_time > 0 else 0
 
     print(f"Generation completed in {generation_time:.2f} seconds.")
@@ -372,7 +470,14 @@ def main(_):
     if torch_device.type == 'cuda':
         mem_alloc = torch.cuda.memory_allocated(torch_device) / (1024**3)
         mem_resv = torch.cuda.memory_reserved(torch_device) / (1024**3)
-        print(f"GPU Memory: Allocated={mem_alloc:.2f} GB, Reserved={mem_resv:.2f} GB")
+        max_mem_alloc = torch.cuda.max_memory_allocated(torch_device) / (1024**3)
+        max_mem_resv = torch.cuda.max_memory_reserved(torch_device) / (1024**3)
+        print(f"GPU Memory Usage (GB):")
+        print(f"  Current Allocated: {mem_alloc:.2f}")
+        print(f"  Current Reserved:  {mem_resv:.2f}")
+        print(f"  Peak Allocated:    {max_mem_alloc:.2f}")
+        print(f"  Peak Reserved:     {max_mem_resv:.2f}")
+
 
     print("Run complete.")
 
