@@ -177,47 +177,49 @@ class ISP_KVAttention(nn.Module):
         v_hat = torch.einsum('bsgr,grd->bsgd', pv_cached, self.Z_v_basis.transpose(-1, -2))
         # v_hat shape: [b, kv_s, N_kv, Dv]
 
-        # --- 8. Apply RoPE (Corrected) ---
-        # Apply RoPE separately to fresh query 'q' and reconstructed key 'k_hat'
-        # using their corresponding frequency slices.
-
-        # Select frequency slices based on absolute positions
-        # Ensure kv_write_indices is not empty before calling min/max
-        if kv_write_indices.numel() > 0:
-            q_start_pos = kv_write_indices.min().item() # Get Python int
-            q_end_pos = kv_write_indices.max().item() + 1 # Get Python int
-            q_pos = torch.arange(q_start_pos, q_end_pos, device=device)
-        else:
-            # Handle empty case - perhaps create an empty position tensor
-            # Or this case might be guaranteed not to happen if q_seq_len > 0
-            q_pos = torch.empty(0, dtype=torch.long, device=device)
-
-
-        k_pos = torch.arange(kv_seq_len, device=device) # kv_seq_len is already an int
-
-        # Clamp positions to max length of precomputed freqs
-        max_freq_len = freqs_cis.shape[0]
-        q_pos = q_pos.clamp(max=max_freq_len - 1)
-        k_pos = k_pos.clamp(max=max_freq_len - 1)
-
-        if q_pos.numel() > 0: # Only select if positions exist
-            freqs_cis_q_slice = freqs_cis.index_select(0, q_pos) # Shape [q_s, Dq//2] complex
-        else:
-            # Need appropriate empty tensor shape if q_pos is empty
-            freqs_cis_q_slice = torch.empty((0, freqs_cis.shape[1]), dtype=freqs_cis.dtype, device=device)
-
-        freqs_cis_k_slice = freqs_cis.index_select(0, k_pos) # Shape [kv_s, Dk//2] complex
-
-        # Adapt freqs_cis_k slice if K head dimension differs from Q head dimension
-        if self.head_dim != self.k_head_dim:
-            # Assuming RoPE was calculated based on self.head_dim (Dq)
-            print(f"Warning: Adapting RoPE frequencies for K head_dim ({self.k_head_dim}) from Q head_dim ({self.head_dim})")
-            freqs_cis_k_slice = freqs_cis_k_slice[:, :self.k_head_dim//2]
-
-        # Call apply_rotary_emb twice using the original function signature:
-        q_rot = apply_rotary_emb(q, freqs_cis=freqs_cis_q_slice) if q_pos.numel() > 0 else q # Handle empty case
-        k_hat_rot = apply_rotary_emb(k_hat, freqs_cis=freqs_cis_k_slice)
-        # v_hat remains unrotated
+        # # --- 8. Apply RoPE (Corrected) ---
+        # # Apply RoPE separately to fresh query 'q' and reconstructed key 'k_hat'
+        # # using their corresponding frequency slices.
+        #
+        # # Select frequency slices based on absolute positions
+        # # Ensure kv_write_indices is not empty before calling min/max
+        # if kv_write_indices.numel() > 0:
+        #     q_start_pos = kv_write_indices.min().item() # Get Python int
+        #     q_end_pos = kv_write_indices.max().item() + 1 # Get Python int
+        #     q_pos = torch.arange(q_start_pos, q_end_pos, device=device)
+        # else:
+        #     # Handle empty case - perhaps create an empty position tensor
+        #     # Or this case might be guaranteed not to happen if q_seq_len > 0
+        #     q_pos = torch.empty(0, dtype=torch.long, device=device)
+        #
+        #
+        # k_pos = torch.arange(kv_seq_len, device=device) # kv_seq_len is already an int
+        #
+        # # Clamp positions to max length of precomputed freqs
+        # max_freq_len = freqs_cis.shape[0]
+        # q_pos = q_pos.clamp(max=max_freq_len - 1)
+        # k_pos = k_pos.clamp(max=max_freq_len - 1)
+        #
+        # if q_pos.numel() > 0: # Only select if positions exist
+        #     freqs_cis_q_slice = freqs_cis.index_select(0, q_pos) # Shape [q_s, Dq//2] complex
+        # else:
+        #     # Need appropriate empty tensor shape if q_pos is empty
+        #     freqs_cis_q_slice = torch.empty((0, freqs_cis.shape[1]), dtype=freqs_cis.dtype, device=device)
+        #
+        # freqs_cis_k_slice = freqs_cis.index_select(0, k_pos) # Shape [kv_s, Dk//2] complex
+        #
+        # # Adapt freqs_cis_k slice if K head dimension differs from Q head dimension
+        # if self.head_dim != self.k_head_dim:
+        #     # Assuming RoPE was calculated based on self.head_dim (Dq)
+        #     print(f"Warning: Adapting RoPE frequencies for K head_dim ({self.k_head_dim}) from Q head_dim ({self.head_dim})")
+        #     freqs_cis_k_slice = freqs_cis_k_slice[:, :self.k_head_dim//2]
+        #
+        # # Call apply_rotary_emb twice using the original function signature:
+        # q_rot = apply_rotary_emb(q, freqs_cis=freqs_cis_q_slice) if q_pos.numel() > 0 else q # Handle empty case
+        # k_hat_rot = apply_rotary_emb(k_hat, freqs_cis=freqs_cis_k_slice)
+        # # v_hat remains unrotated
+        q_rot = q
+        k_hat_rot = k_hat
 
         # --- 9. Optional QK Norm ---
         if self.query_norm is not None and self.key_norm is not None:
