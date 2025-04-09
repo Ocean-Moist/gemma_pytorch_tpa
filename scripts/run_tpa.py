@@ -286,14 +286,15 @@ def main(_):
                 # if qkv_target_key in model.state_dict():
                 #      isp_kv_state_dict[qkv_target_key] = qkv_orig
 
-                # Option B: If ISP_KVAttention uses separate Wq, Wk, Wv layers
+                    # Option B: If ISP_KVAttention uses separate Wq, Wk, Wv layers
                 q_orig_split, k_orig_split, v_orig_split = split_combined_qkv_weights(qkv_orig, model.config)
                 q_target_key = f"model.layers.{i}.self_attn.W_q.weight"
                 k_target_key = f"model.layers.{i}.self_attn.W_k.weight"
                 v_target_key = f"model.layers.{i}.self_attn.W_v.weight"
-                if q_target_key in model.state_dict(): isp_kv_state_dict[q_target_key] = q_orig_split
-                if k_target_key in model.state_dict(): isp_kv_state_dict[k_target_key] = k_orig_split
-                if v_target_key in model.state_dict(): isp_kv_state_dict[v_target_key] = v_orig_split
+                # --- > FIX: Transpose the weights before assigning < ---
+                if q_target_key in model.state_dict(): isp_kv_state_dict[q_target_key] = q_orig_split.t().contiguous()
+                if k_target_key in model.state_dict(): isp_kv_state_dict[k_target_key] = k_orig_split.t().contiguous()
+                if v_target_key in model.state_dict(): isp_kv_state_dict[v_target_key] = v_orig_split.t().contiguous()
 
                 # Output projection weight
                 o_target_key = f"model.layers.{i}.self_attn.o_proj.weight"
