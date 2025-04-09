@@ -124,7 +124,7 @@ def prepare_isp_kv_components(
     """
     print(f"--- Starting ISP-KV Component Preparation ---")
     print(f"Target ranks: r_k={r_k}, r_v={r_v}")
-    start_time = time.time()
+    start_time = time()
     torch_device = torch.device(device)
     compute_dtype = torch.float32 # Use float32 for SVD stability
 
@@ -145,7 +145,7 @@ def prepare_isp_kv_components(
     # --- Process Each Layer ---
     for layer_idx in range(num_layers):
         print(f"\nProcessing Layer {layer_idx}...")
-        layer_start_time = time.time()
+        layer_start_time = time()
 
         # --- 1. Load/Extract Original Weights for this Layer ---
         qkv_key = qkv_proj_key_pattern.format(layer_idx)
