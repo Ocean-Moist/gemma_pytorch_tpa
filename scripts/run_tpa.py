@@ -70,6 +70,9 @@ from absl import flags
 import numpy as np
 import torch
 
+from gemma.tpa import GemmaForCausalLMwithISP_KV
+from gemma.tpa.modules import prepare_isp_kv_components, split_combined_qkv_weights
+
 # Ensure the project root is in the path to find gemma modules
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -79,21 +82,6 @@ if project_root not in sys.path:
 from gemma import config as gemma_config
 from gemma import model as gemma_model # Standard Gemma GQA model
 from gemma import tokenizer as gemma_tokenizer
-
-# ISP-KV modules (Conversion and Model)
-try:
-    # Assumes prepare_isp_kv_components is in gqa_to_tpa.py (or renamed file)
-    from gemma.tpa.modules.gqa_to_tpa import prepare_isp_kv_components, split_combined_qkv_weights
-    # Assumes ISP-KV model is in gemma3_isp_kv_model.py
-    from gemma.tpa.gemma3_isp_kv_model import GemmaForCausalLMwithISP_KV
-    isp_kv_modules_available = True
-except ImportError as e:
-    print(f"Warning: Could not import ISP-KV modules: {e}")
-    print("Conversion to ISP-KV will not be possible.")
-    isp_kv_modules_available = False
-    # Define dummy classes if needed to prevent NameErrors later
-    class GemmaForCausalLMwithISP_KV: pass
-    def prepare_isp_kv_components(*args, **kwargs): pass
 
 
 # ------------------------------------------------------------
@@ -224,10 +212,6 @@ def main(_):
 
     # --- Conversion Path ---
     if FLAGS.convert:
-        if not isp_kv_modules_available:
-            print("ERROR: Cannot convert model because ISP-KV modules are not available.")
-            sys.exit(1)
-
         print(f"\n--- Starting GQA to ISP-KV Conversion ---")
         print(f"Loading standard Gemma model from {FLAGS.ckpt}...")
 
@@ -356,7 +340,7 @@ def main(_):
 
     # --- Loading Path (Standard GQA or Pre-converted ISP-KV) ---
     else:
-        if load_as_isp_kv and isp_kv_modules_available:
+        if load_as_isp_kv:
             print(f"Loading pre-converted ISP-KV model from {FLAGS.ckpt}...")
             try:
                 # model_config should have been loaded during peeking if ckpt is file
