@@ -68,7 +68,8 @@ class ISP_KVAttention(nn.Module):
         self.register_buffer('V_r_basis', torch.zeros(self.num_heads, self.head_dim, self.r_k))
         # Z_v: Basis for projecting V, derived from Left Singular Vectors of Wv. Per KV Group.
         self.register_buffer('Z_v_basis', torch.zeros(self.num_kv_heads, self.head_dim, self.r_v))
-
+        self.k_head_dim = config.head_dim
+        self.v_head_dim = config.head_dim
         # --- Optional QK Norm ---
         self.query_norm = (
             RMSNorm(self.head_dim, eps=config.rms_norm_eps)
