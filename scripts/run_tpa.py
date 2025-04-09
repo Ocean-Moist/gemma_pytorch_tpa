@@ -61,7 +61,7 @@ import contextlib
 import random
 import os
 import sys
-from time import time
+from time import time as time
 import gc
 import json
 
