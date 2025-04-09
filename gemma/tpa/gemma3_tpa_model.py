@@ -177,6 +177,35 @@ class ISP_KVAttention(nn.Module):
         v_hat = torch.einsum('bsgr,grd->bsgd', pv_cached, self.Z_v_basis.transpose(-1, -2))
         # v_hat shape: [b, kv_s, N_kv, Dv]
 
+        # --- ADD RECONSTRUCTION CHECKS (Run only once or few steps for debugging) ---
+        # Compare k_hat with the original k (need to read k from cache or recompute for comparison)
+        # Let's recompute k and v for the *cached* part for easier comparison here.
+        # NOTE: This adds overhead, only for debugging!
+        if kv_write_indices.max() < 5: # Limit check to first few steps
+            with torch.no_grad(): # Ensure no gradients tracked here
+                # Need original hidden_states corresponding to the cached sequence
+                # This is tricky as hidden_states only has the *current* step(s)
+                # Alternative: Compare pk @ Vr.T with k @ Vr @ Vr.T
+                # Let's directly compare the reconstruction quality by re-projecting k
+
+                # Recompute original k for the cached positions
+                # This requires access to the *past* hidden states, which we don't have here.
+                # Easier Check: Verify if V_r @ V_r.T is close to Identity
+                I_k = torch.eye(self.head_dim, device=device, dtype=compute_dtype)
+                Vr_VrT = torch.matmul(self.V_r_basis, self.V_r_basis.transpose(-1, -2)) # Shape [N_h, Dk, Dk]
+                identity_error_k = torch.linalg.norm(Vr_VrT - I_k.unsqueeze(0)) / math.sqrt(self.num_heads * self.head_dim)
+                print(f"DEBUG Step {kv_write_indices.max().item()}: K Basis Ortho Check (||V_r V_r^T - I||/sqrt(N*D)): {identity_error_k.item():.6e}")
+
+                # Verify if Z_v @ Z_v.T is close to Identity
+                I_v = torch.eye(self.head_dim, device=device, dtype=compute_dtype) # Assuming Dv = head_dim
+                Zv_ZvT = torch.matmul(self.Z_v_basis, self.Z_v_basis.transpose(-1, -2)) # Shape [N_kv, Dv, Dv]
+                identity_error_v = torch.linalg.norm(Zv_ZvT - I_v.unsqueeze(0)) / math.sqrt(self.num_kv_heads * self.head_dim)
+                print(f"DEBUG Step {kv_write_indices.max().item()}: V Basis Ortho Check (||Z_v Z_v^T - I||/sqrt(N*D)): {identity_error_v.item():.6e}")
+
+                # If bases are identity, k_hat should equal k projected onto that basis space
+                # (which should be k itself). Check norm difference.
+                # Still need original k/v. Let's just check the basis integrity for now.
+
         # # --- 8. Apply RoPE (Corrected) ---
         # # Apply RoPE separately to fresh query 'q' and reconstructed key 'k_hat'
         # # using their corresponding frequency slices.
