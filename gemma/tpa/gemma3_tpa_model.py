@@ -4,12 +4,14 @@ Inference-only Gemma model implementation with Interaction Subspace Projection K
 """
 import gc
 import json
+import math
 import os
 from typing import List, Tuple, Union, Mapping, Optional, Sequence, Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from triton.language import bfloat16
 
 from .. import config as gemma_config
 from .. import model as gemma_model  # For helpers like RMSNorm, Embedding, MLP, RoPE, Sampler etc.
@@ -191,13 +193,13 @@ class ISP_KVAttention(nn.Module):
                 # Recompute original k for the cached positions
                 # This requires access to the *past* hidden states, which we don't have here.
                 # Easier Check: Verify if V_r @ V_r.T is close to Identity
-                I_k = torch.eye(self.head_dim, device=device, dtype=compute_dtype)
+                I_k = torch.eye(self.head_dim, device=device, dtype=bfloat16)
                 Vr_VrT = torch.matmul(self.V_r_basis, self.V_r_basis.transpose(-1, -2)) # Shape [N_h, Dk, Dk]
                 identity_error_k = torch.linalg.norm(Vr_VrT - I_k.unsqueeze(0)) / math.sqrt(self.num_heads * self.head_dim)
                 print(f"DEBUG Step {kv_write_indices.max().item()}: K Basis Ortho Check (||V_r V_r^T - I||/sqrt(N*D)): {identity_error_k.item():.6e}")
 
                 # Verify if Z_v @ Z_v.T is close to Identity
-                I_v = torch.eye(self.head_dim, device=device, dtype=compute_dtype) # Assuming Dv = head_dim
+                I_v = torch.eye(self.head_dim, device=device, dtype=torch.bfloat16) # Assuming Dv = head_dim
                 Zv_ZvT = torch.matmul(self.Z_v_basis, self.Z_v_basis.transpose(-1, -2)) # Shape [N_kv, Dv, Dv]
                 identity_error_v = torch.linalg.norm(Zv_ZvT - I_v.unsqueeze(0)) / math.sqrt(self.num_kv_heads * self.head_dim)
                 print(f"DEBUG Step {kv_write_indices.max().item()}: V Basis Ortho Check (||Z_v Z_v^T - I||/sqrt(N*D)): {identity_error_v.item():.6e}")
