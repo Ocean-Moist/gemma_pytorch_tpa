@@ -132,7 +132,8 @@ def get_base_config(variant: str, device: str) -> gemma_config.GemmaConfig:
     """Gets the base Gemma configuration for a given variant."""
     variant = variant.lower()
     # Default compute dtype based on device
-    dtype = 'bfloat16' if device == 'cuda' and torch.cuda.is_bf16_supported() else 'float16' if device == 'cuda' else 'float32'
+    # dtype = 'bfloat16' if device == 'cuda' and torch.cuda.is_bf16_supported() else 'float16' if device == 'cuda' else 'float32'
+    dtype = torch.float32
 
     try:
         config_getter = getattr(gemma_config, f'get_config_for_{variant}')
@@ -168,6 +169,7 @@ def main(_):
         compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     else:
         compute_dtype = torch.float32 # CPU generally uses float32
+    compute_dtype = torch.float32
 
     print(f"Using device: {torch_device}, Compute dtype: {compute_dtype}")
     print(f"Running Gemma variant: {FLAGS.variant}")
