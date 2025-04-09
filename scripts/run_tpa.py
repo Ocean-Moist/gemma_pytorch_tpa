@@ -133,7 +133,7 @@ def get_base_config(variant: str, device: str) -> gemma_config.GemmaConfig:
     variant = variant.lower()
     # Default compute dtype based on device
     # dtype = 'bfloat16' if device == 'cuda' and torch.cuda.is_bf16_supported() else 'float16' if device == 'cuda' else 'float32'
-    dtype = torch.float32
+    dtype = 'float32'
 
     try:
         config_getter = getattr(gemma_config, f'get_config_for_{variant}')
