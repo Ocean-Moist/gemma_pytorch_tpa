@@ -168,26 +168,35 @@ def prepare_isp_kv_components(
             continue
 
         # --- 2. Calculate Value Basis (Z_v) ---
-        print("  Calculating Z_v basis (from W_v SVD)...")
+        print("  Calculating Z_v basis (from W_v SVD - using RIGHT singular vectors)...") # Corrected comment
         all_Z_v_bases_layer = []
         actual_r_v_layer = []
-        v_weight_reshaped = v_weight.view(hidden_dim, num_kv_heads, head_dim)
+        # Ensure v_weight is [hidden_dim, num_kv_heads * head_dim] before reshaping
+        if v_weight.shape[0] != hidden_dim:
+            raise ValueError(f"v_weight has unexpected shape {v_weight.shape}, expected first dim {hidden_dim}")
+        try:
+            v_weight_reshaped = v_weight.view(hidden_dim, num_kv_heads, head_dim)
+        except RuntimeError as e:
+            raise ValueError(f"Cannot reshape v_weight {v_weight.shape} into ({hidden_dim}, {num_kv_heads}, {head_dim})") from e
+
 
         for g in range(num_kv_heads):
-            W_v_g = v_weight_reshaped[:, g, :] # Shape [hidden, Dv]
+            W_v_g = v_weight_reshaped[:, g, :] # Shape [hidden, Dv=head_dim]
             try:
-                # W_v = U S V^T. Z_v = U[:, :r_v].
+                # W_v = U S V^T. Z_v should be V[:, :r_v].
                 U_v, S_v, Vv_T = torch.linalg.svd(W_v_g, full_matrices=False)
-                # U_v shape [Dv, min(hidden, Dv)], we need first Dv components if hidden > Dv
-                effective_rank_limit = U_v.shape[1]
+                # Vv_T shape [min(hidden, Dv), Dv]. Vv = Vv_T.T shape [Dv, min(hidden, Dv)]
+                effective_rank_limit = Vv_T.shape[0] # Number of singular values/vectors returned
                 current_r_v = min(r_v, effective_rank_limit)
 
                 if current_r_v <= 0:
                     print(f"    Warning: Effective r_v for group {g} is <= 0. Using zeros.")
-                    Z_v_g = torch.zeros((head_dim, r_v), device=torch_device, dtype=compute_dtype) # Use target r_v for shape consistency
+                    # Create Z_v_g with correct target shape [Dv, r_v]
+                    Z_v_g = torch.zeros((head_dim, r_v), device=torch_device, dtype=compute_dtype)
                     current_r_v = 0 # Record actual rank used
                 else:
-                    Z_v_g = U_v[:, :current_r_v] # Shape [Dv, current_r_v]
+                    # Select the first current_r_v columns from Vv = Vv_T.T
+                    Z_v_g = Vv_T.t()[:, :current_r_v] # Shape [Dv=head_dim, current_r_v]
 
                 all_Z_v_bases_layer.append(Z_v_g)
                 actual_r_v_layer.append(current_r_v)
@@ -200,12 +209,14 @@ def prepare_isp_kv_components(
         max_r_v_layer = max(actual_r_v_layer) if actual_r_v_layer else 0
         print(f"    Max effective r_v for layer {layer_idx}: {max_r_v_layer} (Target: {r_v})")
 
-        # Pad and Stack Z_v bases
+        # Pad and Stack Z_v bases - Target shape [N_kv, Dv, max_r_v_layer]
         final_Z_v_basis_layer = torch.zeros((num_kv_heads, head_dim, max_r_v_layer), device=torch_device, dtype=compute_dtype)
         for g, Z_v_g in enumerate(all_Z_v_bases_layer):
             rank_used = actual_r_v_layer[g]
             if rank_used > 0:
+                # Assign the [Dv, rank_used] tensor Z_v_g to the slice
                 final_Z_v_basis_layer[g, :, :rank_used] = Z_v_g
+        # Shape check: LHS slice is [head_dim, rank_used]. RHS Z_v_g is [head_dim, rank_used]. Matches.
 
         # --- 3. Calculate Key Basis (V_r) ---
         print("  Calculating V_r basis (from Wq^T Wk SVD)...")
