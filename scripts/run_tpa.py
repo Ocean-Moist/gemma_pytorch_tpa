@@ -61,9 +61,9 @@ import contextlib
 import random
 import os
 import sys
-from time import time as time
 import gc
 import json
+from time import time
 
 from absl import app
 from absl import flags

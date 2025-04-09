@@ -8,7 +8,7 @@ to Tensor Product Attention (TPA) format using TensorLLM-style Tucker decomposit
 import tensorly as tl
 
 from gemma.config import GemmaConfig
-from time import time as time
+from time import time
 from gemma.model import GemmaForCausalLM
 
 # Set PyTorch as backend, which will use CUDA if PyTorch is using CUDA
