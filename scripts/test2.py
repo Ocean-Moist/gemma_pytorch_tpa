@@ -171,7 +171,7 @@ def test_effective_weights(args):
 
     # 2. Get Config
     config = get_base_config(args.variant)
-    target_r_v = config.head_dim # Use full rank for this test
+    target_r_v = config.head_dim / 4 # Use full rank for this test
     print(f"Using full rank for V-path test: r_v = {target_r_v}")
 
     # 3. Prepare New State Dict (Copy Original)
