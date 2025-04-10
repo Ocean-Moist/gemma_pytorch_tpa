@@ -248,7 +248,7 @@ def test_effective_weights(args):
     gemma_tok = gemma_tokenizer.Tokenizer(config.tokenizer) # Load tokenizer using path in config
 
     try:
-        with torch.no_grad(), _set_default_tensor_type(model.dtype):
+        with torch.no_grad(), _set_default_tensor_type(inference_dtype):
             results = model.generate(
                 prompts=[prompt],
                 device=device,
