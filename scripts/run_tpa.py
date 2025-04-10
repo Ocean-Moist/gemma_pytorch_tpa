@@ -403,7 +403,10 @@ def main(_):
         sys.exit(1)
 
     load_time_end = time()
-    print(f"Model ({model_type}) is on device={torch_device} (dtype={model.dtype}), ready.")
+    if model_type != "Standard GQA":
+        print(f"Model ({model_type}) is on device={torch_device} (dtype={model.dtype}), ready.")
+    else:
+        print(f"Model ({model_type}) is on device={torch_device} (dtype={compute_dtype}), ready.")
     print(f"Load/Conversion time: {load_time_end - load_start_time:.2f} seconds")
 
     # --- Inference ---
