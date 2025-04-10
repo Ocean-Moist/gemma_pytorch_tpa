@@ -1,13 +1,12 @@
 # test_effective_gqa.py
-import torch
-import time
-import math
+import argparse
+import contextlib
+import gc
 import os
 import sys
-import argparse
-import gc
-import json
-from typing import Dict, Tuple, Any
+from typing import Tuple
+
+import torch
 
 # Ensure the project root is in the path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -24,13 +23,7 @@ from gemma import config as gemma_config
 from gemma import model as gemma_model
 from gemma import tokenizer as gemma_tokenizer
 
-# Import necessary functions from the conversion script
-try:
-    # Need split_qkv and the config placeholder (or actual config class)
-    from gemma.tpa.modules.gqa_to_tpa import split_combined_qkv_weights, GemmaConfig
-except ImportError as e:
-    print(f"ERROR: Could not import required functions from conversion script: {e}")
-    sys.exit(1)
+from gemma.tpa.modules.gqa_to_tpa import split_combined_qkv_weights, GemmaConfig
 
 # --- Helper Functions ---
 @contextlib.contextmanager
@@ -239,7 +232,7 @@ def test_effective_weights(args):
         try:
             load_result = model.load_state_dict(new_state_dict, strict=False)
             print(f"Loaded with strict=False. Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}")
-        except Exception e2:
+        except Exception as e2:
             print(f"ERROR loading modified state dict even with strict=False: {e2}")
             return
 
