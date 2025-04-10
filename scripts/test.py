@@ -162,7 +162,17 @@ def test_reconstruction(args):
             I_k = torch.eye(Dk, device=device, dtype=test_dtype)
             # V_r @ V_r.T should be Identity
             P_k = torch.matmul(V_r_basis, V_r_basis.transpose(-1, -2)) # [N_h, Dk, Dk]
-            identity_error_k = torch.linalg.norm(P_k - I_k.unsqueeze(0), ord='fro') / math.sqrt(N_h * Dk * Dk) # Normalize differently
+            # --- FIX: Calculate norm correctly for batch of matrices ---
+            # Calculate Frobenius norm for each matrix's difference from Identity
+            error_matrices_k = P_k - I_k.unsqueeze(0) # [N_h, Dk, Dk]
+            # Compute squared Frobenius norm for each matrix in the batch
+            squared_fro_norms_k = torch.sum(error_matrices_k**2, dim=(-1, -2)) # [N_h]
+            # Sum of squared norms, then sqrt == Overall Frobenius norm of the "flattened" error tensor
+            total_fro_norm_k = torch.sqrt(torch.sum(squared_fro_norms_k))
+            # Normalize by sqrt of total number of elements N_h * Dk * Dk
+            identity_error_k = total_fro_norm_k / math.sqrt(N_h * Dk * Dk)
+            # --- End Fix ---
+
             print(f"  K Basis Check (||V_r @ V_r.T - I||_F / sqrt(N*D*D)): {identity_error_k.item():.6e}")
             if identity_error_k > 1e-5: print("    WARNING: K Basis orthonormality error is high!")
         else:
@@ -173,9 +183,15 @@ def test_reconstruction(args):
             I_v = torch.eye(Dv, device=device, dtype=test_dtype)
             # Z_v @ Z_v.T should be Identity
             P_v = torch.matmul(Z_v_basis, Z_v_basis.transpose(-1, -2)) # [N_kv, Dv, Dv]
-            identity_error_v = torch.linalg.norm(P_v - I_v.unsqueeze(0), ord='fro') / math.sqrt(N_kv * Dv * Dv)
+
+            # --- FIX: Calculate norm correctly for batch of matrices ---
+            error_matrices_v = P_v - I_v.unsqueeze(0) # [N_kv, Dv, Dv]
+            squared_fro_norms_v = torch.sum(error_matrices_v**2, dim=(-1, -2)) # [N_kv]
+            total_fro_norm_v = torch.sqrt(torch.sum(squared_fro_norms_v))
+            identity_error_v = total_fro_norm_v / math.sqrt(N_kv * Dv * Dv)
+            # --- End Fix ---
             print(f"  V Basis Check (||Z_v @ Z_v.T - I||_F / sqrt(N*D*D)): {identity_error_v.item():.6e}")
-            if identity_error_v > 1e-5: print("    WARNING: V Basis orthonormality error is high!")
+        if identity_error_v > 1e-5: print("    WARNING: V Basis orthonormality error is high!")
         else:
             print(f"  Skipping V Basis orthonormality check (effective r_v {Z_v_basis.shape[-1]} != Dv {Dv})")
 
