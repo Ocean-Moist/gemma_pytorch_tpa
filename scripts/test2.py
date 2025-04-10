@@ -197,18 +197,17 @@ def test_effective_weights(args):
             # Calculate effective V weight
             W_v_eff = calculate_effective_v_weight(v_orig, Z_v_basis, config, device)
 
-            # Recombine Q(orig), K(orig), V(eff)
-            # Ensure correct layout matching original qkv_weight_orig
-            q_part = q_orig
-            k_part = k_orig
-            v_part = W_v_eff
+            q_part = q_orig.to(device)
+            k_part = k_orig.to(device)
+            v_part = W_v_eff # Already on target device
+
             if qkv_weight_orig.shape[0] > qkv_weight_orig.shape[1]: # Shape [ProjTotal, Hidden]
                 qkv_eff = torch.cat([q_part.t(), k_part.t(), v_part.t()], dim=0)
             else: # Shape [Hidden, ProjTotal]
                 qkv_eff = torch.cat([q_part, k_part, v_part], dim=1)
 
             # Update the new state dictionary
-            new_state_dict[qkv_key] = qkv_eff.to(dtype=qkv_weight_orig.dtype, device='cpu') # Store back on CPU in original dtype
+            new_state_dict[qkv_key] = qkv_eff.to(device='cpu', dtype=qkv_weight_orig.dtype)
 
         except Exception as e:
             print(f"    ERROR processing layer {i}: {e}")
