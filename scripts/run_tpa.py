@@ -415,7 +415,7 @@ def main(_):
     print(f"Settings: temp={FLAGS.temperature}, top_p={FLAGS.top_p}, top_k={FLAGS.top_k}, max_tokens={FLAGS.output_len}")
 
     # Set default dtype for generation consistency
-    with _set_default_tensor_type(model.dtype):
+    with _set_default_tensor_type(compute_dtype):
         generate_start_time = time()
         try:
             results = model.generate(
