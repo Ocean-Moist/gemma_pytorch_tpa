@@ -418,15 +418,26 @@ def main(_):
     with _set_default_tensor_type(compute_dtype):
         generate_start_time = time()
         try:
-            results = model.generate(
-                prompts=[FLAGS.prompt], # Pass as a list
-                device=torch_device,
-                max_tokens=FLAGS.output_len, # Use max_tokens argument
-                temperature=FLAGS.temperature if FLAGS.temperature > 0 else None, # Pass None for greedy
-                top_p=FLAGS.top_p,
-                top_k=FLAGS.top_k,
-            )
-            output_text = results[0] # Get the first result from the list
+           if model_type != "Standard GQA":
+                results = model.generate(
+                    prompts=[FLAGS.prompt], # Pass as a list
+                    device=torch_device,
+                    max_tokens=FLAGS.output_len, # Use max_tokens argument
+                    temperature=FLAGS.temperature if FLAGS.temperature > 0 else None, # Pass None for greedy
+                    top_p=FLAGS.top_p,
+                    top_k=FLAGS.top_k,
+                )
+           else:
+               results  = model.generate(
+                   prompts=[FLAGS.prompt], # Pass as a list
+                   device=torch_device,
+                   output_len=FLAGS.output_len, # Use output_len argument
+                   temperature=FLAGS.temperature if FLAGS.temperature > 0 else None, # Pass None for greedy
+                   top_p=FLAGS.top_p,
+                   top_k=FLAGS.top_k,
+               )
+                
+           output_text = results[0] # Get the first result from the list
 
         except Exception as e:
             print(f"\nERROR during generation: {e}")
