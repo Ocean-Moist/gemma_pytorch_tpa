@@ -436,7 +436,7 @@ def main(_):
                    top_p=FLAGS.top_p,
                    top_k=FLAGS.top_k,
                )
-                
+
            output_text = results[0] # Get the first result from the list
 
         except Exception as e:

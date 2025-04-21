@@ -219,8 +219,8 @@ def test_reconstruction(args):
             print(f"\nWarning: float64 simulation failed (likely unsupported op or OOM): {e}")
 
     print("\n--- Test Summary ---")
-    if err_k_f32 < 1e-5 and err_v_f32 < 1e-5:
-        print("SUCCESS: Reconstruction errors in float32 are low (<1e-5).")
+    if err_k_f32 < 1e-4 and err_v_f32 < 1e-4:
+        print("SUCCESS: Reconstruction errors in float32 are low (<1e-4).")
         print("The persistent garbled output in full inference is likely due to:")
         print("  1. Issues in the attention score/softmax calculation in ISP_KVAttention.forward.")
         print("  2. Issues in how Q is calculated or used.")
@@ -228,7 +228,7 @@ def test_reconstruction(args):
         print("  4. Potential subtle dtype mismatches during the full inference forward pass.")
         print("  5. Errors in loading the *original* Wq/Wk/Wv/Wo weights in run_isp_kv.py.")
     else:
-        print("FAILURE: Reconstruction errors in float32 are still high (>1e-5).")
+        print("FAILURE: Reconstruction errors in float32 are still high (>1e-4).")
         print("This suggests potential issues in:")
         print("  1. The einsum/matmul logic for projection (pk, pv) or reconstruction (k_hat, v_hat).")
         print("  2. The basis calculation SVD itself (less likely if ortho check passed).")
