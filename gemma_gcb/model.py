@@ -39,7 +39,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
 
         for l_idx, layer in enumerate(self.backbone.layers):
             cache = GCCache(max_seq, n_heads, r_a, r_b, r_v,
-                            d_k - r_k, device='cpu')   # will move with .to()
+                            d_k, device='cpu')   # will move with .to()
             self.layer_caches.append(cache)
 
             # keep the original GemmaAttention

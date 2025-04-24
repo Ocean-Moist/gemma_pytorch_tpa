@@ -12,12 +12,12 @@ from .rope_utils import apply_rope_phys
 class GCCache(torch.nn.Module):
     """Tiny per-layer cache that holds compressed KV + blanket sum."""
     def __init__(self, max_seq: int, n_h: int,
-                 r_a: int, r_b: int, r_v: int, d_tail: int, device):
+                 r_a: int, r_b: int, r_v: int, d_k: int, device):
         super().__init__()
         self.register_buffer('A', torch.zeros(max_seq, n_h, r_a, dtype=torch.float16, device=device))
         self.register_buffer('B', torch.zeros(max_seq, n_h, r_b, dtype=torch.float16, device=device))
         self.register_buffer('V', torch.zeros(max_seq, n_h, r_v, dtype=torch.float16, device=device))
-        self.register_buffer('S', torch.zeros(n_h, d_tail, dtype=torch.float32, device=device))
+        self.register_buffer('S', torch.zeros(n_h, d_k, dtype=torch.float32, device=device))
 
 # --------------------------------------------------------------------
 class GCBHead(torch.nn.Module):
@@ -117,7 +117,7 @@ class GCBHead(torch.nn.Module):
         # --------------- Read history ----------------------------
         a_hist = cache.A[:step, h_idx].to(dtype)          # (S , r_a)
         b_hist = cache.B[:step, h_idx].to(dtype)          # (S , r_b)
-        v_hist = cache.V[:step, h_idx].to(dtype) @ self.Z_r.T   # (S , d_v)
+        v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S , d_v)
 
         # Core logits using classic TPA formula
         core_log = (a_k @ a_hist.T) * (b_k @ b_hist.T)    # (B , S)
