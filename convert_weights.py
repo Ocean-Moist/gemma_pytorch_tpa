@@ -63,7 +63,13 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05):
 
 # --------------------------------------------------------------------------
 def convert(orig_ckpt: Path, out_stem: Path):
+
     sd = torch.load(orig_ckpt, mmap=True, weights_only=True)
+
+    print("Available keys in state dict:")
+    for key in sd.keys():
+        print(key)
+
     meta = GCBMeta()
 
     for l in range(NUM_LAYERS):

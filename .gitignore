@@ -174,3 +174,5 @@ cython_debug/
 
 # Sphinx documentation
 _build/
+
+**/CLAUDE.local.md
