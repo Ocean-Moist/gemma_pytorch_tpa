@@ -71,27 +71,35 @@ class GCBHead(torch.nn.Module):
         device, dtype = q_head.device, q_head.dtype
         if self.powmap is None:
             self.powmap = PowerMap(self.alpha, self.r_k, self.d_k).to(device)
+            
+        # promote the half-precision buffers to the incoming compute dtype
+        A        = self.A.to(dtype)
+        A_invT   = self.A_invT.to(dtype)
+        P_r      = self.P_r.to(dtype)
+        P_a      = self.P_a.to(dtype)
+        P_b      = self.P_b.to(dtype)
+        Z_r      = self.Z_r.to(dtype)
 
         # ----------------------------------------------------------
         # 1)  phys → gauge
         # 2)  apply RoPE in physical basis
         # 3)  bring the *rotated* vectors back into the gauge basis
         # ----------------------------------------------------------
-        qg = q_head @ self.A                           # gauge
-        kg = k_head @ self.A
+        qg = q_head @ A                           # gauge
+        kg = k_head @ A
 
-        q_rot = apply_rope_phys(qg, self.A_invT, freqs_row) @ self.A.T  # gauge
-        k_rot = apply_rope_phys(kg, self.A_invT, freqs_row) @ self.A.T  # gauge
+        q_rot = apply_rope_phys(qg, A_invT, freqs_row) @ A.T  # gauge
+        k_rot = apply_rope_phys(kg, A_invT, freqs_row) @ A.T  # gauge
 
         # ---------------- Core factors ----------------------------
-        p_q = q_rot @ self.P_r                     # (B , r_k)
-        p_k = k_rot @ self.P_r                     # (B , r_k)
+        p_q = q_rot @ P_r                     # (B , r_k)
+        p_k = k_rot @ P_r                     # (B , r_k)
 
-        a_k = p_k @ self.P_a                       # (B , r_a)
-        b_k = p_k @ self.P_b                       # (B , r_b)
+        a_k = p_k @ P_a                       # (B , r_a)
+        b_k = p_k @ P_b                       # (B , r_b)
 
         # --------------- Value projection (stays physical) --------
-        p_v = v_head @ self.Z_r                   # (B , r_v)
+        p_v = v_head @ Z_r                   # (B , r_v)
 
         # --------------- Cache write ------------------------------
         cache.A[step, h_idx] = a_k.to(torch.float16)
