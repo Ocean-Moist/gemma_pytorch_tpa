@@ -65,19 +65,7 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05):
 def convert(orig_ckpt: Path, out_stem: Path):
 
     sd = torch.load(orig_ckpt, mmap=True, weights_only=True)
-
-    print("Available keys in state dict:")
-    for key in sd.keys():
-        print(key)
-
-    # This prints:
-    #Available keys in state dict:
-    # model_state_dict
-    # so we need to access the model_state_dict key
     sd = sd['model_state_dict']
-    print("Available keys in model_state_dict:")
-    for key in sd.keys():
-        print(key)
 
     meta = GCBMeta()
 
