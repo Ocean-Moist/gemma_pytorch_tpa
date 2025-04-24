@@ -107,7 +107,7 @@ class GCBHead(torch.nn.Module):
         cache.V[step, h_idx] = p_v.to(torch.float16)
 
         # Blanket running-sum (gauge basis, fp32)
-        phi_k = self.powmap(core_residual(k_rot, self.P_r))     # (B , d_k)
+        phi_k = self.powmap(core_residual(k_rot, P_r))     # (B , d_k)
         cache.S[h_idx] += phi_k.sum(0).float()
 
         # During the first token there is nothing to attend to.
@@ -124,7 +124,7 @@ class GCBHead(torch.nn.Module):
         core_log = core_log / math.sqrt(self.d_k)
 
         # Blanket logits
-        phi_q   = self.powmap(core_residual(q_rot, self.P_r))   # (B , d_k)
+        phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
         tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
 
         # broadcast tail_log over sequence length
