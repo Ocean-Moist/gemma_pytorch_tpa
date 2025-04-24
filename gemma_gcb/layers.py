@@ -72,13 +72,13 @@ class GCBHead(torch.nn.Module):
         if self.powmap is None:
             self.powmap = PowerMap(self.alpha, self.r_k, self.d_k).to(device)
             
-        # promote the half-precision buffers to the incoming compute dtype
-        A        = self.A.to(dtype)
-        A_invT   = self.A_invT.to(dtype)
-        P_r      = self.P_r.to(dtype)
-        P_a      = self.P_a.to(dtype)
-        P_b      = self.P_b.to(dtype)
-        Z_r      = self.Z_r.to(dtype)
+        # promote the half-precision buffers to the incoming compute dtype and device
+        A        = self.A.to(device=device, dtype=dtype)
+        A_invT   = self.A_invT.to(device=device, dtype=dtype)
+        P_r      = self.P_r.to(device=device, dtype=dtype)
+        P_a      = self.P_a.to(device=device, dtype=dtype)
+        P_b      = self.P_b.to(device=device, dtype=dtype)
+        Z_r      = self.Z_r.to(device=device, dtype=dtype)
 
         # ----------------------------------------------------------
         # 1)  phys → gauge
