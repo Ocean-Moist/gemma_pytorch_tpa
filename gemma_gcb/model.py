@@ -164,7 +164,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 values = torch.stack(values_all)          # (H , step , d_v)
                 attn_weights = torch.softmax(logits, -1)  # (H , B , step)
                 ctx = (attn_weights.unsqueeze(-1) * values).sum(-2)  # (H , B , d_v)
-                in_dim = attn.o_proj.weight.shape[0]      # 1024 for the 1-B model
+                in_dim = attn.o_proj.weight.shape[1]      # 1024 for the 1-B model
                 ctx = ctx.permute(1, 0, 2).reshape(B, 1, in_dim)
                 ctx = layer.attn_vanilla.o_proj(ctx)                 # back to d_model
                 h_step = h_step + ctx
