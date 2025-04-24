@@ -63,19 +63,27 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05):
 
 # --------------------------------------------------------------------------
 def convert(orig_ckpt: Path, out_stem: Path):
-
+    print(f"Loading checkpoint from {orig_ckpt}...")
     sd = torch.load(orig_ckpt, mmap=True, weights_only=True)
-    sd = sd['model_state_dict']
 
+    sd = sd['model_state_dict']
+    
+    print("Starting GCB metadata generation...")
     meta = GCBMeta()
 
     for l in range(NUM_LAYERS):
+        print(f"Processing layer {l}/{NUM_LAYERS-1}")
         # ----- Value projector -------------------------------------------
         Wv = sd[f'model.layers.{l}.self_attn.qkv_proj.weight']
         Wv = Wv.view(3, NUM_HEADS, HEAD_DIM, -1)[2]        # (H , d_k , d_in)
-        Wv = Wv.permute(0, 2, 1).reshape(-1, HEAD_DIM)      # (d_in*H , d_k)
+        Wv = Wv.permute(0, 2, 1).reshape(-1, HEAD_DIM)     # (d_in*H , d_k)
+        
+        # Cast to float32 for SVD
+        Wv_float = Wv.float()
+        print(f"  Value matrix shape: {Wv_float.shape}, dtype: {Wv_float.dtype}")
+        
         # Get right singular vectors (for value space projector)
-        _, _, Vh = torch.linalg.svd(Wv, full_matrices=False)
+        _, _, Vh = torch.linalg.svd(Wv_float, full_matrices=False)
         Z_r = Vh.T[:, :R_V].contiguous()  # (d_k , r_v) -> (256, R_V)
         meta.layers[l] = LayerAux(Z_r.half())
 
@@ -83,8 +91,8 @@ def convert(orig_ckpt: Path, out_stem: Path):
             # ---- original per-head weights -----------------------------
             Wqkv = sd[f'model.layers.{l}.self_attn.qkv_proj.weight']
             Wqkv = Wqkv.view(3, NUM_HEADS, HEAD_DIM, -1)
-            Wq = Wqkv[0, h].T     # (d_in , d_k)
-            Wk = Wqkv[1, h].T
+            Wq = Wqkv[0, h].T.float()     # (d_in , d_k), cast to float32
+            Wk = Wqkv[1, h].T.float()     # Cast to float32
 
             # ------------- ∆-gauge heuristic ----------------------------
             C = Wq.T @ Wk
@@ -92,11 +100,10 @@ def convert(orig_ckpt: Path, out_stem: Path):
 
             Wq_g, Wk_g = Wq @ A, Wk @ A_invT
             Cg = Wq_g.T @ Wk_g
-            _, _, Vh = torch.linalg.svd(Cg, full_matrices=False)
+            _, s, Vh = torch.linalg.svd(Cg, full_matrices=False)
             P_r = Vh[:R_K].T         # (d_k , r_k)
 
-            sig = torch.linalg.svdvals(Cg)
-            alpha, lam = fit_powerlaw(sig[R_K:])
+            alpha, lam = fit_powerlaw(s[R_K:])
 
             P_a, P_b = cp_factor(P_r)
             meta.add_head(l, h,
@@ -104,6 +111,7 @@ def convert(orig_ckpt: Path, out_stem: Path):
                           P_r.half(), P_a.half(), P_b.half(),
                           alpha, lam)
 
+    print("Saving GCB metadata and model weights...")
     meta.save(out_stem.with_suffix('.pkl'))
     torch.save(sd, out_stem.with_suffix('.pt'))
     print(f"✓  Saved  {out_stem}.pt   and   {out_stem}.pkl")
