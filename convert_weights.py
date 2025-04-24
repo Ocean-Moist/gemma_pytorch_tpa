@@ -98,18 +98,6 @@ def convert(orig_ckpt: Path, out_stem: Path):
             C = Wq.T @ Wk
             A, A_invT = build_gauge(C, EPS)
 
-            # ----- also rotate the per-head biases -----------------
-            b_q = sd[f'model.layers.{l}.self_attn.qkv_proj.bias']\
-                     .view(3, NUM_HEADS, HEAD_DIM)[0, h].float()
-            b_k = sd[f'model.layers.{l}.self_attn.qkv_proj.bias']\
-                     .view(3, NUM_HEADS, HEAD_DIM)[1, h].float()
-
-            # apply the same gauge to the biases
-            sd[f'model.layers.{l}.self_attn.qkv_proj.bias']\
-                 .view(3, NUM_HEADS, HEAD_DIM)[0, h] = (b_q @ A).half()
-            sd[f'model.layers.{l}.self_attn.qkv_proj.bias']\
-                 .view(3, NUM_HEADS, HEAD_DIM)[1, h] = (b_k @ A_invT).half()
-
             Wq_g, Wk_g = Wq @ A, Wk @ A_invT
             Cg = Wq_g.T @ Wk_g
             _, s, Vh = torch.linalg.svd(Cg, full_matrices=False)

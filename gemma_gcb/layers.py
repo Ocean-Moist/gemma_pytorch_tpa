@@ -8,6 +8,16 @@ from .gcb_meta import HeadAux
 from .phi import PowerMap, core_residual
 from .rope_utils import apply_rope_phys
 
+DEBUG = True          # flip to False for normal runs
+
+def _stats(name, t, step, ten, k=3):
+    """print mean/abs-mean/max of a tensor every k steps"""
+    if DEBUG and step % k == 0:
+        m = ten.float().mean().item()
+        am = ten.float().abs().mean().item()
+        mx = ten.float().abs().max().item()
+        print(f"[{step:>4}] {name:<15}  mean={m:+.3e}  |mean|={am:.3e}  max={mx:.3e}")
+
 # --------------------------------------------------------------------
 class GCCache(torch.nn.Module):
     """Tiny per-layer cache that holds compressed KV + blanket sum."""
@@ -87,13 +97,19 @@ class GCBHead(torch.nn.Module):
         # ----------------------------------------------------------
         qg = q_head @ A                           # gauge
         kg = k_head @ A
+        _stats("q_g", step, step, qg)
+        _stats("k_g", step, step, kg)
 
         q_rot = apply_rope_phys(qg, A_invT, freqs_row) @ A.T  # gauge
         k_rot = apply_rope_phys(kg, A_invT, freqs_row) @ A.T  # gauge
+        _stats("q_rot", step, step, q_rot)
+        _stats("k_rot", step, step, k_rot)
 
         # ---------------- Core factors ----------------------------
         p_q = q_rot @ P_r                     # (B , r_k)
         p_k = k_rot @ P_r                     # (B , r_k)
+        _stats("p_q", step, step, p_q)
+        _stats("p_k", step, step, p_k)
 
         a_k = p_k @ P_a                       # (B , r_a)
         b_k = p_k @ P_b                       # (B , r_b)
@@ -108,6 +124,7 @@ class GCBHead(torch.nn.Module):
 
         # Blanket running-sum (gauge basis, fp32)
         phi_k = self.powmap(core_residual(k_rot, P_r))     # (B , d_k)
+        _stats("phi_k", step, step, phi_k)
         cache.S[h_idx] += phi_k.sum(0).float()
 
         # During the first token there is nothing to attend to.
@@ -127,5 +144,10 @@ class GCBHead(torch.nn.Module):
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
         tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
 
+        # logging just before return
+        if lg is not None:                         # not the first token
+            _stats("core_log", step, step, core_log)
+            _stats("tail_log", step, step, tail_log)
+            
         # broadcast tail_log over sequence length
         return core_log + tail_log.unsqueeze(-1), v_hist
