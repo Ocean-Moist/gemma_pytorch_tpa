@@ -70,6 +70,15 @@ def convert(orig_ckpt: Path, out_stem: Path):
     for key in sd.keys():
         print(key)
 
+    # This prints:
+    #Available keys in state dict:
+    # model_state_dict
+    # so we need to access the model_state_dict key
+    sd = sd['model_state_dict']
+    print("Available keys in model_state_dict:")
+    for key in sd.keys():
+        print(key)
+
     meta = GCBMeta()
 
     for l in range(NUM_LAYERS):
