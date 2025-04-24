@@ -144,8 +144,8 @@ class GCBHead(torch.nn.Module):
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
         tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
 
-        # logging just before return
-        if lg is not None:                         # not the first token
+        # logging just before return (during non-first tokens)
+        if step > 0:  # not the first token
             _stats("core_log", step, step, core_log)
             _stats("tail_log", step, step, tail_log)
             
