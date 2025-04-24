@@ -6,7 +6,6 @@ from typing import Optional, Tuple, List
 
 from .gcb_meta import HeadAux
 from .phi import PowerMap, core_residual
-from .rope_utils import apply_rope_phys
 
 DEBUG = True          # flip to False for normal runs
 
@@ -91,17 +90,22 @@ class GCBHead(torch.nn.Module):
         Z_r      = self.Z_r.to(device=device, dtype=dtype)
 
         # ----------------------------------------------------------
-        # 1)  phys → gauge
-        # 2)  apply RoPE in physical basis
-        # 3)  bring the *rotated* vectors back into the gauge basis
-        # ----------------------------------------------------------
-        qg = q_head @ A                           # gauge
-        kg = k_head @ A
-        _stats("q_g", step, step, qg)
-        _stats("k_g", step, step, kg)
+        # 1. raw projections are already in physical space
+        q_phys = q_head          # (B , d_k)
+        k_phys = k_head
+        _stats("q_phys", step, step, q_phys)
+        _stats("k_phys", step, step, k_phys)
 
-        q_rot = apply_rope_phys(qg, A_invT, freqs_row) @ A.T  # gauge
-        k_rot = apply_rope_phys(kg, A_invT, freqs_row) @ A.T  # gauge
+        # 2. apply RoPE in physical space
+        from .rope_utils import apply_rope_query, apply_rope_key
+        q_rot_phys = apply_rope_query(q_phys, freqs_row)
+        k_rot_phys = apply_rope_key(k_phys, freqs_row)
+        _stats("q_rot_phys", step, step, q_rot_phys)
+        _stats("k_rot_phys", step, step, k_rot_phys)
+
+        # 3. go to gauge space with the *right* matrix
+        q_rot = q_rot_phys @ A          # Query: • A
+        k_rot = k_rot_phys @ A_invT     # Key:   • A^{-T}
         _stats("q_rot", step, step, q_rot)
         _stats("k_rot", step, step, k_rot)
 
