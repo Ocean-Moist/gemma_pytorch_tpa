@@ -4,7 +4,7 @@ import math, torch
 from typing import List, Tuple
 
 from gemma import config as gcfg, tokenizer
-from gemma.model import GemmaModel, RMSNorm, precompute_freqs_cis
+from gemma.model import GemmaForCausalLM, RMSNorm, precompute_freqs_cis
 
 from .gcb_meta import GCBMeta
 from .layers    import GCBHead, GCCache
@@ -23,10 +23,12 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         self.tok = tokenizer.Tokenizer(cfg.tokenizer)
 
         # ----- Load vanilla backbone weights ----------------------
-        self.backbone = GemmaModel(cfg)
-        self.backbone.load_state_dict(
+        self.base = GemmaForCausalLM(cfg)                 # full model (has embedder)
+        self.base.load_state_dict(
             torch.load(ckpt_path, mmap=True, weights_only=True), strict=False
         )
+        self.embedder = self.base.embedder                # keep a handle
+        self.backbone = self.base.model                   # decoder stack only
 
         # ---------- Insert GCB heads + caches ---------------------
         meta = GCBMeta.load(meta_path)
@@ -76,12 +78,12 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         max_len = init_len + out_len
         assert max_len <= self.cfg.max_position_embeddings
 
-        hidden = self.backbone.embedder(ids) * math.sqrt(self.cfg.hidden_size)
+        hidden = self.embedder(ids) * math.sqrt(self.cfg.hidden_size)
 
         # ---------- autoregressive loop ---------------------------
         for step in range(max_len):
             if step >= hidden.size(1):           # extend hidden with last token
-                token_embed = self.backbone.embedder(ids[:, -1:])
+                token_embed = self.embedder(ids[:, -1:])
                 hidden = torch.cat(
                     [hidden, token_embed * math.sqrt(self.cfg.hidden_size)], 1
                 )
@@ -91,7 +93,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
             if step < init_len - 1:
                 continue    # still inside prompt
 
-            logits = hidden[:, step] @ self.backbone.embedder.weight.T
+            logits = hidden[:, step] @ self.embedder.weight.T
             if temperature:
                 logits /= temperature
             probs = torch.softmax(logits, -1)
