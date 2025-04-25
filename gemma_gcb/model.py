@@ -38,7 +38,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         self.layer_caches: List[GCCache] = torch.nn.ModuleList()
 
         for l_idx, layer in enumerate(self.backbone.layers):
-            cache = GCCache(max_seq, n_heads, r_a, r_b, r_v,
+            cache = GCCache(max_seq, n_heads, r_k, r_v,
                             d_k, device='cpu')   # will move with .to()
             self.layer_caches.append(cache)
 
@@ -49,7 +49,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
             gcb_heads = torch.nn.ModuleList()
             for h_idx in range(n_heads):
                 aux = meta.heads[(l_idx, h_idx)]
-                head = GCBHead(aux, d_k, d_v, r_k, r_a, r_b, r_v)
+                head = GCBHead(aux, d_k, d_v, r_k, r_v)
                 head.Z_r = meta.layers[l_idx].Z_r.float()
                 gcb_heads.append(head)
             layer.self_attn = gcb_heads          # overwrite

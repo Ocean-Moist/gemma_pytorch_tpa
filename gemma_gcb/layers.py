@@ -19,12 +19,12 @@ def _stats(name, t, step, ten, k=3):
 
 # --------------------------------------------------------------------
 class GCCache(torch.nn.Module):
-    """Tiny per-layer cache that holds compressed KV + blanket sum."""
+    """Tiny per-layer cache that holds core vectors, value projections + blanket sum."""
     def __init__(self, max_seq: int, n_h: int,
-                 r_a: int, r_b: int, r_v: int, d_k: int, device):
+                 r_k: int, r_v: int, d_k: int, device):
         super().__init__()
-        self.register_buffer('A', torch.zeros(max_seq, n_h, r_a, dtype=torch.float16, device=device))
-        self.register_buffer('B', torch.zeros(max_seq, n_h, r_b, dtype=torch.float16, device=device))
+        # Store the full core vector instead of factorized components
+        self.register_buffer('P', torch.zeros(max_seq, n_h, r_k, dtype=torch.float16, device=device))
         self.register_buffer('V', torch.zeros(max_seq, n_h, r_v, dtype=torch.float16, device=device))
         self.register_buffer('S', torch.zeros(n_h, d_k, dtype=torch.float32, device=device))
 
@@ -37,14 +37,15 @@ class GCBHead(torch.nn.Module):
 
     def __init__(self, aux: HeadAux,
                  d_k: int, d_v: int,
-                 r_k=8, r_a=4, r_b=4, r_v=8):
+                 r_k=8, r_v=8):
         super().__init__()
         # fixed (offline) params
         self.register_buffer('A',      aux.A)
         self.register_buffer('A_invT', aux.A_invT)
         self.register_buffer('P_r',    aux.P_r)
-        self.register_buffer('P_a',    aux.P_a)
-        self.register_buffer('P_b',    aux.P_b)
+        # We're no longer using the factorization
+        # self.register_buffer('P_a',    aux.P_a)
+        # self.register_buffer('P_b',    aux.P_b)
         self.alpha: float = aux.alpha
         self.lam:   float = aux.lam
 
@@ -52,7 +53,7 @@ class GCBHead(torch.nn.Module):
         self.powmap: Optional[PowerMap] = None
         self.Z_r:    Optional[Tensor]   = None   # (d_v , r_v)
 
-        self.r_a, self.r_b, self.r_v = r_a, r_b, r_v
+        self.r_v = r_v
         self.d_k, self.r_k = d_k, r_k
 
     # ----------------------------------------------------------------
@@ -86,8 +87,6 @@ class GCBHead(torch.nn.Module):
         A_invT   = self.A_invT.to(device=device, dtype=dtype)
         A_T      = A.transpose(-1, -2)  # Add transposed A for correct key un-gauging
         P_r      = self.P_r.to(device=device, dtype=dtype)
-        P_a      = self.P_a.to(device=device, dtype=dtype)
-        P_b      = self.P_b.to(device=device, dtype=dtype)
         Z_r      = self.Z_r.to(device=device, dtype=dtype)
 
         # ----------------------------------------------------------
@@ -117,22 +116,19 @@ class GCBHead(torch.nn.Module):
         _stats("q_rot", step, step, q_rot)
         _stats("k_rot", step, step, k_rot)
 
-        # ---------------- Core factors ----------------------------
+        # ---------------- Core projection ----------------------------
         # Project directly without normalization to preserve mathematical consistency
         p_q = q_rot @ P_r                # (B , r_k)
         p_k = k_rot @ P_r                # (B , r_k)
         _stats("p_q", step, step, p_q)
         _stats("p_k", step, step, p_k)
 
-        a_k = p_k @ P_a                       # (B , r_a)
-        b_k = p_k @ P_b                       # (B , r_b)
-
         # --------------- Value projection (stays physical) --------
         p_v = v_head @ Z_r                   # (B , r_v)
 
         # --------------- Cache write ------------------------------
-        cache.A[step, h_idx] = a_k.to(torch.float16)
-        cache.B[step, h_idx] = b_k.to(torch.float16)
+        # Store the full core vector instead of trying to factorize it
+        cache.P[step, h_idx] = p_k.to(torch.float16)
         cache.V[step, h_idx] = p_v.to(torch.float16)
 
         # --- Blanket Update ---
@@ -153,12 +149,9 @@ class GCBHead(torch.nn.Module):
             return None, None
 
         # --------------- Read history ----------------------------
-        a_hist = cache.A[:step, h_idx].to(dtype)          # (S , r_a)
-        b_hist = cache.B[:step, h_idx].to(dtype)          # (S , r_b)
-        v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S , d_v)
-
-        # Core logits using proper TPA formula - reconstruct the history vectors
-        p_hist = a_hist @ P_a.T + b_hist @ P_b.T     # shape: (S, r_k)
+        p_hist = cache.P[:step, h_idx].to(dtype)          # (S, r_k) - direct retrieval
+        v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
+        
         _stats("p_hist", step, step, p_hist)
         
         # Cast to float32 for numerical stability in the dot product
