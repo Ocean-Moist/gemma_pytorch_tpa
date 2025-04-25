@@ -96,16 +96,22 @@ class GCBHead(torch.nn.Module):
         _stats("q_phys", step, step, q_phys)
         _stats("k_phys", step, step, k_phys)
 
-        # 2. apply RoPE in physical space
+        # 2. Go to the gauge
+        q_g = q_phys @ A              # Query: phys → A
+        k_g = k_phys @ A_invT         # Key:   phys → A⁻ᵀ
+        _stats("q_g", step, step, q_g)
+        _stats("k_g", step, step, k_g)
+
+        # 3. Back to physical basis & apply RoPE
         from .rope_utils import apply_rope_query, apply_rope_key
-        q_rot_phys = apply_rope_query(q_phys, freqs_row)
-        k_rot_phys = apply_rope_key(k_phys, freqs_row)
+        q_rot_phys = apply_rope_query(q_g @ A_invT, freqs_row)  # gauge → phys → RoPE
+        k_rot_phys = apply_rope_key(k_g @ A, freqs_row)
         _stats("q_rot_phys", step, step, q_rot_phys)
         _stats("k_rot_phys", step, step, k_rot_phys)
 
-        # 3. go to gauge space with the *right* matrix
-        q_rot = q_rot_phys @ A          # Query: • A
-        k_rot = k_rot_phys @ A_invT     # Key:   • A^{-T}
+        # 4. Return to the gauge with Aᵀ
+        q_rot = q_rot_phys @ A.T       # RoPE → gauge with Aᵀ
+        k_rot = k_rot_phys @ A.T
         _stats("q_rot", step, step, q_rot)
         _stats("k_rot", step, step, k_rot)
 
@@ -146,7 +152,7 @@ class GCBHead(torch.nn.Module):
 
         # Blanket logits
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
-        tail_log = self.lam * (phi_q @ cache.S[h_idx].T)      # √d_k gone
+        tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
 
         # logging just before return (during non-first tokens)
         if step > 0:  # not the first token
