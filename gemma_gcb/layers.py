@@ -105,7 +105,8 @@ class GCBHead(torch.nn.Module):
 
         # 3. Back to physical basis & apply RoPE
         from .rope_utils import apply_rope_query, apply_rope_key
-        q_rot_phys = apply_rope_query(q_g @ A_invT, freqs_row)  # gauge → phys → RoPE
+        A_inv = A_invT.transpose(-1, -2)  # Calculate the correct inverse needed
+        q_rot_phys = apply_rope_query(q_g @ A_inv, freqs_row)  # gauge → phys → RoPE
         k_rot_phys = apply_rope_key(k_g @ A_T, freqs_row)  # Corrected: use A_T instead of A for key
         _stats("q_rot_phys", step, step, q_rot_phys)
         _stats("k_rot_phys", step, step, k_rot_phys)
