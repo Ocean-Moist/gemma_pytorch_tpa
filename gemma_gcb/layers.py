@@ -116,8 +116,14 @@ class GCBHead(torch.nn.Module):
         _stats("k_rot", step, step, k_rot)
 
         # ---------------- Core factors ----------------------------
-        p_q = q_rot @ P_r                     # (B , r_k)
-        p_k = k_rot @ P_r                     # (B , r_k)
+        # Normalize q_rot and k_rot before projection to maintain stable magnitudes
+        q_rot_norm = q_rot / (q_rot.norm(dim=-1, keepdim=True) + 1e-5)  # Simple RMSNorm-like normalization
+        k_rot_norm = k_rot / (k_rot.norm(dim=-1, keepdim=True) + 1e-5)
+        _stats("q_rot_norm", step, step, q_rot_norm)
+        _stats("k_rot_norm", step, step, k_rot_norm)
+        
+        p_q = q_rot_norm @ P_r                # (B , r_k)
+        p_k = k_rot_norm @ P_r                # (B , r_k)
         _stats("p_q", step, step, p_q)
         _stats("p_k", step, step, p_k)
 
@@ -148,16 +154,48 @@ class GCBHead(torch.nn.Module):
 
         # Core logits using proper TPA formula - reconstruct the history vectors
         p_hist = a_hist @ P_a.T + b_hist @ P_b.T     # shape: (S, r_k)
-        core_log = (p_q @ p_hist.T) / math.sqrt(self.d_k)    # standard scaled dot-product attention
+        _stats("p_hist", step, step, p_hist)
+        
+        # Cast to float32 for numerical stability in the dot product
+        p_q_f32 = p_q.float()
+        p_hist_f32 = p_hist.float()
+        
+        # Compute core logits with proper scaling and cast back to original dtype
+        core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.d_k)
+        
+        # Safety check and clamp if needed (in debug mode)
+        if DEBUG:
+            max_val = core_log_f32.abs().max().item()
+            if max_val > 80:
+                print(f"WARNING: core_log max value {max_val} exceeds safe threshold (80)")
+                core_log_f32 = torch.clamp(core_log_f32, -80, 80)
+                
+        core_log = core_log_f32.to(dtype)
 
         # Blanket logits
-        phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
-        tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
+        phi_q = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
+        
+        # Cast to float32 for numerical stability in the blanket logit computation
+        phi_q_f32 = phi_q.float()
+        S_f32 = cache.S[h_idx].float()  # Already float32, but being explicit
+        
+        # Compute blanket logits with proper scaling
+        tail_log_f32 = (self.lam / math.sqrt(self.d_k)) * (phi_q_f32 @ S_f32.T)
+        
+        # Safety check and clamp if needed (in debug mode)
+        if DEBUG:
+            max_val = tail_log_f32.abs().max().item()
+            if max_val > 80:
+                print(f"WARNING: tail_log max value {max_val} exceeds safe threshold (80)")
+                tail_log_f32 = torch.clamp(tail_log_f32, -80, 80)
+                
+        tail_log = tail_log_f32.to(dtype)
 
         # logging just before return (during non-first tokens)
         if step > 0:  # not the first token
             _stats("core_log", step, step, core_log)
             _stats("tail_log", step, step, tail_log)
             
-        # broadcast tail_log over sequence length
+        # broadcast tail_log over sequence length and add to core_log
+        # both should now be in the same dtype (original dtype of inputs)
         return core_log + tail_log.unsqueeze(-1), v_hist
