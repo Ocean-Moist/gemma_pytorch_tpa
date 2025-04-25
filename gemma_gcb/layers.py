@@ -84,6 +84,7 @@ class GCBHead(torch.nn.Module):
         # promote the half-precision buffers to the incoming compute dtype and device
         A        = self.A.to(device=device, dtype=dtype)
         A_invT   = self.A_invT.to(device=device, dtype=dtype)
+        A_T      = A.transpose(-1, -2)  # Add transposed A for correct key un-gauging
         P_r      = self.P_r.to(device=device, dtype=dtype)
         P_a      = self.P_a.to(device=device, dtype=dtype)
         P_b      = self.P_b.to(device=device, dtype=dtype)
@@ -105,7 +106,7 @@ class GCBHead(torch.nn.Module):
         # 3. Back to physical basis & apply RoPE
         from .rope_utils import apply_rope_query, apply_rope_key
         q_rot_phys = apply_rope_query(q_g @ A_invT, freqs_row)  # gauge → phys → RoPE
-        k_rot_phys = apply_rope_key(k_g @ A, freqs_row)
+        k_rot_phys = apply_rope_key(k_g @ A_T, freqs_row)  # Corrected: use A_T instead of A for key
         _stats("q_rot_phys", step, step, q_rot_phys)
         _stats("k_rot_phys", step, step, k_rot_phys)
 
@@ -116,14 +117,9 @@ class GCBHead(torch.nn.Module):
         _stats("k_rot", step, step, k_rot)
 
         # ---------------- Core factors ----------------------------
-        # Normalize q_rot and k_rot before projection to maintain stable magnitudes
-        q_rot_norm = q_rot / (q_rot.norm(dim=-1, keepdim=True) + 1e-5)  # Simple RMSNorm-like normalization
-        k_rot_norm = k_rot / (k_rot.norm(dim=-1, keepdim=True) + 1e-5)
-        _stats("q_rot_norm", step, step, q_rot_norm)
-        _stats("k_rot_norm", step, step, k_rot_norm)
-        
-        p_q = q_rot_norm @ P_r                # (B , r_k)
-        p_k = k_rot_norm @ P_r                # (B , r_k)
+        # Project directly without normalization to preserve mathematical consistency
+        p_q = q_rot @ P_r                # (B , r_k)
+        p_k = k_rot @ P_r                # (B , r_k)
         _stats("p_q", step, step, p_q)
         _stats("p_k", step, step, p_k)
 
@@ -179,8 +175,8 @@ class GCBHead(torch.nn.Module):
         phi_q_f32 = phi_q.float()
         S_f32 = cache.S[h_idx].float()  # Already float32, but being explicit
         
-        # Compute blanket logits with proper scaling
-        tail_log_f32 = (self.lam / math.sqrt(self.d_k)) * (phi_q_f32 @ S_f32.T)
+        # Compute blanket logits with consistent scaling (same as core_log)
+        tail_log_f32 = (self.lam * (phi_q_f32 @ S_f32.T)) / math.sqrt(self.d_k)
         
         # Safety check and clamp if needed (in debug mode)
         if DEBUG:
