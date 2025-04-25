@@ -126,9 +126,10 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
             d_k = self.cfg.head_dim
             attn = layer.attn_vanilla
 
-            # ---- QKV projection for *all* heads (no RoPE here) ----
-            qkv = attn.qkv_proj(h_step)    # (B , 1 , qkv_dim)
-            qkv = qkv.squeeze(1)           # (B , qkv_dim)
+            # ---- *Pre-LN* then QKV projection (restores scale discipline) ----
+            h_norm = layer.input_layernorm(h_step) # <<< FIX: NORMALIZE h_step FIRST
+            qkv = attn.qkv_proj(h_norm)            # <<< Use normalized state for QKV
+            qkv = qkv.squeeze(1)                   # (B , qkv_dim)
 
             nh, nkv = attn.num_heads, attn.num_kv_heads
             d_q = nh * d_k
@@ -166,20 +167,34 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 # --- build per-head context ------------------------------------------------
                 ctx = (attn_weights.unsqueeze(-1) * values).sum(-2)   # (H , B , d_v)
 
-                # flatten *everything* that really is in ctx
-                ctx = ctx.permute(1, 0, 2).reshape(B, 1, -1)         # (B , 1 , 4096) here
-
-                # o_proj expects num_heads * head_dim columns
-                in_dim = attn.o_proj.weight.shape[1]                 # 1024 for Gemma-1B
-                ctx = ctx[..., :in_dim]                              # keep the first 1024
-
-                ctx = layer.attn_vanilla.o_proj(ctx)                 # (B , 1 , hidden_size)
+                # Ensure ctx shape is correct before o_proj
+                ctx = ctx.permute(1, 0, 2).reshape(B, 1, -1)
+                in_dim = attn.o_proj.weight.shape[1]
+                ctx = ctx[..., :in_dim]
+                ctx = layer.attn_vanilla.o_proj(ctx)
+                # Add attention output ctx back to the *original* unnormalized h_step
                 h_step = h_step + ctx
 
-            # ------------- Feed-forward + norms -------------------
-            res = h_step
-            h_step = layer.post_attention_layernorm(h_step)
-            h_step = layer.mlp(h_step)
-            h_step = res + h_step
+            # ------------- Feed-forward + norms (Revised for Gemma 2/3 compatibility) ---
+            res = h_step # Residual connection starts from state *after* attention output is added
+
+            # Check and apply pre-FFW norm if it exists
+            if hasattr(layer, 'pre_feedforward_layernorm') and layer.pre_feedforward_layernorm is not None:
+                 h_ff_in = layer.pre_feedforward_layernorm(res)
+            # Fallback: Apply post-attention norm if pre-FFW norm doesn't exist (older style or specific configs)
+            elif hasattr(layer, 'post_attention_layernorm'):
+                 h_ff_in = layer.post_attention_layernorm(res)
+            else:
+                 # Should not happen in standard Gemma models, but handle defensively
+                 h_ff_in = res # Pass residual directly if no relevant norm found
+
+            h_ff_out = layer.mlp(h_ff_in)
+
+            # Check and apply post-FFW norm if it exists
+            if hasattr(layer, 'post_feedforward_layernorm') and layer.post_feedforward_layernorm is not None:
+                 h_ff_out = layer.post_feedforward_layernorm(h_ff_out)
+
+            # Final residual connection for the layer
+            h_step = res + h_ff_out
 
         hidden[:, step:step + 1] = self.final_norm(h_step)

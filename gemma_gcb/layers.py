@@ -134,10 +134,18 @@ class GCBHead(torch.nn.Module):
         cache.B[step, h_idx] = b_k.to(torch.float16)
         cache.V[step, h_idx] = p_v.to(torch.float16)
 
-        # Blanket running-sum (gauge basis, fp32)
-        phi_k = self.powmap(core_residual(k_rot, P_r))     # (B , d_k)
-        _stats("phi_k", step, step, phi_k)
-        cache.S[h_idx] += phi_k.sum(0).float()    # true cumulative sum
+        # --- Blanket Update ---
+        # Calculate raw phi_k based on key's residual
+        res_k = core_residual(k_rot, P_r)
+        phi_k_raw = self.powmap(res_k)  # Shape: (B, d_k)
+
+        # <<< FIX: Normalize phi_k along the feature dimension before accumulation >>>
+        phi_k_norm = phi_k_raw / (torch.linalg.norm(phi_k_raw, dim=-1, keepdim=True) + 1e-8)
+        _stats("phi_k_norm", step, step, phi_k_norm) # Log normalized version
+
+        # Accumulate the *normalized* vectors (sum over batch dim B if B>1)
+        cache.S[h_idx] += phi_k_norm.sum(0).float()
+        _stats("S[h]", step, step, cache.S[h_idx]) # Log the state S
 
         # During the first token there is nothing to attend to.
         if step == 0:
@@ -157,7 +165,8 @@ class GCBHead(torch.nn.Module):
         p_hist_f32 = p_hist.float()
         
         # Compute core logits with proper scaling and cast back to original dtype
-        core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.d_k)
+        # <<< FIX: Scale by sqrt(r_k) for the r_k dimensional core subspace >>>
+        core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
         
         # Safety check and clamp if needed (in debug mode)
         if DEBUG:
@@ -168,14 +177,19 @@ class GCBHead(torch.nn.Module):
                 
         core_log = core_log_f32.to(dtype)
 
-        # Blanket logits
-        phi_q = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
+        # --- Blanket Logits ---
+        # Calculate normalized phi_q for the current query
+        res_q = core_residual(q_rot, P_r)
+        phi_q_raw = self.powmap(res_q)
+        # <<< FIX: Normalize phi_q as well >>>
+        phi_q_norm = phi_q_raw / (torch.linalg.norm(phi_q_raw, dim=-1, keepdim=True) + 1e-8)
+        _stats("phi_q_norm", step, step, phi_q_norm)
+
+        # Compute blanket logits using normalized phi_q and accumulated S (float32)
+        phi_q_f32 = phi_q_norm.float()
+        S_f32 = cache.S[h_idx].float() # S is sum of normalized phi_k
         
-        # Cast to float32 for numerical stability in the blanket logit computation
-        phi_q_f32 = phi_q.float()
-        S_f32 = cache.S[h_idx].float()  # Already float32, but being explicit
-        
-        # Compute blanket logits with consistent scaling (same as core_log)
+        # Keep scaling by sqrt(d_k) as blanket involves d_k-r_k dimensions implicitly
         tail_log_f32 = (self.lam * (phi_q_f32 @ S_f32.T)) / math.sqrt(self.d_k)
         
         # Safety check and clamp if needed (in debug mode)
