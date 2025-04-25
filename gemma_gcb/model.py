@@ -150,6 +150,11 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 kv_idx = h_idx // n_q_per_kv
                 k_h = k_kv[:, kv_idx]
                 v_h = v_kv[:, kv_idx]
+                
+                # Apply the missing RMS normalization from the vanilla attention
+                if attn.query_norm is not None and attn.key_norm is not None:
+                    q_h = attn.query_norm(q_h)
+                    k_h = attn.key_norm(k_h)
 
                 lg, vh = gcb_head(
                     q_h, k_h, v_h, freqs_row,
