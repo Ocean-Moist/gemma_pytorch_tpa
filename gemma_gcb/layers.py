@@ -109,9 +109,9 @@ class GCBHead(torch.nn.Module):
         _stats("q_rot_phys", step, step, q_rot_phys)
         _stats("k_rot_phys", step, step, k_rot_phys)
 
-        # 4. Return to the gauge with Aᵀ
-        q_rot = q_rot_phys @ A.T       # RoPE → gauge with Aᵀ
-        k_rot = k_rot_phys @ A.T
+        # 4. Return to the gauge with the correct matrices
+        q_rot = q_rot_phys @ A              # map query into gauge basis
+        k_rot = k_rot_phys @ A_invT         # map key into dual gauge basis
         _stats("q_rot", step, step, q_rot)
         _stats("k_rot", step, step, k_rot)
 
@@ -148,7 +148,7 @@ class GCBHead(torch.nn.Module):
 
         # Core logits using classic TPA formula
         prod = (a_k @ a_hist.T) * (b_k @ b_hist.T)       # (B , S)
-        core_log = prod / (math.sqrt(self.d_k) * self.r_k)  # shrink ← NEW
+        core_log = prod / math.sqrt(self.d_k)            # standard scaled dot-product attention
 
         # Blanket logits
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
