@@ -146,9 +146,9 @@ class GCBHead(torch.nn.Module):
         b_hist = cache.B[:step, h_idx].to(dtype)          # (S , r_b)
         v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S , d_v)
 
-        # Core logits using classic TPA formula
-        prod = (a_k @ a_hist.T) * (b_k @ b_hist.T)       # (B , S)
-        core_log = prod / math.sqrt(self.d_k)            # standard scaled dot-product attention
+        # Core logits using proper TPA formula - reconstruct the history vectors
+        p_hist = a_hist @ P_a.T + b_hist @ P_b.T     # shape: (S, r_k)
+        core_log = (p_q @ p_hist.T) / math.sqrt(self.d_k)    # standard scaled dot-product attention
 
         # Blanket logits
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
