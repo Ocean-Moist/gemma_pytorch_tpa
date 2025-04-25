@@ -27,8 +27,11 @@ def cp_factor(P_r: torch.Tensor):
     """
     _, _, Vh = torch.linalg.svd(P_r, full_matrices=False)   # Vh: (r_k , r_k)
     V = Vh.T                                                # (r_k , r_k)
-    A = V[:, :R_A].contiguous()
-    B = V[:, R_A:R_A + R_B].contiguous()
+    # take two disjoint slices and QR-orthonormalise each
+    A0 = V[:, :R_A].contiguous()
+    B0 = V[:, R_A:R_A + R_B].contiguous()
+    A, _ = torch.linalg.qr(A0, mode="reduced")           # (r_k , r_a)
+    B, _ = torch.linalg.qr(B0, mode="reduced")           # (r_k , r_b)
     return A, B
 
 # --------------------------------------------------------------------------
@@ -40,7 +43,7 @@ def fit_powerlaw(sig_tail: torch.Tensor):
     sol, *_ = torch.linalg.lstsq(X, y)
     slope, bias = sol.squeeze()
     alpha = float(-slope)
-    lam   = float(torch.exp(bias))
+    lam   = float(torch.exp(bias)) / math.sqrt(HEAD_DIM - R_K)  # Rescale λ
     return alpha, lam
 
 # --------------------------------------------------------------------------

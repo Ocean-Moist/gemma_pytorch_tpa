@@ -128,14 +128,8 @@ class GCBHead(torch.nn.Module):
 
         # Blanket running-sum (gauge basis, fp32)
         phi_k = self.powmap(core_residual(k_rot, P_r))     # (B , d_k)
-        # --- FIX: Use running average instead of cumulative sum ---
         _stats("phi_k", step, step, phi_k)
-        current_phi_k_sum = phi_k.sum(0).float()
-        if step == 0:
-            cache.S[h_idx] = current_phi_k_sum
-        else:
-            # Simple Running Average:
-            cache.S[h_idx] = (cache.S[h_idx] * step + current_phi_k_sum) / (step + 1)
+        cache.S[h_idx] += phi_k.sum(0).float()    # true cumulative sum
 
         # During the first token there is nothing to attend to.
         if step == 0:
@@ -147,12 +141,12 @@ class GCBHead(torch.nn.Module):
         v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S , d_v)
 
         # Core logits using classic TPA formula
-        core_log = (a_k @ a_hist.T) * (b_k @ b_hist.T)    # (B , S)
-        core_log = core_log / math.sqrt(self.d_k)
+        prod = (a_k @ a_hist.T) * (b_k @ b_hist.T)       # (B , S)
+        core_log = prod / (math.sqrt(self.d_k) * self.r_k)  # shrink ← NEW
 
         # Blanket logits
         phi_q   = self.powmap(core_residual(q_rot, P_r))   # (B , d_k)
-        tail_log = (self.lam / math.sqrt(self.d_k)) * (phi_q @ cache.S[h_idx].T)
+        tail_log = self.lam * (phi_q @ cache.S[h_idx].T)      # √d_k gone
 
         # logging just before return (during non-first tokens)
         if step > 0:  # not the first token
