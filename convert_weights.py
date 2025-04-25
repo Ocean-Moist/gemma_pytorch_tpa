@@ -43,7 +43,18 @@ def fit_powerlaw(sig_tail: torch.Tensor):
     sol, *_ = torch.linalg.lstsq(X, y)
     slope, bias = sol.squeeze()
     alpha = float(-slope)
-    lam   = float(torch.exp(bias)) / math.sqrt(HEAD_DIM - R_K)  # Rescale λ
+    
+    # Get raw lambda from the fit
+    raw_lam = float(torch.exp(bias))
+    
+    # Normalize by sqrt(HEAD_DIM - R_K) to remove dimension dependence
+    # This assumes d_k = HEAD_DIM - r_k for the analytical scaling
+    norm_lam = raw_lam / math.sqrt(HEAD_DIM - R_K)
+    
+    # Clamp to a reasonable range for attention scores
+    lam = min(max(norm_lam, 0.1), 3.0)
+    
+    print(f"Power-law fit: alpha={alpha:.3f}, raw_lambda={raw_lam:.3f}, normalized_lambda={norm_lam:.3f}, final_lambda={lam:.3f}")
     return alpha, lam
 
 # --------------------------------------------------------------------------
