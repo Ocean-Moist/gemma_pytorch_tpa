@@ -39,8 +39,11 @@ class PowerMap(torch.nn.Module):
         )
         self.scale[:r_k] = 0.0     # zero-out the core part
         self.d_k: Final = d_k
+        self.r_k: Final = r_k
 
     def forward(self, x_tail: Tensor) -> Tensor:
         # x_tail shape (… , d_k)  where first r_k coords are (approx.) 0
-        h = _hadamard_full(x_tail)
+        h = _hadamard_full(x_tail.to(self.scale.device))  # ensure device match before matmul
+        # --- FIX: Mask core components AFTER Hadamard ---
+        h[..., :self.r_k] = 0.0
         return h.abs() * self.scale

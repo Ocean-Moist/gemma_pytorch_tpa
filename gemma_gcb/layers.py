@@ -128,8 +128,14 @@ class GCBHead(torch.nn.Module):
 
         # Blanket running-sum (gauge basis, fp32)
         phi_k = self.powmap(core_residual(k_rot, P_r))     # (B , d_k)
+        # --- FIX: Use running average instead of cumulative sum ---
         _stats("phi_k", step, step, phi_k)
-        cache.S[h_idx] += phi_k.sum(0).float()
+        current_phi_k_sum = phi_k.sum(0).float()
+        if step == 0:
+            cache.S[h_idx] = current_phi_k_sum
+        else:
+            # Simple Running Average:
+            cache.S[h_idx] = (cache.S[h_idx] * step + current_phi_k_sum) / (step + 1)
 
         # During the first token there is nothing to attend to.
         if step == 0:
