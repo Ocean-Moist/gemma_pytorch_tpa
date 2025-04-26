@@ -18,7 +18,7 @@ export DEBUG_STEP_END=5    # Log only first 5 steps
 export LOG_INTERVAL=1
 
 python scripts/run_gcb.py \
-    --ckpt model.ckpt \
+    --ckpt gemma1b_gcb.ckpt \
     --meta gemma1b_gcb.pkl \
     --prompt "1+1=" \
     --out_len 5 \
