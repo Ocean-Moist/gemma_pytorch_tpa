@@ -3,6 +3,7 @@
 import math, torch
 from torch import Tensor
 from typing import Final
+from .debug_utils import dbg
 
 def hadamard(n: int, *, dtype=None, device=None):
     """Create a Hadamard matrix of size n x n (n must be a power of 2)."""
@@ -41,9 +42,21 @@ class PowerMap(torch.nn.Module):
         self.d_k: Final = d_k
         self.r_k: Final = r_k
 
-    def forward(self, x_tail: Tensor) -> Tensor:
+    def forward(self, x_tail: Tensor, l_idx=-1, h_idx=-1, step=-1) -> Tensor:
         # x_tail shape (… , d_k)  where first r_k coords are (approx.) 0
+        dbg("pm_x_tail_in", x_tail, l_idx, h_idx, step)
+        
         h = _hadamard_full(x_tail.to(self.scale.device))      # (… , d_k)
+        dbg("pm_hadamard", h, l_idx, h_idx, step)
+        
         h[..., :self.r_k] = 0.0                               # blank the core
+        dbg("pm_h_blanked", h, l_idx, h_idx, step)
+        
+        # Log the power-law scaling vector
+        dbg("pm_scale", self.scale, l_idx, h_idx, step)
+        
         # Removed unnecessary normalization: h = h / math.sqrt(self.d_k - self.r_k)
-        return h.abs() * self.scale                           # power-law taper
+        result = h.abs() * self.scale                         # power-law taper
+        dbg("pm_result", result, l_idx, h_idx, step)
+        
+        return result
