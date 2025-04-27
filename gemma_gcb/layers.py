@@ -165,13 +165,12 @@ class GCBHead(torch.nn.Module):
         phi_k_raw = self.powmap(res_k, l_idx, h_idx, step)  # Shape: (B, d_k)
         dbg("phi_k_raw", phi_k_raw, l_idx, h_idx, step)
 
-        # <<< FIX: Normalize phi_k along the feature dimension before accumulation >>>
-        phi_k_norm = phi_k_raw / (torch.linalg.norm(phi_k_raw, dim=-1, keepdim=True) + 1e-8)
-        dbg("phi_k_norm", phi_k_norm, l_idx, h_idx, step)
-        _stats("phi_k_norm", step, step, phi_k_norm) # Log normalized version
+        # CHANGED: Accumulate raw phi vectors instead of normalized ones
+        dbg("phi_k_raw", phi_k_raw, l_idx, h_idx, step)
+        _stats("phi_k_raw", step, step, phi_k_raw) # Log raw version
 
-        # Accumulate the *normalized* vectors (sum over batch dim B if B>1)
-        cache.S[h_idx] += phi_k_norm.sum(0).float()
+        # Accumulate the raw vectors (sum over batch dim B if B>1)
+        cache.S[h_idx] += phi_k_raw.sum(0).float()
         dbg("S[h] after", cache.S[h_idx], l_idx, h_idx, step)
         _stats("S[h]", step, step, cache.S[h_idx]) # Log the state S
 
@@ -193,7 +192,7 @@ class GCBHead(torch.nn.Module):
         
         # Compute core logits with proper scaling and cast back to original dtype
         # <<< FIX: Scale by sqrt(r_k) for the r_k dimensional core subspace >>>
-        core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.d_k)
+        core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
         
         # Safety check and clamp if needed (in debug mode)
         if DEBUG:
@@ -225,29 +224,31 @@ class GCBHead(torch.nn.Module):
         phi_q_raw = self.powmap(res_q, l_idx, h_idx, step)
         dbg("phi_q_raw", phi_q_raw, l_idx, h_idx, step)
         
-        # <<< FIX: Normalize phi_q as well >>>
-        phi_q_norm = phi_q_raw / (torch.linalg.norm(phi_q_raw, dim=-1, keepdim=True) + 1e-8)
-        dbg("phi_q_norm", phi_q_norm, l_idx, h_idx, step)
-        _stats("phi_q_norm", step, step, phi_q_norm)
+        # CHANGED: Use raw phi_q directly
+        dbg("phi_q_raw", phi_q_raw, l_idx, h_idx, step)
+        _stats("phi_q_raw", step, step, phi_q_raw)
 
-        # Compute blanket logits using normalized phi_q and accumulated S (float32)
-        phi_q_f32 = phi_q_norm.float()
-        S_f32 = cache.S[h_idx].float() # S is sum of normalized phi_k
+        # Compute blanket logits using raw phi_q and accumulated S (float32)
+        phi_q_f32 = phi_q_raw.float()
+        S_f32 = cache.S[h_idx].float() # S is sum of raw phi_k
         dbg("S[h] read", S_f32, l_idx, h_idx, step)
         
         # Log lambda value for debugging
-        dbg("lambda", torch.tensor(self.lam, device=q_head.device), l_idx, h_idx, step)
+        # Apply optional lambda clamp (safety valve)
+        lam = min(self.lam, 8.0)  # empirical soft-cap
+        dbg("lambda", torch.tensor(lam, device=q_head.device), l_idx, h_idx, step)
         
         # Calculate blanket interaction 
         blanket_interaction = phi_q_f32 @ S_f32.T
         dbg("blanket_interaction", blanket_interaction, l_idx, h_idx, step)
         
-        # Keep scaling by sqrt(d_k) as blanket involves d_k-r_k dimensions implicitly
-        tail_log_f32 = (self.lam * blanket_interaction) / math.sqrt(self.d_k)
+        # Updated scaling to account for sequence length
+        ell = max(1, step)  # length of history
+        tail_log_f32 = (lam * blanket_interaction) / (math.sqrt(self.d_k) * math.sqrt(ell))
         dbg("tail_log", tail_log_f32, l_idx, h_idx, step)
         
         # Double-check calculation for verification
-        tail_log_recheck = (self.lam * (phi_q_f32 @ S_f32.T)) / math.sqrt(self.d_k)
+        tail_log_recheck = (lam * (phi_q_f32 @ S_f32.T)) / (math.sqrt(self.d_k) * math.sqrt(ell))
         dbg("tail_log_recheck", tail_log_recheck, l_idx, h_idx, step)
         
         # Safety check and clamp if needed (in debug mode)

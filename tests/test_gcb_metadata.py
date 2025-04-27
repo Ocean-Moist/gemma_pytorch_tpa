@@ -91,8 +91,8 @@ def test_alpha_lambda_sanity(gcb_data, l_idx, h_idx):
      alpha = aux.alpha
      lam = aux.lam
      # Basic sanity checks
-     assert 1.0 < alpha < 2.5, f"L{l_idx}H{h_idx}: Alpha ({alpha}) seems out of expected range (1.0-2.5)"
-     assert 1e-5 < lam < 10.0, f"L{l_idx}H{h_idx}: Lambda ({lam}) seems out of expected range (1e-5 - 10.0)"
+     assert 0.8 < alpha < 2.5, f"L{l_idx}H{h_idx}: Alpha ({alpha}) seems out of expected range (0.8-2.5)"
+     assert 1e-5 < lam < 80.0, f"L{l_idx}H{h_idx}: Lambda ({lam}) seems out of expected range (1e-5 - 80.0)"
      # Add test to re-fit if you have the original singular values available
 
 

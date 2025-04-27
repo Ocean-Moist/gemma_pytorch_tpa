@@ -14,14 +14,14 @@ export DEBUG=1
 export DEBUG_LAYER=0       # Log only layer 0
 export DEBUG_HEAD=0        # Log only head 0
 export DEBUG_STEP_START=0
-export DEBUG_STEP_END=5    # Log only first 5 steps
+export DEBUG_STEP_END=20   # Log first 20 steps to see scaling effects
 export LOG_INTERVAL=1
 
 python scripts/run_gcb.py \
-    --ckpt gemma1b_gcb.ckpt \
+    --ckpt gemma1b_gcb.pt \
     --meta gemma1b_gcb.pkl \
     --prompt "1+1=" \
-    --out_len 5 \
+    --out_len 20 \
     --temperature 0 \
     --device cuda \
     --top_k 1 > stdout.log 2> stderr.log
