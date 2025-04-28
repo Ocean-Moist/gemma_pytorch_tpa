@@ -6,8 +6,8 @@ from gemma_gcb.phi import PowerMap, core_residual # Assuming phi.py is accessibl
 # Add imports for build_gauge, fit_powerlaw if testing requires re-running parts of convert_weights
 
 # --- Constants (adjust if needed) ---
-MODEL_DIR = Path("./gemma_models") # Adjust as needed
-ORIG_CKPT = MODEL_DIR / "gemma1b_orig.pt"
+MODEL_DIR = Path(".") # Adjust as needed
+ORIG_CKPT = MODEL_DIR / "model.ckpt"
 GCB_META_FILE = MODEL_DIR / "gemma1b_gcb.pkl"
 GCB_CKPT = MODEL_DIR / "gemma1b_gcb.pt" # Might need this if testing gauged weights
 
