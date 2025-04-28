@@ -35,6 +35,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         # ---------- Insert GCB heads + caches ---------------------
         meta = GCBMeta.load(meta_path)
         r_k = next(iter(meta.heads.values())).P_r.shape[1]
+        r_v = meta.layers[0].Z_r.shape[1]
         d_k, d_v = cfg.head_dim, cfg.head_dim      # Gemma uses same dim
 
         n_heads, max_seq = cfg.num_attention_heads, cfg.max_position_embeddings
