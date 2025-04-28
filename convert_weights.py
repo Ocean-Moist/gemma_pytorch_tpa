@@ -118,7 +118,7 @@ def improved_gauge(Wq, Wk, max_iter=8, tol=0.01, device=None):
     for i in range(max_iter):
         C = (Wq @ A).T @ (Wk @ A_invT)          # gauge-current interaction
         _, s, Vh = torch.linalg.svd(C, full_matrices=False)
-        beta = s[:R_K].sum() / s.sum()
+        beta = (s[:R_K] ** 2).sum() / (s ** 2).sum()   # energy share
 
         print(f"      Iteration {i}: β={beta:.3f}")
         
