@@ -95,7 +95,7 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05, device=None):
     return A, A_invT
 
 # --- iterative Δ-gauge ------------------------------------------------
-def improved_gauge(Wq, Wk, max_iter=8, tol=0.01, device=None):
+def improved_gauge(Wq, Wk, max_iter=50, tol=0.01, device=None):
     """
     Iteratively improve the gauge to maximize energy captured by the first R_K singular values.
     
@@ -124,7 +124,7 @@ def improved_gauge(Wq, Wk, max_iter=8, tol=0.01, device=None):
         
         if i > 0 and (beta - beta_old) < tol:
             print(f"      Stopping early at iteration {i}: Δβ={beta-beta_old:.4f} < {tol}")
-            break                                # no useful progress
+            # break                                # no useful progress
         beta_old = beta
 
         # one Lanczos / Newton step as before
