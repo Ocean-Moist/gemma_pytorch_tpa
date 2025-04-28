@@ -159,7 +159,7 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
     meta = GCBMeta()
     
     # Initialize beta table if using auto_beta
-    beta_table = [[(1.0, 1.0) for _ in range(NUM_HEADS)] for _ in range(NUM_LAYERS)] if auto_beta else None
+    beta_table = [[(1.0, 1.0, 1.0) for _ in range(NUM_HEADS)] for _ in range(NUM_LAYERS)] if auto_beta else None
 
     for l in range(NUM_LAYERS):
         print(f"Processing layer {l}/{NUM_LAYERS-1}")
@@ -202,9 +202,17 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
             if global_beta is not None:
                 # Apply global beta directly to Wk
                 β = global_beta
+                cond = 1.0  # No conditioning for global beta
+                scale = β * cond
+                
                 if verbose:
                     print(f"→ Using global β={β:.3f} for L{l:02d}H{h}")
-                Wk_dev.mul_(β)
+                
+                # Store in beta_table if it exists
+                if beta_table is not None:
+                    beta_table[l][h] = (β, cond, scale)
+                    
+                Wk_dev.mul_(scale)
                 
             elif auto_beta:
                 best_E = 1e30
@@ -212,10 +220,15 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
                 best_cnd = 1.0
                 
                 for cnd in [1.0, 1.2, 1.3, 1.4]:
-                    # closed-form 1-D least-squares: min_β ‖Wq – β·Wk‖_F²
-                    beta = (Wq_dev * Wk_dev).sum().item() / (Wk_dev * Wk_dev).sum().item()
+                    # Apply the conditioning factor
+                    Wk_test = Wk_dev * cnd
                     
-                    E = torch.norm(Wq_dev - beta * Wk_dev, p='fro') / torch.norm(Wq_dev, p='fro')
+                    # Proper Frobenius inner product for min_β ‖Wq – β·Wk‖_F²
+                    num = torch.dot(Wq_dev.flatten(), Wk_test.flatten())  # <Wq, Wk>_F
+                    den = torch.dot(Wk_test.flatten(), Wk_test.flatten())  # ||Wk||²_F
+                    beta = (num / den).item()
+                    
+                    E = torch.norm(Wq_dev - beta * Wk_test, p='fro') / torch.norm(Wq_dev, p='fro')
                     
                     if E < best_E - 1e-4:  # tiny tolerance to avoid flip-flop
                         best_E, best_B, best_cnd = E, beta, cnd
@@ -223,14 +236,17 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
                 β = best_B
                 cond = best_cnd
                 
+                # Calculate total scale factor
+                scale = β * cond
+                
                 if verbose:
-                    print(f"→ auto-β L{l:02d}H{h}: β={β:.3f} cond={cond}  E={best_E:6.2e}")
+                    print(f"→ auto-β L{l:02d}H{h}: β={β:.3f} cond={cond} scale={scale:.3f}  E={best_E:6.2e}")
                 
-                # store for optional metadata dump
-                beta_table[l][h] = (β, cond)
+                # Store beta, cond, and scale in the metadata
+                beta_table[l][h] = (β, cond, scale)
                 
-                # apply the rescale before the usual Gauge / SVD steps
-                Wk_dev.mul_(β)
+                # Apply the total scale factor to Wk
+                Wk_dev.mul_(scale)
 
             # ------------- Iterative ∆-gauge improvement ----------------
             print(f"    Calculating improved Gauge for head {h} using tensors on device: {Wq_dev.device}, {Wk_dev.device}")
