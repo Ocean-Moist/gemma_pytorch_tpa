@@ -17,7 +17,10 @@ NUM_LAYERS   = 26
 NUM_HEADS    = 4
 NUM_KV_HEADS = 1
 HEAD_DIM     = 256
-R_K, R_A, R_B, R_V = 16, 8, 8, 8  # Increased R_K, R_A, R_B for better core coverage
+# Full rank mode for sanity check
+R_K = HEAD_DIM  # 256 - full rank core
+R_V = 8         # Keep value rank small (can be 256 for full rank everywhere)
+SKIP_CP = True  # Skip CP factorization for full rank mode
 EPS = 0.15
 # --------------------------------------------------------------------------
 
@@ -27,11 +30,21 @@ def cp_factor(P_r: torch.Tensor, device):
     We split the right-singular space so that  P_r ≈ (A ⊙ B).
     Returns matrices with shape (r_k , r_a / r_b) as expected by the runtime.
     Ensures intermediate tensors are on the correct device.
+    
+    If SKIP_CP is True, returns (None, None) - caller must handle this.
     """
+    if SKIP_CP:
+        return None, None
+    
     # Ensure P_r is on the target device
     P_r_dev = P_r.to(device)
     _, _, Vh = torch.linalg.svd(P_r_dev, full_matrices=False)   # Vh: (r_k , r_k) on device
     V = Vh.T                                                # (r_k , r_k) on device
+    
+    # Define R_A and R_B here since they're no longer global constants
+    R_A = min(8, R_K // 2)  # Ensure it doesn't exceed R_K/2
+    R_B = min(8, R_K // 2)  # Ensure it doesn't exceed R_K/2
+    
     # take two disjoint slices and QR-orthonormalise each
     A0 = V[:, :R_A].contiguous()
     B0 = V[:, R_A:R_A + R_B].contiguous()
@@ -276,11 +289,15 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
             # --- CP Factor (operates on device tensors) ---
             # Pass P_r, ensuring it's on the device
             P_a_dev, P_b_dev = cp_factor(P_r_dev, device=device) # CP factoring on device
+            
+            # In full-rank mode, P_a_dev and P_b_dev will be None
 
             # --- Store results (move back to CPU, convert to half) ---
             meta.add_head(l, h,
                           A_dev.cpu().half(), A_invT_dev.cpu().half(),
-                          P_r_dev.cpu().half(), P_a_dev.cpu().half(), P_b_dev.cpu().half(),
+                          P_r_dev.cpu().half(), 
+                          P_a_dev.cpu().half() if P_a_dev is not None else None,
+                          P_b_dev.cpu().half() if P_b_dev is not None else None,
                           alpha, lam)
 
             # --- Aggressive Cleanup within head loop ---
