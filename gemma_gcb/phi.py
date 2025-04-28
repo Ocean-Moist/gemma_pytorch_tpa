@@ -55,7 +55,7 @@ class PowerMap(torch.nn.Module):
         # Log the power-law scaling vector
         dbg("pm_scale", self.scale, l_idx, h_idx, step)
         
-        # Removed unnecessary normalization: h = h / math.sqrt(self.d_k - self.r_k)
+        h = h / math.sqrt(self.d_k - self.r_k)  # Restore normalization factor
         result = h.abs() * self.scale                         # power-law taper
         dbg("pm_result", result, l_idx, h_idx, step)
         
