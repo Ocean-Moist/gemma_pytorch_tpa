@@ -24,10 +24,15 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         self.tok = tokenizer.Tokenizer(cfg.tokenizer)
 
         # ----- Load vanilla backbone weights ----------------------
+        cfg.quant = False                                 # Turn off quantization to match FP16 checkpoint
         self.base = GemmaForCausalLM(cfg)                 # full model (has embedder)
-        self.base.load_state_dict(
-            torch.load(ckpt_path, mmap=True, weights_only=True), strict=False
+        missing, unexpected = self.base.load_state_dict(
+            torch.load(ckpt_path, mmap=True, weights_only=True), strict=True
         )
+        if missing:
+            print("Missing keys:", missing)
+        if unexpected:
+            print("Unexpected keys:", unexpected)
         self.embedder = self.base.embedder                # keep a handle
         self.backbone = self.base.model                   # decoder stack only
 
@@ -95,6 +100,11 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 continue    # still inside prompt
 
             logits_raw = hidden[:, step] @ self.embedder.weight.T
+            
+            # Add a sanity check for embedder weight
+            with torch.no_grad():
+                print(f"Embedder weight - dtype: {self.embedder.weight.dtype}, mean abs: {self.embedder.weight.abs().mean().item():.4f}")
+                
             dbg("Final Logits Raw", logits_raw, step=step)
             
             logits = logits_raw.clone()
