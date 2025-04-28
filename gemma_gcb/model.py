@@ -251,7 +251,7 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 
                 # Add attention output ctx back to the *original* unnormalized h_step
                 h_step_before = h_step.clone()
-                h_step = h_step + ctx
+                h_step = layer.post_attention_layernorm(h_step + ctx)
                 dbg("h_step_after_attn", h_step, l_idx=l_idx, step=step)
 
             # ------------- Feed-forward + norms (Revised for Gemma 2/3 compatibility) ---
