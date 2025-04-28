@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 convert_weights.py  –  build the analytical GCB metadata + (optionally)
@@ -9,6 +10,7 @@ Example:
 import math, argparse, torch
 from pathlib import Path
 from gemma_gcb.gcb_meta import GCBMeta, LayerAux
+import gc # Import garbage collector
 
 # ---- hyper-params for 1 B ------------------------------------------------
 NUM_LAYERS   = 26
@@ -19,46 +21,63 @@ R_K, R_A, R_B, R_V = 8, 4, 4, 8
 EPS = 0.05
 # --------------------------------------------------------------------------
 
-def cp_factor(P_r: torch.Tensor):
+def cp_factor(P_r: torch.Tensor, device):
     """
     Quickly obtain rank-(r_a,r_b) CP factors for the core projector.
     We split the right-singular space so that  P_r ≈ (A ⊙ B).
     Returns matrices with shape (r_k , r_a / r_b) as expected by the runtime.
+    Ensures intermediate tensors are on the correct device.
     """
-    _, _, Vh = torch.linalg.svd(P_r, full_matrices=False)   # Vh: (r_k , r_k)
-    V = Vh.T                                                # (r_k , r_k)
+    # Ensure P_r is on the target device
+    P_r_dev = P_r.to(device)
+    _, _, Vh = torch.linalg.svd(P_r_dev, full_matrices=False)   # Vh: (r_k , r_k) on device
+    V = Vh.T                                                # (r_k , r_k) on device
     # take two disjoint slices and QR-orthonormalise each
     A0 = V[:, :R_A].contiguous()
     B0 = V[:, R_A:R_A + R_B].contiguous()
-    A, _ = torch.linalg.qr(A0, mode="reduced")           # (r_k , r_a)
-    B, _ = torch.linalg.qr(B0, mode="reduced")           # (r_k , r_b)
+    A, _ = torch.linalg.qr(A0, mode="reduced")           # (r_k , r_a) on device
+    B, _ = torch.linalg.qr(B0, mode="reduced")           # (r_k , r_b) on device
+    del P_r_dev, Vh, V, A0, B0 # Cleanup intermediate GPU tensors
     return A, B
 
 # --------------------------------------------------------------------------
-def fit_powerlaw(sig_tail: torch.Tensor):
-    """σ_i ≃ λ * i^{-α}   (i is 1-based index into the tail)."""
-    i = torch.arange(1, sig_tail.numel() + 1, device=sig_tail.device, dtype=sig_tail.dtype)
-    y = sig_tail.log().unsqueeze(1)
-    X = torch.stack((i.log(), torch.ones_like(i)), 1)      # [n , 2]
-    sol, *_ = torch.linalg.lstsq(X, y)
+def fit_powerlaw(sig_tail: torch.Tensor, device):
+    """
+    σ_i ≃ λ * i^{-α}   (i is 1-based index into the tail).
+    Ensures tensors are created on the specified device.
+    """
+    # Ensure sig_tail is on the target device
+    sig_tail_dev = sig_tail.to(device)
+    i = torch.arange(1, sig_tail_dev.numel() + 1, device=device, dtype=sig_tail_dev.dtype)
+    y = sig_tail_dev.log().unsqueeze(1)
+    X = torch.stack((i.log(), torch.ones_like(i)), 1)      # [n , 2] on device
+    sol, *_ = torch.linalg.lstsq(X, y) # lstsq happens on device
     slope, bias = sol.squeeze()
-    alpha = float(-slope)
-    
+    alpha = float(-slope) # Convert scalars to float on CPU
+
     # Get raw lambda from the fit
-    raw_lam = float(torch.exp(bias))
-    
+    raw_lam = float(torch.exp(bias)) # Convert scalar to float on CPU
+
     # Use raw lambda with a small floor for numerical stability
     # without the extra normalization that could cause scaling issues
     lam = max(raw_lam, 1e-4)
-    
+
     print(f"Power-law fit: alpha={alpha:.3f}, raw_lambda={raw_lam:.3f}, final_lambda={lam:.3f}")
+    del sig_tail_dev, i, y, X, sol, slope, bias # Cleanup GPU tensors
     return alpha, lam
 
 # --------------------------------------------------------------------------
-def build_gauge(C: torch.Tensor, eps: float = 0.05):
+def build_gauge(C: torch.Tensor, eps: float = 0.05, device=None):
+    """
+    Builds the gauge matrix A and its inverse transpose.
+    Ensures tensors are created on the specified device.
+    """
+    # Ensure C is on the target device
+    C_dev = C.to(device)
     # ---- single-step Lanczos gauge -----------------------------------
-    S  = 0.5 * (C + C.T)
-    v0 = torch.randn(HEAD_DIM, device=C.device)
+    S  = 0.5 * (C_dev + C_dev.T)
+    # Create random tensor directly on the device
+    v0 = torch.randn(HEAD_DIM, device=device, dtype=C_dev.dtype)
     v0 = v0 / v0.norm()
     w  = S @ v0
     alpha = torch.dot(v0, w)
@@ -69,62 +88,112 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05):
     r = (v0 + coeff * v1).div_((v0 + coeff * v1).norm())
 
     Delta = torch.outer(r, r) - torch.diag(r ** 2)
-    A     = torch.eye(HEAD_DIM, device=C.device) + eps * Delta
-    return A, torch.linalg.inv(A).T
+    # Create eye tensor directly on the device
+    A     = torch.eye(HEAD_DIM, device=device, dtype=C_dev.dtype) + eps * Delta
+    A_invT = torch.linalg.inv(A).T # Inverse happens on device
+    del C_dev, S, v0, w, alpha, beta, v1, coeff, r, Delta # Cleanup GPU tensors
+    return A, A_invT
 
 # --------------------------------------------------------------------------
 def convert(orig_ckpt: Path, out_stem: Path):
-    print(f"Loading checkpoint from {orig_ckpt}...")
-    sd = torch.load(orig_ckpt, mmap=True, weights_only=True)
 
+    # --- Determine Device ---
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using device: CUDA ({torch.cuda.get_device_name(device)})")
+    # --- Add MPS Check (Apple Silicon) ---
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using device: MPS (Apple Silicon GPU)")
+    # --- Fallback to CPU ---
+    else:
+        device = torch.device("cpu")
+        print("Using device: CPU")
+
+    print(f"Loading checkpoint from {orig_ckpt}...")
+    # Load to CPU first to avoid potential large VRAM usage for the whole dict
+    sd = torch.load(orig_ckpt, map_location='cpu', weights_only=True)
     sd = sd['model_state_dict']
-    
+
     print("Starting GCB metadata generation...")
     meta = GCBMeta()
 
     for l in range(NUM_LAYERS):
         print(f"Processing layer {l}/{NUM_LAYERS-1}")
         # ----- Value projector -------------------------------------------
-        Wv = sd[f'model.layers.{l}.self_attn.qkv_proj.weight']
-        Wv = Wv.view(3, NUM_HEADS, HEAD_DIM, -1)[2]        # (H , d_k , d_in)
-        Wv = Wv.permute(0, 2, 1).reshape(-1, HEAD_DIM)     # (d_in*H , d_k)
-        
-        # Cast to float32 for SVD
-        Wv_float = Wv.float()
-        print(f"  Value matrix shape: {Wv_float.shape}, dtype: {Wv_float.dtype}")
-        
-        # Get right singular vectors (for value space projector)
-        _, _, Vh = torch.linalg.svd(Wv_float, full_matrices=False)
-        Z_r = Vh.T[:, :R_V].contiguous()  # (d_k , r_v) -> (256, R_V)
-        meta.layers[l] = LayerAux(Z_r.half())
+        Wv_cpu = sd[f'model.layers.{l}.self_attn.qkv_proj.weight']
+        Wv_cpu = Wv_cpu.view(3, NUM_HEADS, HEAD_DIM, -1)[2]        # (H , d_k , d_in)
+        Wv_cpu = Wv_cpu.permute(0, 2, 1).reshape(-1, HEAD_DIM)     # (d_in*H , d_k)
+
+        # Move to device for SVD, cast to float32
+        Wv_float_dev = Wv_cpu.float().to(device)
+        print(f"  Value matrix shape: {Wv_float_dev.shape}, dtype: {Wv_float_dev.dtype}, device: {Wv_float_dev.device}")
+
+        # Get right singular vectors (for value space projector) - SVD on device
+        _, _, Vh_dev = torch.linalg.svd(Wv_float_dev, full_matrices=False)
+        Z_r_dev = Vh_dev.T[:, :R_V].contiguous()  # (d_k , r_v) -> (256, R_V) on device
+
+        # Store Z_r on CPU as float16
+        meta.layers[l] = LayerAux(Z_r_dev.cpu().half())
+
+        # Cleanup GPU memory
+        del Wv_cpu, Wv_float_dev, Vh_dev, Z_r_dev
+        if device.type == 'cuda': torch.cuda.empty_cache()
+        if device.type == 'mps': torch.mps.empty_cache()
+        gc.collect()
+
 
         for h in range(NUM_HEADS):
-            # ---- original per-head weights -----------------------------
+            print(f"  Processing head {h}/{NUM_HEADS-1}")
+            # ---- original per-head weights (keep on CPU initially) ------
             Wqkv = sd[f'model.layers.{l}.self_attn.qkv_proj.weight']
             Wqkv = Wqkv.view(3, NUM_HEADS, HEAD_DIM, -1)
-            Wq = Wqkv[0, h].T.float()     # (d_in , d_k), cast to float32
-            Wk = Wqkv[1, h].T.float()     # Cast to float32
+            Wq_cpu = Wqkv[0, h].T.float()     # (d_in , d_k), float32 on CPU
+            Wk_cpu = Wqkv[1, h].T.float()     # float32 on CPU
 
-            # ------------- ∆-gauge heuristic ----------------------------
-            C = Wq.T @ Wk
-            A, A_invT = build_gauge(C, EPS)
+            # --- Move to device for computation ---
+            Wq_dev = Wq_cpu.to(device)
+            Wk_dev = Wk_cpu.to(device)
 
-            Wq_g, Wk_g = Wq @ A, Wk @ A_invT
-            Cg = Wq_g.T @ Wk_g
-            _, s, Vh = torch.linalg.svd(Cg, full_matrices=False)
-            P_r = Vh[:R_K].T         # (d_k , r_k)
+            # ------------- ∆-gauge heuristic (on device) ----------------
+            print(f"    Calculating Gauge for head {h} using tensors on device: {Wq_dev.device}, {Wk_dev.device}")
+            C_dev = Wq_dev.T @ Wk_dev # Matmul on device
+            A_dev, A_invT_dev = build_gauge(C_dev, EPS, device=device) # Gauge calculation on device
 
-            alpha, lam = fit_powerlaw(s[R_K:])
+            # --- Core projection SVD (on device) ---
+            Wq_g_dev = Wq_dev @ A_dev       # Matmul on device
+            Wk_g_dev = Wk_dev @ A_invT_dev  # Matmul on device
+            Cg_dev = Wq_g_dev.T @ Wk_g_dev  # Matmul on device
+            print(f"    Performing Core SVD on tensor with device: {Cg_dev.device}")
+            _, s_dev, Vh_core_dev = torch.linalg.svd(Cg_dev, full_matrices=False) # SVD on device
+            P_r_dev = Vh_core_dev[:R_K].T.contiguous()         # (d_k , r_k) on device
 
-            P_a, P_b = cp_factor(P_r)
+            # --- Power Law Fit (operates on device tensors) ---
+            # Pass singular values tail, ensuring it's on the device
+            alpha, lam = fit_powerlaw(s_dev[R_K:], device=device)
+
+            # --- CP Factor (operates on device tensors) ---
+            # Pass P_r, ensuring it's on the device
+            P_a_dev, P_b_dev = cp_factor(P_r_dev, device=device) # CP factoring on device
+
+            # --- Store results (move back to CPU, convert to half) ---
             meta.add_head(l, h,
-                          A.half(), A_invT.half(),
-                          P_r.half(), P_a.half(), P_b.half(),
+                          A_dev.cpu().half(), A_invT_dev.cpu().half(),
+                          P_r_dev.cpu().half(), P_a_dev.cpu().half(), P_b_dev.cpu().half(),
                           alpha, lam)
+
+            # --- Aggressive Cleanup within head loop ---
+            del Wq_cpu, Wk_cpu, Wq_dev, Wk_dev, C_dev, A_dev, A_invT_dev
+            del Wq_g_dev, Wk_g_dev, Cg_dev, s_dev, Vh_core_dev, P_r_dev, P_a_dev, P_b_dev
+            if device.type == 'cuda': torch.cuda.empty_cache()
+            if device.type == 'mps': torch.mps.empty_cache()
+            gc.collect()
+
 
     print("Saving GCB metadata and model weights...")
     meta.save(out_stem.with_suffix('.pkl'))
-    torch.save(sd, out_stem.with_suffix('.pt'))
+    # Save the original state dict (which remained on CPU)
+    torch.save({'model_state_dict': sd}, out_stem.with_suffix('.pt'))
     print(f"✓  Saved  {out_stem}.pt   and   {out_stem}.pkl")
 
 # --------------------------------------------------------------------------
