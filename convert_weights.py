@@ -17,7 +17,7 @@ NUM_LAYERS   = 26
 NUM_HEADS    = 4
 NUM_KV_HEADS = 1
 HEAD_DIM     = 256
-R_K, R_A, R_B, R_V = 8, 4, 4, 8
+R_K, R_A, R_B, R_V = 16, 8, 8, 8  # Increased R_K, R_A, R_B for better core coverage
 EPS = 0.05
 # --------------------------------------------------------------------------
 
@@ -94,6 +94,46 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05, device=None):
     del C_dev, S, v0, w, alpha, beta, v1, coeff, r, Delta # Cleanup GPU tensors
     return A, A_invT
 
+# --- iterative Δ-gauge ------------------------------------------------
+def improved_gauge(Wq, Wk, max_iter=8, tol=0.01, device=None):
+    """
+    Iteratively improve the gauge to maximize energy captured by the first R_K singular values.
+    
+    Args:
+        Wq: Query weight matrix
+        Wk: Key weight matrix
+        max_iter: Maximum number of iterations (default: 8)
+        tol: Tolerance for improvement in beta (default: 0.01)
+        device: Device for computation
+        
+    Returns:
+        A: Gauge matrix
+        A_invT: Inverse transpose of gauge matrix
+        beta: Energy ratio captured by the first R_K singular values
+    """
+    A = torch.eye(HEAD_DIM, device=device, dtype=Wq.dtype)
+    A_invT = torch.eye(HEAD_DIM, device=device, dtype=Wq.dtype)
+    beta_old = 0.0
+    
+    for i in range(max_iter):
+        C = (Wq @ A).T @ (Wk @ A_invT)          # gauge-current interaction
+        _, s, Vh = torch.linalg.svd(C, full_matrices=False)
+        beta = s[:R_K].sum() / s.sum()
+
+        print(f"      Iteration {i}: β={beta:.3f}")
+        
+        if i > 0 and (beta - beta_old) < tol:
+            print(f"      Stopping early at iteration {i}: Δβ={beta-beta_old:.4f} < {tol}")
+            break                                # no useful progress
+        beta_old = beta
+
+        # one Lanczos / Newton step as before
+        A_step, A_invT_step = build_gauge(C, EPS, device=device)
+        A = A @ A_step
+        A_invT = A_invT_step @ A_invT            # keep them coherent
+        
+    return A, A_invT, beta
+
 # --------------------------------------------------------------------------
 def convert(orig_ckpt: Path, out_stem: Path):
 
@@ -155,10 +195,10 @@ def convert(orig_ckpt: Path, out_stem: Path):
             Wq_dev = Wq_cpu.to(device)
             Wk_dev = Wk_cpu.to(device)
 
-            # ------------- ∆-gauge heuristic (on device) ----------------
-            print(f"    Calculating Gauge for head {h} using tensors on device: {Wq_dev.device}, {Wk_dev.device}")
-            C_dev = Wq_dev.T @ Wk_dev # Matmul on device
-            A_dev, A_invT_dev = build_gauge(C_dev, EPS, device=device) # Gauge calculation on device
+            # ------------- Iterative ∆-gauge improvement ----------------
+            print(f"    Calculating improved Gauge for head {h} using tensors on device: {Wq_dev.device}, {Wk_dev.device}")
+            A_dev, A_invT_dev, beta = improved_gauge(Wq_dev, Wk_dev, device=device)
+            print(f"    Final β={beta:.3f} after iterative gauge")
 
             # --- Core projection SVD (on device) ---
             Wq_g_dev = Wq_dev @ A_dev       # Matmul on device

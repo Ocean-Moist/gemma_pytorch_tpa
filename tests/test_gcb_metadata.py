@@ -1,8 +1,9 @@
 import pytest
 import torch
+import math
 from pathlib import Path
 from gemma_gcb.gcb_meta import GCBMeta
-from gemma_gcb.phi import PowerMap, core_residual # Assuming phi.py is accessible
+from gemma_gcb.phi import PowerMap, core_residual, _hadamard_full # Import _hadamard_full too
 # Add imports for build_gauge, fit_powerlaw if testing requires re-running parts of convert_weights
 
 # --- Constants (adjust if needed) ---
@@ -14,7 +15,7 @@ GCB_CKPT = MODEL_DIR / "gemma1b_gcb.pt" # Might need this if testing gauged weig
 NUM_LAYERS = 26
 NUM_HEADS = 4
 HEAD_DIM = 256
-R_K = 8
+R_K = 16  # Updated to match convert_weights.py
 DEVICE = "cpu" # Run offline tests on CPU
 
 # --- Load Data Fixture ---
@@ -82,6 +83,19 @@ def test_hadamard_tail_isolation(gcb_data):
 
     # Check first r_k coordinates are zero
     assert torch.all(phi_x[:, :R_K] == 0.0), f"PowerMap output has non-zero core components: {phi_x[:, :R_K]}"
+    
+    # Check that the normalization factor in PowerMap is applied correctly
+    # This verifies the fix we made to phi.py
+    hadamard_out = _hadamard_full(x_tail_approx.to(pow_map.scale.device))
+    hadamard_out[..., :R_K] = 0.0
+    
+    # This is the critical correction factor that was missing
+    norm_factor = math.sqrt(HEAD_DIM - R_K)
+    manual_result = (hadamard_out / norm_factor).abs() * pow_map.scale
+    
+    # Check that our manual calculation matches the PowerMap output
+    assert torch.allclose(phi_x, manual_result, rtol=1e-4, atol=1e-4), \
+           "PowerMap output doesn't match expected output with normalization"
 
 @pytest.mark.parametrize("l_idx", range(NUM_LAYERS))
 @pytest.mark.parametrize("h_idx", range(NUM_HEADS))
