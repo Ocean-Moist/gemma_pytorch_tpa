@@ -43,9 +43,12 @@ class PowerMap(torch.nn.Module):
         self.r_k: Final = r_k
 
     def forward(self, x_tail: Tensor, l_idx=-1, h_idx=-1, step=-1) -> Tensor:
+        if self.d_k == self.r_k:          # blanket has zero width
+            return torch.zeros_like(x_tail)
+
         # x_tail shape (… , d_k)  where first r_k coords are (approx.) 0
         dbg("pm_x_tail_in", x_tail, l_idx, h_idx, step)
-        
+
         h = _hadamard_full(x_tail.to(self.scale.device))      # (… , d_k)
         dbg("pm_hadamard", h, l_idx, h_idx, step)
         
