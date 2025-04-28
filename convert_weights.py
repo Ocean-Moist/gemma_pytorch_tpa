@@ -19,7 +19,7 @@ NUM_KV_HEADS = 1
 HEAD_DIM     = 256
 # Full rank mode for sanity check
 R_K = HEAD_DIM  # 256 - full rank core
-R_V = 8         # Keep value rank small (can be 256 for full rank everywhere)
+R_V = HEAD_DIM         # Keep value rank small (can be 256 for full rank everywhere)
 SKIP_CP = True  # Skip CP factorization for full rank mode
 EPS = 0.15
 # --------------------------------------------------------------------------
