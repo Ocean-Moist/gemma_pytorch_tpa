@@ -95,7 +95,7 @@ def build_gauge(C: torch.Tensor, eps: float = 0.05, device=None):
     return A, A_invT
 
 # --- iterative Δ-gauge ------------------------------------------------
-def improved_gauge(Wq, Wk, max_iter=50, tol=0.01, device=None):
+def improved_gauge(Wq, Wk, max_iter=10, tol=5e-3, device=None):
     """
     Iteratively improve the gauge to maximize energy captured by the first R_K singular values.
     
@@ -122,9 +122,9 @@ def improved_gauge(Wq, Wk, max_iter=50, tol=0.01, device=None):
 
         print(f"      Iteration {i}: β={beta:.3f}")
         
-        if i > 0 and (beta - beta_old) < tol:
-            print(f"      Stopping early at iteration {i}: Δβ={beta-beta_old:.4f} < {tol}")
-            # break                                # no useful progress
+        if i > 0 and abs(beta - beta_old) < tol:
+            print(f"      Stopping early at iteration {i}: Δβ={beta-beta_old:+.4f} < {tol}")
+            break                                # no useful progress
         beta_old = beta
 
         # one Lanczos / Newton step as before
@@ -159,7 +159,7 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
     meta = GCBMeta()
     
     # Initialize beta table if using auto_beta
-    beta_table = [[(1.0, 1.0, 1.0) for _ in range(NUM_HEADS)] for _ in range(NUM_LAYERS)] if auto_beta else None
+    beta_table = [[(1.0, 1.0, 1.0, 1.0) for _ in range(NUM_HEADS)] for _ in range(NUM_LAYERS)] if auto_beta else None
 
     for l in range(NUM_LAYERS):
         print(f"Processing layer {l}/{NUM_LAYERS-1}")
@@ -201,16 +201,17 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
             # ➋ Automatic β search or global beta application
             if global_beta is not None:
                 # Apply global beta directly to Wk
-                β = global_beta
+                β = abs(global_beta)  # Use absolute value for consistency
                 cond = 1.0  # No conditioning for global beta
-                scale = β * cond
+                sign = 1.0 if global_beta >= 0 else -1.0  # Preserve sign
+                scale = β * cond * sign
                 
                 if verbose:
-                    print(f"→ Using global β={β:.3f} for L{l:02d}H{h}")
+                    print(f"→ Using global β={β:.3f} sign={sign:+.0f} scale={scale:.3f} for L{l:02d}H{h}")
                 
                 # Store in beta_table if it exists
                 if beta_table is not None:
-                    beta_table[l][h] = (β, cond, scale)
+                    beta_table[l][h] = (β, cond, sign, scale)
                     
                 Wk_dev.mul_(scale)
                 
@@ -228,22 +229,29 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
                     den = torch.dot(Wk_test.flatten(), Wk_test.flatten())  # ||Wk||²_F
                     beta = (num / den).item()
                     
-                    E = torch.norm(Wq_dev - beta * Wk_test, p='fro') / torch.norm(Wq_dev, p='fro')
+                    # Keep sign information separate
+                    sign = 1.0
+                    if beta < 0:
+                        sign = -1.0
+                        beta = -beta  # Work with |β| for optimization
+                    
+                    E = torch.norm(Wq_dev - beta * Wk_test * sign, p='fro') / torch.norm(Wq_dev, p='fro')
                     
                     if E < best_E - 1e-4:  # tiny tolerance to avoid flip-flop
-                        best_E, best_B, best_cnd = E, beta, cnd
+                        best_E, best_B, best_cnd, best_sign = E, beta, cnd, sign
                 
                 β = best_B
                 cond = best_cnd
+                sign = best_sign if 'best_sign' in locals() else 1.0  # Default to positive if not set
                 
-                # Calculate total scale factor
-                scale = β * cond
+                # Calculate total scale factor (always positive from our optimization)
+                scale = β * cond * sign  # Apply sign here
                 
                 if verbose:
-                    print(f"→ auto-β L{l:02d}H{h}: β={β:.3f} cond={cond} scale={scale:.3f}  E={best_E:6.2e}")
+                    print(f"→ auto-β L{l:02d}H{h}: β={β:.3f} cond={cond} sign={sign:+.0f} scale={scale:.3f}  E={best_E:6.2e}")
                 
-                # Store beta, cond, and scale in the metadata
-                beta_table[l][h] = (β, cond, scale)
+                # Store beta, cond, sign, and scale in the metadata
+                beta_table[l][h] = (β, cond, sign, scale)
                 
                 # Apply the total scale factor to Wk
                 Wk_dev.mul_(scale)
