@@ -18,7 +18,7 @@ NUM_HEADS    = 4
 NUM_KV_HEADS = 1
 HEAD_DIM     = 256
 R_K, R_A, R_B, R_V = 16, 8, 8, 8  # Increased R_K, R_A, R_B for better core coverage
-EPS = 0.05
+EPS = 0.15
 # --------------------------------------------------------------------------
 
 def cp_factor(P_r: torch.Tensor, device):
@@ -223,7 +223,7 @@ def convert(orig_ckpt: Path, out_stem: Path):
                           alpha, lam)
 
             # --- Aggressive Cleanup within head loop ---
-            del Wq_cpu, Wk_cpu, Wq_dev, Wk_dev, C_dev, A_dev, A_invT_dev
+            del Wq_cpu, Wk_cpu, Wq_dev, Wk_dev, A_dev, A_invT_dev
             del Wq_g_dev, Wk_g_dev, Cg_dev, s_dev, Vh_core_dev, P_r_dev, P_a_dev, P_b_dev
             if device.type == 'cuda': torch.cuda.empty_cache()
             if device.type == 'mps': torch.mps.empty_cache()
