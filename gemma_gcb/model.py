@@ -26,13 +26,9 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
         # ----- Load vanilla backbone weights ----------------------
         cfg.quant = False                                 # Turn off quantization to match FP16 checkpoint
         self.base = GemmaForCausalLM(cfg)                 # full model (has embedder)
-        missing, unexpected = self.base.load_state_dict(
-            torch.load(ckpt_path, mmap=True, weights_only=True), strict=True
-        )
-        if missing:
-            print("Missing keys:", missing)
-        if unexpected:
-            print("Unexpected keys:", unexpected)
+        # Unwrap the model_state_dict from the checkpoint dictionary
+        sd = torch.load(ckpt_path, mmap=True, weights_only=True)["model_state_dict"]
+        self.base.load_state_dict(sd, strict=False)
         self.embedder = self.base.embedder                # keep a handle
         self.backbone = self.base.model                   # decoder stack only
 
