@@ -135,7 +135,7 @@ def improved_gauge(Wq, Wk, max_iter=50, tol=0.01, device=None):
     return A, A_invT, beta
 
 # --------------------------------------------------------------------------
-def convert(orig_ckpt: Path, out_stem: Path):
+def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, global_beta=None):
 
     # --- Determine Device ---
     if torch.cuda.is_available():
@@ -157,6 +157,9 @@ def convert(orig_ckpt: Path, out_stem: Path):
 
     print("Starting GCB metadata generation...")
     meta = GCBMeta()
+    
+    # Initialize beta table if using auto_beta
+    beta_table = [[(1.0, 1.0) for _ in range(NUM_HEADS)] for _ in range(NUM_LAYERS)] if auto_beta else None
 
     for l in range(NUM_LAYERS):
         print(f"Processing layer {l}/{NUM_LAYERS-1}")
@@ -194,6 +197,40 @@ def convert(orig_ckpt: Path, out_stem: Path):
             # --- Move to device for computation ---
             Wq_dev = Wq_cpu.to(device)
             Wk_dev = Wk_cpu.to(device)
+            
+            # ➋ Automatic β search or global beta application
+            if global_beta is not None:
+                # Apply global beta directly to Wk
+                β = global_beta
+                if verbose:
+                    print(f"→ Using global β={β:.3f} for L{l:02d}H{h}")
+                Wk_dev.mul_(β)
+                
+            elif auto_beta:
+                best_E = 1e30
+                best_B = 1.0
+                best_cnd = 1.0
+                
+                for cnd in [1.0, 1.2, 1.3, 1.4]:
+                    # closed-form 1-D least-squares: min_β ‖Wq – β·Wk‖_F²
+                    beta = (Wq_dev * Wk_dev).sum().item() / (Wk_dev * Wk_dev).sum().item()
+                    
+                    E = torch.norm(Wq_dev - beta * Wk_dev, p='fro') / torch.norm(Wq_dev, p='fro')
+                    
+                    if E < best_E - 1e-4:  # tiny tolerance to avoid flip-flop
+                        best_E, best_B, best_cnd = E, beta, cnd
+                
+                β = best_B
+                cond = best_cnd
+                
+                if verbose:
+                    print(f"→ auto-β L{l:02d}H{h}: β={β:.3f} cond={cond}  E={best_E:6.2e}")
+                
+                # store for optional metadata dump
+                beta_table[l][h] = (β, cond)
+                
+                # apply the rescale before the usual Gauge / SVD steps
+                Wk_dev.mul_(β)
 
             # ------------- Iterative ∆-gauge improvement ----------------
             print(f"    Calculating improved Gauge for head {h} using tensors on device: {Wq_dev.device}, {Wk_dev.device}")
@@ -234,6 +271,15 @@ def convert(orig_ckpt: Path, out_stem: Path):
     meta.save(out_stem.with_suffix('.pkl'))
     # Save the original state dict (which remained on CPU)
     torch.save({'model_state_dict': sd}, out_stem.with_suffix('.pt'))
+    
+    # Save beta table if auto_beta was used
+    if auto_beta:
+        import json
+        beta_file = out_stem.with_suffix('.betas.json')
+        with open(beta_file, 'w') as f:
+            json.dump(beta_table, f, indent=2)
+        print(f"✓  Saved beta scaling factors to {beta_file}")
+    
     print(f"✓  Saved  {out_stem}.pt   and   {out_stem}.pkl")
 
 # --------------------------------------------------------------------------
@@ -241,5 +287,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', required=True, type=Path, help="Original Gemma-3 1B .pt")
     ap.add_argument('--out',  required=True, type=Path, help="Output stem (no ext)")
+    ap.add_argument('--auto_beta', action='store_true', help='search β per head before gauge/SVD')
+    ap.add_argument('-v', '--verbose', action='store_true', help='Show detailed output')
+    ap.add_argument('--global_beta', type=float, help='Global beta value to apply to all heads (bypass auto search)')
     args = ap.parse_args()
-    convert(args.ckpt, args.out)
+    convert(args.ckpt, args.out, 
+            auto_beta=args.auto_beta, 
+            verbose=args.verbose, 
+            global_beta=args.global_beta)
