@@ -254,27 +254,21 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 ctx = layer.attn_vanilla.o_proj(ctx)
                 dbg("ctx_after_proj", ctx, l_idx=l_idx, step=step)
                 
-                # • Vanilla order = LN(ctx)  →  add residual
-                ctx_norm = layer.post_attention_layernorm(ctx)
-                dbg("ctx_norm", ctx_norm, l_idx=l_idx, step=step)
-                h_step   = h_step + ctx_norm
+                # • Vanilla order = add residual first, then (later) LN
+                h_step = h_step + ctx                    # residual add
                 dbg("h_step_post_attn", h_step, l_idx=l_idx, step=step)
 
             # ------------- Feed-forward + norms (Revised for Gemma 2/3 compatibility) ---
             res = h_step # Residual connection starts from state *after* attention output is added
 
-            # Check and apply pre-FFW norm if it exists
-            if hasattr(layer, 'pre_feedforward_layernorm') and layer.pre_feedforward_layernorm is not None:
+            # 1) Apply the *post-attention* LN **now** (this is Gemma's
+            #    "pre-FFN" norm — name depends on checkpoint version)
+            if hasattr(layer, 'pre_feedforward_layernorm') \
+               and layer.pre_feedforward_layernorm is not None:
                  h_ff_in = layer.pre_feedforward_layernorm(res)
-                 dbg("h_ff_in_pre", h_ff_in, l_idx=l_idx, step=step)
-            # Fallback: Apply post-attention norm if pre-FFW norm doesn't exist (older style or specific configs)
-            elif hasattr(layer, 'post_attention_layernorm'):
-                 h_ff_in = layer.post_attention_layernorm(res)
-                 dbg("h_ff_in_post", h_ff_in, l_idx=l_idx, step=step)
             else:
-                 # Should not happen in standard Gemma models, but handle defensively
-                 h_ff_in = res # Pass residual directly if no relevant norm found
-                 dbg("h_ff_in_direct", h_ff_in, l_idx=l_idx, step=step)
+                 h_ff_in = layer.post_attention_layernorm(res)
+            dbg("h_ff_in", h_ff_in, l_idx=l_idx, step=step)
 
             h_ff_out = layer.mlp(h_ff_in)
             dbg("h_ff_out", h_ff_out, l_idx=l_idx, step=step)
