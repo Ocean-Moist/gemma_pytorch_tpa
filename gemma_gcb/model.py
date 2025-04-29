@@ -199,11 +199,9 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                     q_h = attn.query_norm(q_h)
                     k_h = attn.key_norm(k_h)
 
-                # --- NEW: vanilla Gemma scale (query *and* key) ---------------
-                scale = 1.0 / math.sqrt(self.cfg.head_dim)      # 1 / √d_k
-                q_h *= scale
-                k_h *= scale
-                
+                scale = 1.0 / math.sqrt(self.cfg.head_dim)
+                q_h *= scale        # only the query is scaled in vanilla Gemma
+
                 dbg("q_h_norm", q_h, l_idx, h_idx, step)
                 dbg("k_h_norm", k_h, l_idx, h_idx, step)
 
