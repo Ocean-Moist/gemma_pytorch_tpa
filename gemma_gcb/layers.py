@@ -192,7 +192,6 @@ class GCBHead(torch.nn.Module):
         
         # Compute core logits with proper scaling and cast back to original dtype
         # <<< FIX: Scale by sqrt(r_k) for the r_k dimensional core subspace >>>
-        - core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
         if self.r_k < self.d_k:                       # low-rank case
                 core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
         else:                                         # full-rank: no extra scale
