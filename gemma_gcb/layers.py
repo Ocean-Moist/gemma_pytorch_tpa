@@ -246,10 +246,11 @@ class GCBHead(torch.nn.Module):
         dbg("blanket_interaction", blanket_interaction, l_idx, h_idx, step)
         
         # Updated scaling to account for sequence length
-        ell = max(1, step)  # length of history
-        tail_log_f32 = (lam * blanket_interaction) / (math.sqrt(self.d_k) * math.sqrt(ell))
-        if not torch.isfinite(blanket_interaction).all():
-            blanket_interaction = torch.zeros_like(blanket_interaction)
+        ell = max(step, 1)
+        tail_log_f32 = lam * blanket_interaction
+        tail_log_f32.div_(math.sqrt(self.d_k) * math.sqrt(ell))
+        tail_log_f32 = torch.nan_to_num(tail_log_f32, 0.0)   # kill Infs / NaNs
+
         dbg("tail_log", tail_log_f32, l_idx, h_idx, step)
         
         # Double-check calculation for verification
