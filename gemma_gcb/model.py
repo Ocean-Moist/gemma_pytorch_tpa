@@ -198,6 +198,11 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 if attn.query_norm is not None and attn.key_norm is not None:
                     q_h = attn.query_norm(q_h)
                     k_h = attn.key_norm(k_h)
+
+                # --- NEW: vanilla Gemma scale (query *and* key) ---------------
+                scale = 1.0 / math.sqrt(self.cfg.head_dim)      # 1 / √d_k
+                q_h *= scale
+                k_h *= scale
                 
                 dbg("q_h_norm", q_h, l_idx, h_idx, step)
                 dbg("k_h_norm", k_h, l_idx, h_idx, step)
@@ -249,10 +254,11 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 ctx = layer.attn_vanilla.o_proj(ctx)
                 dbg("ctx_after_proj", ctx, l_idx=l_idx, step=step)
                 
-                # Add attention output ctx back to the *original* unnormalized h_step
-                h_step_before = h_step.clone()
-                h_step = layer.post_attention_layernorm(h_step + ctx)
-                dbg("h_step_after_attn", h_step, l_idx=l_idx, step=step)
+                # • Vanilla order = LN(ctx)  →  add residual
+                ctx_norm = layer.post_attention_layernorm(ctx)
+                dbg("ctx_norm", ctx_norm, l_idx=l_idx, step=step)
+                h_step   = h_step + ctx_norm
+                dbg("h_step_post_attn", h_step, l_idx=l_idx, step=step)
 
             # ------------- Feed-forward + norms (Revised for Gemma 2/3 compatibility) ---
             res = h_step # Residual connection starts from state *after* attention output is added
@@ -273,12 +279,11 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
             h_ff_out = layer.mlp(h_ff_in)
             dbg("h_ff_out", h_ff_out, l_idx=l_idx, step=step)
 
-            # Check and apply post-FFW norm if it exists
+            # Apply post-FFW LN if present, *then* residual add
             if hasattr(layer, 'post_feedforward_layernorm') and layer.post_feedforward_layernorm is not None:
                  h_ff_out = layer.post_feedforward_layernorm(h_ff_out)
                  dbg("h_ff_out_norm", h_ff_out, l_idx=l_idx, step=step)
 
-            # Final residual connection for the layer
             h_step = res + h_ff_out
             dbg("layer_out", h_step, l_idx=l_idx, step=step)
 
