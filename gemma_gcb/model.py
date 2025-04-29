@@ -253,7 +253,8 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 dbg("ctx_after_proj", ctx, l_idx=l_idx, step=step)
                 
                 # • Vanilla order = add residual first, then (later) LN
-                h_step = h_step + ctx                    # residual add
+                attn_out_norm = layer.post_attention_layernorm(ctx)
+                h_step        = h_step + attn_out_norm
                 dbg("h_step_post_attn", h_step, l_idx=l_idx, step=step)
 
             # ------------- Feed-forward + norms (Revised for Gemma 2/3 compatibility) ---
