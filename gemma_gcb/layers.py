@@ -184,7 +184,9 @@ class GCBHead(torch.nn.Module):
 
             return core_log + tail_log, (p_v @ Z_r.T)           # v_hist for length-1 cache
 
-
+        cache.P[step, h_idx] = p_k
+        cache.V[step, h_idx] = p_v
+        cache.S[h_idx]      += phi_k_raw.sum(0).float()
         # --------------- Read history (only previous tokens) ----------------------------
         p_hist = cache.P[:step+1, h_idx].to(dtype)          # (S, r_k) - strictly < step
         v_hist = cache.V[:step+1, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
