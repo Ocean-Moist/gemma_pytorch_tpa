@@ -168,8 +168,8 @@ class GCBHead(torch.nn.Module):
 
         # ── first token: store it, then return (no logits yet) ──────────────
         if step == 0:
-            cache.P[0, h_idx] = p_k.to(torch.float16)
-            cache.V[0, h_idx] = p_v.to(torch.float16)
+            cache.P[0, h_idx] = p_k
+            cache.V[0, h_idx] = p_v
             cache.S[h_idx] += phi_k_raw.sum(0).float()
             # Log updated S[h] after write for first token
             dbg("S[h] after (first token)", cache.S[h_idx], l_idx, h_idx, step)
@@ -271,8 +271,8 @@ class GCBHead(torch.nn.Module):
         # both should now be in the same dtype (original dtype of inputs)
         
         # ---------------- Write current token to cache NOW --------------------------
-        cache.P[step, h_idx] = p_k.to(torch.float16)
-        cache.V[step, h_idx] = p_v.to(torch.float16)
+        cache.P[step, h_idx] = p_k
+        cache.V[step, h_idx] = p_v
         cache.S[h_idx] += phi_k_raw.sum(0).float()
         
         # Log updated S[h] after write
