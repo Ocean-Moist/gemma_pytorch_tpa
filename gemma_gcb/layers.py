@@ -172,7 +172,7 @@ class GCBHead(torch.nn.Module):
             # cast once – the var does not exist yet in this branch
             p_q_f32   = p_q.float()          #  <-- NEW
             p_hist_f32 = p_k.float()         #  <-- NEW (single key ≡ history)
-            core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
+            core_log_f32 = (p_q_f32 @ p_hist_f32.T) # / math.sqrt(self.r_k)
             tail_log_f32 = torch.zeros_like(core_log_f32)      # blanket = 0 for step-0
             core_log = core_log_f32.to(dtype)
             tail_log = tail_log_f32.to(dtype)
