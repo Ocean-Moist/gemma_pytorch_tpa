@@ -166,8 +166,13 @@ class GCBHead(torch.nn.Module):
         dbg("S[h] current", cache.S[h_idx], l_idx, h_idx, step)
         _stats("S[h]", step, step, cache.S[h_idx]) # Log the current state S
 
-        # During the first token there is nothing to attend to.
+        # ── first token: store it, then return (no logits yet) ──────────────
         if step == 0:
+            cache.P[0, h_idx] = p_k.to(torch.float16)
+            cache.V[0, h_idx] = p_v.to(torch.float16)
+            cache.S[h_idx] += phi_k_raw.sum(0).float()
+            # Log updated S[h] after write for first token
+            dbg("S[h] after (first token)", cache.S[h_idx], l_idx, h_idx, step)
             return None, None
 
         # --------------- Read history (only previous tokens) ----------------------------
