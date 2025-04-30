@@ -252,7 +252,6 @@ class GCBHead(torch.nn.Module):
         # Log lambda value for debugging
         # Apply optional lambda clamp (safety valve)
         lam = min(self.lam, 8.0)  # empirical soft-cap
-        lam = 0.0      # <–– temporary: kill blanket completely
         dbg("lambda", torch.tensor(lam, device=q_head.device), l_idx, h_idx, step)
         
         # Calculate blanket interaction 

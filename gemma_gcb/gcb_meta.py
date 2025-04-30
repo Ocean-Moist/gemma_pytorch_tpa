@@ -3,13 +3,15 @@
 import pickle, torch
 from dataclasses import dataclass, field
 
+from typing import Optional
+
 @dataclass
 class HeadAux:
-    A:      torch.Tensor      # (d_k , d_k)
-    A_invT: torch.Tensor      # (d_k , d_k)
-    P_r:    torch.Tensor      # (d_k , r_k)
-    P_a:    torch.Tensor      # (r_k , r_a)
-    P_b:    torch.Tensor      # (r_k , r_b)
+    A:      torch.Tensor            # (d_k , d_k) - Orthogonal gauge matrix
+    A_invT: torch.Tensor            # (d_k , d_k) - Should be same as A for orthogonal gauge
+    P_r:    torch.Tensor            # (d_k , r_k) - Core projector (from right singular vectors of gauged interaction)
+    P_a:    Optional[torch.Tensor]  # (r_k , r_a) - CP Factor A, Optional (None if SKIP_CP)
+    P_b:    Optional[torch.Tensor]  # (r_k , r_b) - CP Factor B, Optional (None if SKIP_CP)
     alpha:  float
     lam:    float
 
