@@ -273,4 +273,8 @@ class GCBHead(torch.nn.Module):
             
         # broadcast tail_log over sequence length and add to core_log
         # both should now be in the same dtype (original dtype of inputs)
+        # ⬆ change to…
+        out = core_log + tail_log.unsqueeze(-1), v_hist
+        self.__dict__["_dbg_last_out"] = out          # stash for hooks
+
         return core_log + tail_log.unsqueeze(-1), v_hist
