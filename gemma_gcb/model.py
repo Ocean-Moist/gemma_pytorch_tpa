@@ -221,8 +221,9 @@ class GemmaForCausalLM_GCB(torch.nn.Module):
                 values = torch.stack(values_all)          # (H , step , d_v)
                 dbg("stacked_logits", logits, l_idx=l_idx, step=step)
 
-                attn_weights = torch.softmax(logits.float(), -1).to(logits.dtype)                dbg("attn_weights", attn_weights, l_idx=l_idx, step=step)
-
+                attn_weights = torch.softmax(logits.float(), -1).to(logits.dtype)
+                dbg("attn_weights", attn_weights, l_idx=l_idx, step=step)
+                
                 # Check attention weight distribution
                 if step > 0:
                     uniform_weights = 1.0 / step
