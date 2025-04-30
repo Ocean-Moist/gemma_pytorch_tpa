@@ -25,8 +25,9 @@ class GCCache(torch.nn.Module):
                  r_k: int, r_v: int, d_k: int, device):
         super().__init__()
         # Store the full core vector instead of factorized components
-        self.register_buffer('P', torch.zeros(max_seq, n_h, r_k, dtype=torch.float16, device=device))
-        self.register_buffer('V', torch.zeros(max_seq, n_h, r_v, dtype=torch.float16, device=device))
+        dtype_pv = torch.float32
+        self.register_buffer('P', torch.zeros(max_seq, n_h, r_k, dtype=dtype_pv))
+        self.register_buffer('V', torch.zeros(max_seq, n_h, r_v, dtype=dtype_pv))
         self.register_buffer('S', torch.zeros(n_h, d_k, dtype=torch.float32, device=device))
 
 # --------------------------------------------------------------------
