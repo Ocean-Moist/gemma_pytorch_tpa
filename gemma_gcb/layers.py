@@ -180,8 +180,8 @@ class GCBHead(torch.nn.Module):
             return None, None
 
         # --------------- Read history ----------------------------
-        p_hist = cache.P[:step, h_idx].to(dtype)          # (S, r_k) - direct retrieval
-        v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
+        p_hist = cache.P[:step + 1, h_idx].to(dtype)          # (S, r_k) - direct retrieval
+        v_hist = cache.V[:step + 1, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
         
         dbg("p_hist (read)", p_hist, l_idx, h_idx, step)
         dbg("v_hist", v_hist, l_idx, h_idx, step)
