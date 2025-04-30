@@ -151,37 +151,28 @@ class GCBHead(torch.nn.Module):
         p_v = v_head @ Z_r                   # (B , r_v)
         dbg("p_v", p_v, l_idx, h_idx, step)
 
-        # --------------- Cache write ------------------------------
-        # Store the full core vector instead of trying to factorize it
-        cache.P[step, h_idx] = p_k.to(torch.float16)
-        cache.V[step, h_idx] = p_v.to(torch.float16)
-        
-        # Log S[h] before update
-        dbg("S[h] before", cache.S[h_idx], l_idx, h_idx, step)
-
-        # --- Blanket Update ---
+        # --- Blanket Calculation (not written to cache yet) ---
         # Calculate raw phi_k based on key's residual
         res_k = core_residual(k_rot, P_r)
         dbg("res_k", res_k, l_idx, h_idx, step) 
         phi_k_raw = self.powmap(res_k, l_idx, h_idx, step)  # Shape: (B, d_k)
         dbg("phi_k_raw", phi_k_raw, l_idx, h_idx, step)
 
-        # CHANGED: Accumulate raw phi vectors instead of normalized ones
+        # CHANGED: Just calculate raw phi vectors, don't write to cache yet
         dbg("phi_k_raw", phi_k_raw, l_idx, h_idx, step)
         _stats("phi_k_raw", step, step, phi_k_raw) # Log raw version
 
-        # Accumulate the raw vectors (sum over batch dim B if B>1)
-        cache.S[h_idx] += phi_k_raw.sum(0).float()
-        dbg("S[h] after", cache.S[h_idx], l_idx, h_idx, step)
-        _stats("S[h]", step, step, cache.S[h_idx]) # Log the state S
+        # Log S[h] state (before any update)
+        dbg("S[h] current", cache.S[h_idx], l_idx, h_idx, step)
+        _stats("S[h]", step, step, cache.S[h_idx]) # Log the current state S
 
         # During the first token there is nothing to attend to.
         if step == 0:
             return None, None
 
-        # --------------- Read history ----------------------------
-        p_hist = cache.P[:step + 1, h_idx].to(dtype)          # (S, r_k) - direct retrieval
-        v_hist = cache.V[:step + 1, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
+        # --------------- Read history (only previous tokens) ----------------------------
+        p_hist = cache.P[:step, h_idx].to(dtype)          # (S, r_k) - strictly < step
+        v_hist = cache.V[:step, h_idx].to(dtype) @ Z_r.T   # (S, d_v)
         
         dbg("p_hist (read)", p_hist, l_idx, h_idx, step)
         dbg("v_hist", v_hist, l_idx, h_idx, step)
@@ -274,7 +265,15 @@ class GCBHead(torch.nn.Module):
             
         # broadcast tail_log over sequence length and add to core_log
         # both should now be in the same dtype (original dtype of inputs)
-        # ⬆ change to…
+        
+        # ---------------- Write current token to cache NOW --------------------------
+        cache.P[step, h_idx] = p_k.to(torch.float16)
+        cache.V[step, h_idx] = p_v.to(torch.float16)
+        cache.S[h_idx] += phi_k_raw.sum(0).float()
+        
+        # Log updated S[h] after write
+        dbg("S[h] after", cache.S[h_idx], l_idx, h_idx, step)
+        
         out = core_log + tail_log.unsqueeze(-1), v_hist
         self.__dict__["_dbg_last_out"] = out          # stash for hooks
 
