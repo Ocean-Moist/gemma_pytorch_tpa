@@ -98,9 +98,10 @@ def orthogonal_procrustes_gauge(Wq: torch.Tensor, Wk: torch.Tensor) -> tuple:
         Wq: Query weight matrix (d_in, d_k) in FP32 on the target device
         Wk: Key weight matrix (d_in, d_k) in FP32 on the target device
         
-    Returns:
-        A: Orthogonal gauge matrix
-        A: A second copy of A (for A_invT slot - should be A.T because A is orthogonal and A_invT = A.T)
+        Returns:
+                A: Orthogonal gauge matrix
+                A: Second copy (used for A_invT).  For an orthogonal A we have
+                   A⁻ᵀ = A, so no transpose is needed.
         beta: Energy ratio captured by the first R_K singular values
         s: Singular values of P_r
         Vh: Right singular vectors of P_r
@@ -268,7 +269,7 @@ def convert(orig_ckpt: Path, out_stem: Path, auto_beta=False, verbose=False, glo
             # --- Store results (move back to CPU, convert to half) ---
             A_half = A_dev.cpu().half()  # Single allocation
             meta.add_head(l, h,
-                          A_half, A_half.T,  # For orthogonal matrix, A_invT = A.T
+                          A_half, A_half, # A_invT = A  because  A⁻ᵀ = A
                           P_r_dev.cpu().half(), 
                           P_a_dev.cpu().half() if P_a_dev is not None else None,
                           P_b_dev.cpu().half() if P_b_dev is not None else None,
