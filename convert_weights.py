@@ -66,25 +66,9 @@ def _load_state_dict(path: Path) -> Dict[str, torch.Tensor]:
     if path.is_file():
         print(f"- reading single checkpoint file  {path}")
         return torch.load(path, mmap=True, weights_only=True)["model_state_dict"]
-    if not path.is_dir():
+    else:
         raise FileNotFoundError(path)
 
-    index_file = path / "pytorch_model.bin.index.json"
-    if not index_file.exists():
-        raise FileNotFoundError(
-            f"could not find weight index json in {path}")
-
-    print(f"- reading HF sharded checkpoint from   {path}")
-    with index_file.open() as f:
-        weight_map = json.load(f)["weight_map"]
-
-    out: Dict[str, torch.Tensor] = {}
-    for shard in sorted(set(weight_map.values())):
-        shard_path = path / shard
-        print(f"    loading shard {shard_path.name}")
-        out.update(torch.load(shard_path, mmap=True, weights_only=True))
-
-    return out
 
 
 def _save_state_dict(state: Dict[str, torch.Tensor], out_path: Path):
