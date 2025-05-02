@@ -119,6 +119,8 @@ def compute_asap_factors(
     )
 
     for layer_idx in range(n_layers):
+        print(type(state))
+        print(list(state.keys()))
         state = state["model_state_dict"]
         key_prefix = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
         if key_prefix not in state:
