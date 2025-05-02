@@ -65,7 +65,7 @@ def _load_state_dict(path: Path) -> Dict[str, torch.Tensor]:
     """Loads either a single pt/bin file or a HF sharded directory."""
     if path.is_file():
         print(f"- reading single checkpoint file  {path}")
-        return torch.load(path, mmap=True, weights_only=True)
+        return torch.load(path, mmap=True, weights_only=True)["model_state_dict"]
     if not path.is_dir():
         raise FileNotFoundError(path)
 
@@ -83,7 +83,7 @@ def _load_state_dict(path: Path) -> Dict[str, torch.Tensor]:
         shard_path = path / shard
         print(f"    loading shard {shard_path.name}")
         out.update(torch.load(shard_path, mmap=True, weights_only=True))
-    out = out["model_state_dict"]
+
     return out
 
 
