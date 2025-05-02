@@ -119,7 +119,7 @@ def compute_asap_factors(
     )
 
     for layer_idx in range(n_layers):
-        print(state.keys())
+        state = state["model.state_dict"]
         key_prefix = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
         if key_prefix not in state:
             raise KeyError(f"expected key '{key_prefix}' in state_dict")
