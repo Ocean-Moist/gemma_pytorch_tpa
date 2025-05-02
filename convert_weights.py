@@ -83,6 +83,7 @@ def _load_state_dict(path: Path) -> Dict[str, torch.Tensor]:
         shard_path = path / shard
         print(f"    loading shard {shard_path.name}")
         out.update(torch.load(shard_path, mmap=True, weights_only=True))
+    out = out["model_state_dict"]
     return out
 
 
