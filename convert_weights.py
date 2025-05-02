@@ -31,11 +31,10 @@ CLI
 ---------------------------------------------------------------------------
 
 $ python convert_weights.py \
-      --ckpt_in   /path/to/gemma_1b_original \
-      --ckpt_out  /path/to/gemma_1b_asap.pt \
+      --ckpt_in   model.ckpt \
+      --ckpt_out  gemma_1b_asap.pt \
       --variant   1b \
-      --rank      8 \
-      --dtype     float16        # (optional cast for the stored factors)
+      --rank      256
 
   * `--ckpt_in` may be
         • a single *.pt / *.bin* file   **or**
@@ -120,6 +119,7 @@ def compute_asap_factors(
     )
 
     for layer_idx in range(n_layers):
+        print(state.keys())
         key_prefix = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
         if key_prefix not in state:
             raise KeyError(f"expected key '{key_prefix}' in state_dict")
