@@ -205,10 +205,7 @@ class GCBHead(torch.nn.Module):
         p_hist_f32 = p_hist.float()
         
         # --- core logits ----------------------------------------------------
-        if self.r_k < self.d_k:                       # low-rank case
-            core_log_f32 = (p_q_f32 @ p_hist_f32.T) / math.sqrt(self.r_k)
-        else:                                         # full-rank: no extra scale
-            core_log_f32 =  p_q_f32 @ p_hist_f32.T
+        core_log_f32 = (p_q @ p_k.T) / math.sqrt(self.d_k)
 
         # Safety check and clamp if needed (in debug mode)
         if DEBUG:
