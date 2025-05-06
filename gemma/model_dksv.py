@@ -360,7 +360,7 @@ class GemmaForCausalLMDKSVD(nn.Module):
         The conversion script saves only the DK‑SVD‑specific keys (``q_proj``/``k_proj``/``v_proj``/``o_proj``)
         plus all untouched parameters – so missing keys (e.g. original ``qkv_proj``) are ignored.
         """
-        state = torch.load(ckpt_path, map_location="cpu", weight_only=False)
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         if "model_state_dict" in state:  # produced by convert_weights.py
             state = state["model_state_dict"]
         self.load_state_dict(state, strict=False)
