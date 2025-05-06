@@ -1,186 +1,279 @@
-# Copyright 2024 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2025
+"""Runner for DK‑SVD–compressed Gemma 1b checkpoints.
 
-"""Runs inference with a Gemma model, potentially with DK-SVD compression."""
+This script mirrors *scripts/run.py* but targets DK‑SVD‑compressed
+checkpoints produced by *scripts/convert_weights.py*.  It:
+
+1.  Loads the compressed checkpoint (which already contains an updated
+    `GemmaConfig` with `use_dksvd=True` and `dksvd_rank` set).
+2.  Instantiates `gemma.model_dksvd.GemmaForCausalLMDKSVD` and loads the
+    weights.
+3.  Generates text for a prompt using autoregressive decoding (top‑p/
+    top‑k, temperature) — a minimal, single‑batch inference path.
+
+This version purposefully supports **Gemma‑1b** (single GQA group) and
+GLOBAL attention only — exactly the subset handled by
+*gemma/model_dksvd.py*.
+"""
+
+from __future__ import annotations
 
 import contextlib
-import random
-import sys
+import json
 import os
+import random
+from typing import Any, Sequence, Union
 
 import numpy as np
 import torch
 from absl import app, flags
-import gemma.model_dksv as gemma_model
-
-# Ensure the gemma module can be found if script is run from a different directory
-# Assuming standard project structure where 'scripts' is a sibling of 'gemma'
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-
 
 from gemma import config as gemma_config
-# This script will use the DK-SVD enabled model definition
+from gemma import model_dksvd as gemma_model_dksvd
 
-
-# Define flags
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('ckpt', None, 'Path to the checkpoint file (can be original or DK-SVD converted).', required=True)
-flags.DEFINE_string('variant', '1b', 'Base model variant (e.g., 1b for Gemma 1.1-1b).')
-flags.DEFINE_string('device', 'cpu', 'Device to run the model on (cpu or cuda).')
-flags.DEFINE_integer('output_len', 100, 'Length of the output sequence.')
-flags.DEFINE_integer('seed', 12345, 'Random seed.')
-flags.DEFINE_boolean('quant', False,
-                     'Whether the loaded checkpoint expects quantization for some layers. '
-                     'If using DK-SVD, this flag pertains to non-DK-SVD modified parts or if DK-SVD parts were re-quantized.')
-flags.DEFINE_string('prompt', 'The best thing about DK-SVD is', 'Input prompt for the model.')
-flags.DEFINE_float('temperature', 1.0, 'Temperature for sampling. Set to 0 for greedy decoding.')
-flags.DEFINE_float('top_p', 0.95, 'Top-p for nucleus sampling.')
-flags.DEFINE_integer('top_k', 64, 'Top-k for sampling.')
+# -----------------------------------------------------------------------------
+#  CLI flags
+# -----------------------------------------------------------------------------
+flags.DEFINE_string("ckpt", None, "Path to the DK‑SVD checkpoint (\n"
+                                  "produced by scripts/convert_weights.py).", required=True)
+flags.DEFINE_string("variant", "1b", "Model variant. Currently only '1b' is"
+                                     " supported.")
+flags.DEFINE_string("device", "cpu", "Device to run on: 'cpu' or 'cuda'.")
+flags.DEFINE_integer("output_len", 50, "Number of tokens to generate.")
+flags.DEFINE_integer("seed", 42, "Random seed.")
+flags.DEFINE_float("temperature", 1.0, "Sampling temperature. Use 0 or None"
+                                       " for greedy decoding.")
+flags.DEFINE_float("top_p", 0.95, "Nucleus sampling (top‑p) parameter.")
+flags.DEFINE_integer("top_k", 64, "Top‑k sampling parameter.")
+flags.DEFINE_string("prompt", "Tell me about DK‑SVD compression.",
+                    "Prompt to feed into the model.")
+
+_VALID_DEVICES = {"cpu", "cuda"}
 
 
-# DK-SVD specific flags
-flags.DEFINE_boolean('use_dksvd', False, 'Whether to load the model in DK-SVD mode. '
-                                         'If True, --dksvd_rank must be specified. '
-                                         'The checkpoint should be a DK-SVD converted one.')
-flags.DEFINE_integer('dksvd_rank', None, 'Target rank r_g for DK-SVD QK compression. Required if --use_dksvd is True.')
-
-
-# Define valid text only model variants
-# Attempt to get from gemma_config, add '1b' specifically for the user's case if not already present.
-_VALID_MODEL_VARIANTS = list(getattr(gemma_config, 'MODEL_CONFIGS', {}).keys())
-if '1b' not in _VALID_MODEL_VARIANTS:
-    _VALID_MODEL_VARPTS_CUSTOM = [
-        config_name for config_name in dir(gemma_config) if config_name.startswith('get_config_for_')
-    ]
-    if any('1b' in name for name in _VALID_MODEL_VARPTS_CUSTOM):
-        _VALID_MODEL_VARIANTS.append('1b')
-    elif not _VALID_MODEL_VARIANTS: # If MODEL_CONFIGS was empty and no custom found
-        _VALID_MODEL_VARIANTS = ['1b', '2b', '7b', '9b', '27b'] # Fallback list
-
-
-# Define valid devices
-_VALID_DEVICES = ['cpu', 'cuda']
-
-# Validator function for the 'variant' flag
-def validate_variant(variant):
-    if variant not in _VALID_MODEL_VARIANTS:
-        # Check if a specific config function exists for the variant (e.g., get_config_for_1b)
-        if not hasattr(gemma_config, f'get_config_for_{variant}'):
-            raise flags.FlagsError(f'Invalid variant: {variant}. Valid variants are: {_VALID_MODEL_VARIANTS} or must have a corresponding get_config_for_{variant} function in gemma.config.')
-    return True
-
-# Validator function for the 'device' flag
-def validate_device(device):
-    if device not in _VALID_DEVICES:
-        raise flags.FlagsError(f'Invalid device: {device}. Valid devices are: {_VALID_DEVICES}')
-    return True
-
-flags.register_validator('variant', validate_variant, message='Invalid model variant.')
-flags.register_validator('device', validate_device, message='Invalid device.')
-
+# -----------------------------------------------------------------------------
+#  Utility helpers
+# -----------------------------------------------------------------------------
 @contextlib.contextmanager
 def _set_default_tensor_type(dtype: torch.dtype):
-    """Sets the default torch dtype to the given dtype."""
+    """Temporarily sets the default tensor dtype."""
+    orig = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(torch.float) # Reset to default float
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(orig)
 
-def main(_argv):
-    if FLAGS.use_dksvd and FLAGS.dksvd_rank is None:
-        raise ValueError("--dksvd_rank must be specified when --use_dksvd is True.")
-    if FLAGS.use_dksvd and FLAGS.dksvd_rank <= 0:
-        raise ValueError("--dksvd_rank must be a positive integer.")
 
-    # Construct the model config.
-    # This assumes gemma_config.get_model_config can handle FLAGS.variant
-    # (e.g. by looking up '1b' for get_config_for_1b)
-    model_config = gemma_config.get_model_config(FLAGS.variant)
+def _load_config_from_ckpt(ckpt_path: str, fallback_variant: str) -> gemma_config.GemmaConfig:
+    """Loads a GemmaConfig from the checkpoint or derives it from the variant."""
+    chk = torch.load(ckpt_path, map_location="cpu")
+    if "config" in chk:
+        cfg = chk["config"]
+        # If it was saved as a dict, rebuild GemmaConfig.
+        if isinstance(cfg, dict):
+            cfg = gemma_config.GemmaConfig(**cfg)
+        # Ensure DK‑SVD flags are present.
+        cfg.use_dksvd = getattr(cfg, "use_dksvd", True)
+        if not cfg.use_dksvd:
+            raise ValueError("Checkpoint does not indicate DK‑SVD usage.")
+        if getattr(cfg, "dksvd_rank", None) is None:
+            raise ValueError("Checkpoint config missing dksvd_rank.")
+        return cfg
+    # Fallback: use builtin variant config then update flags (rank has to be
+    # guessed from metadata file).
+    cfg = gemma_config.get_model_config(fallback_variant)
+    metadata = chk.get("dksvd_metadata", {})
+    rank = metadata.get("dksvd_rank")
+    if rank is None:
+        raise ValueError("Could not infer dksvd_rank from checkpoint; please"
+                         " regenerate checkpoint with proper metadata.")
+    cfg.use_dksvd = True
+    cfg.dksvd_rank = rank
+    # Ensure dtype matches the checkpoint if provided.
+    if isinstance(metadata.get("dtype"), str):
+        cfg.dtype = metadata["dtype"]
+    return cfg
 
-    # Set quantization status from flags. This will be used by the model's Linear/Embedding layers.
-    model_config.quant = FLAGS.quant
 
-    # Apply DK-SVD specific configurations to the config object.
-    # The model_dksvd.py's GemmaForCausalLM and GemmaAttention will use these.
-    if FLAGS.use_dksvd:
-        setattr(model_config, 'use_dksvd', True)
-        setattr(model_config, 'dksvd_rank', FLAGS.dksvd_rank)
-        print(f"Running in DK-SVD mode with rank: {FLAGS.dksvd_rank}")
-    else:
-        setattr(model_config, 'use_dksvd', False)
-        setattr(model_config, 'dksvd_rank', None)
-        print("Running in standard GQA mode (or as per original checkpoint).")
+# -----------------------------------------------------------------------------
+#  Main generation routine (single‑batch)
+# -----------------------------------------------------------------------------
 
-    # Seed random number generators for reproducibility.
+def _generate(
+        model: gemma_model_dksvd.GemmaForCausalLMDKSVD,
+        prompt: Union[str, Sequence[str]],
+        device: torch.device,
+        output_len: int,
+        temperature: Union[float, None],
+        top_p: float,
+        top_k: int,
+) -> Union[str, Sequence[str]]:
+    """Autoregressively generates *output_len* new tokens."""
+    is_single = isinstance(prompt, str)
+    prompts = [prompt] if is_single else list(prompt)
+
+    # -------------------- tokenization --------------------
+    prompt_tokens = [model.tokenizer.encode(p) for p in prompts]
+    min_prompt_len = min(len(p) for p in prompt_tokens)
+    max_prompt_len = max(len(p) for p in prompt_tokens)
+    max_seq_len = max_prompt_len + output_len
+
+    cfg = model.config  # GemmaConfig
+    if max_seq_len > cfg.max_position_embeddings:
+        raise ValueError(
+            f"Requested sequence length {max_seq_len} exceeds model limit "
+            f"{cfg.max_position_embeddings}.")
+
+    batch_size = len(prompts)
+
+    # -------------------- build KV caches --------------------
+    rank_r = cfg.dksvd_rank
+    head_dim = cfg.head_dim  # value projection dim remains 256 for 1b.
+
+    kv_caches = []
+    dtype = cfg.get_dtype()
+    for _ in range(cfg.num_hidden_layers):
+        k_cache = torch.zeros(
+            (batch_size, max_seq_len, 1, rank_r), dtype=dtype, device=device
+        )
+        v_cache = torch.zeros(
+            (batch_size, max_seq_len, 1, head_dim), dtype=dtype, device=device
+        )
+        kv_caches.append((k_cache, v_cache))
+
+    # -------------------- prepare tensors --------------------
+    token_ids_tensor = torch.full(
+        (batch_size, max_seq_len), model.tokenizer.pad_id, dtype=torch.long
+    )
+    input_token_ids_tensor = torch.full(
+        (batch_size, min_prompt_len), model.tokenizer.pad_id, dtype=torch.long
+    )
+    for i, tok in enumerate(prompt_tokens):
+        token_ids_tensor[i, : len(tok)] = torch.tensor(tok)
+        input_token_ids_tensor[i, : min_prompt_len] = torch.tensor(tok[:min_prompt_len])
+
+    token_ids_tensor = token_ids_tensor.to(device)
+    input_token_ids_tensor = input_token_ids_tensor.to(device)
+
+    # Causal mask (float32 large negative for masked positions)
+    mask_tensor = torch.full(
+        (1, 1, max_seq_len, max_seq_len), -2.3819763e38, dtype=torch.float32, device=device
+    )
+    mask_tensor = torch.triu(mask_tensor, diagonal=1)
+
+    # DK‑SVD implementation currently ignores local sliding masks, so we set to None.
+    local_mask_tensor = None
+
+    input_positions_tensor = torch.arange(min_prompt_len, dtype=torch.long, device=device)
+    curr_mask_tensor = mask_tensor.index_select(2, input_positions_tensor)
+
+    output_positions_tensor = torch.tensor([min_prompt_len - 1], dtype=torch.long, device=device)
+
+    temperatures_tensor = None if temperature in (None, 0) else torch.full(
+        (batch_size,), float(temperature), dtype=torch.float32, device=device
+    )
+    top_ps_tensor = torch.full((batch_size,), float(top_p), dtype=torch.float32, device=device)
+    top_ks_tensor = torch.full((batch_size,), int(top_k), dtype=torch.long, device=device)
+
+    output_index = torch.tensor(min_prompt_len, dtype=torch.long, device=device)
+
+    # -------------------- prefill (min_prompt_len tokens) --------------------
+    model(
+        input_token_ids=input_token_ids_tensor,
+        input_positions=input_positions_tensor,
+        kv_write_indices=input_positions_tensor,  # Ensure caches are written.
+        kv_caches=kv_caches,
+        mask=curr_mask_tensor,
+        output_positions=output_positions_tensor,  # Not used in prefill
+        temperatures=temperatures_tensor,
+        top_ps=top_ps_tensor,
+        top_ks=top_ks_tensor,
+        local_mask=local_mask_tensor,
+    )
+
+    # After prefill, continue generating one token at a time.
+    for _ in range(output_len):
+        # Use last token as input.
+        input_token_ids_step = token_ids_tensor.index_select(1, output_index - 1)
+        input_positions_step = output_index - 1  # scalar tensor
+
+        curr_mask_tensor = mask_tensor.index_select(2, input_positions_step)
+
+        next_token_ids, _ = model(
+            input_token_ids=input_token_ids_step,
+            input_positions=input_positions_step,
+            kv_write_indices=input_positions_step,
+            kv_caches=kv_caches,
+            mask=curr_mask_tensor,
+            output_positions=torch.zeros(1, dtype=torch.long, device=device),
+            temperatures=temperatures_tensor,
+            top_ps=top_ps_tensor,
+            top_ks=top_ks_tensor,
+            local_mask=local_mask_tensor,
+        )
+
+        # Write generated token into tensor.
+        token_ids_tensor.index_copy_(1, output_index, next_token_ids.unsqueeze(1))
+
+        # Advance pointer.
+        input_positions_step = output_index
+        output_index = output_index + 1
+
+    # -------------------- detokenize --------------------
+    results = []
+    for i, toks in enumerate(token_ids_tensor.tolist()):
+        # Skip the original prompt tokens.
+        generated = toks[len(prompt_tokens[i]) : len(prompt_tokens[i]) + output_len]
+        if model.tokenizer.eos_id in generated:
+            eos_idx = generated.index(model.tokenizer.eos_id)
+            generated = generated[:eos_idx]
+        results.append(model.tokenizer.decode(generated))
+
+    return results[0] if is_single else results
+
+
+# -----------------------------------------------------------------------------
+#  Main entrypoint
+# -----------------------------------------------------------------------------
+
+def main(_):
+    if FLAGS.device not in _VALID_DEVICES:
+        raise ValueError(f"--device must be one of {_VALID_DEVICES}")
+
+    torch.manual_seed(FLAGS.seed)
     random.seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
-    torch.manual_seed(FLAGS.seed)
 
-    # Determine the device for computation.
-    if FLAGS.device == 'cuda' and not torch.cuda.is_available():
-        print("CUDA not available, falling back to CPU.")
-        device = torch.device('cpu')
-    else:
-        device = torch.device(FLAGS.device)
+    # -------------------- load config & model --------------------
+    cfg = _load_config_from_ckpt(FLAGS.ckpt, FLAGS.variant)
 
-    if FLAGS.device == 'cuda':
-        torch.cuda.manual_seed_all(FLAGS.seed)
+    device = torch.device(FLAGS.device)
 
-
-    # Determine the torch dtype for model operations from the model_config.
-    # model_config.get_dtype() should return the torch.dtype (e.g., torch.bfloat16).
-    torch_dtype_for_model = model_config.get_dtype()
-    print(f"Using PyTorch dtype: {torch_dtype_for_model} for model operations.")
-
-
-    with _set_default_tensor_type(torch_dtype_for_model):
-        # Instantiate the DK-SVD capable model
-        # model_dksvd.GemmaForCausalLM should be designed to read use_dksvd and dksvd_rank from model_config
-        print("Initializing model...")
-        model = gemma_model.GemmaForCausalLM(model_config)
-
-        print(f"Loading checkpoint from: {FLAGS.ckpt}")
-        # The load_weights method in model_dksvd.py should be able to handle
-        # DK-SVD specific weight names if use_dksvd is True in config.
+    with _set_default_tensor_type(cfg.get_dtype()):
+        model = gemma_model_dksvd.GemmaForCausalLMDKSVD(cfg)
         model.load_weights(FLAGS.ckpt)
+        model.to(device).eval()
 
-        model = model.to(device).eval()
-    print("Model loading and setup complete.")
-
-    # Generate the response.
-    print(f"\nGenerating response for prompt: '{FLAGS.prompt}'")
-    print(f"Output length: {FLAGS.output_len}, Temperature: {FLAGS.temperature}, Top-p: {FLAGS.top_p}, Top-k: {FLAGS.top_k}\n")
-
-    # Handle temperature for greedy decoding
-    current_temperature = FLAGS.temperature if FLAGS.temperature > 0 else None
-
-    result = model.generate(
-        prompts=FLAGS.prompt,
+    # -------------------- generate --------------------
+    output = _generate(
+        model=model,
+        prompt=FLAGS.prompt,
         device=device,
         output_len=FLAGS.output_len,
-        temperature=current_temperature,
+        temperature=None if FLAGS.temperature in (None, 0) else FLAGS.temperature,
         top_p=FLAGS.top_p,
         top_k=FLAGS.top_k,
     )
 
-    # Print the prompts and results.
-    print('======================================')
-    print(f'PROMPT: {FLAGS.prompt}')
-    print(f'RESULT: {result}')
-    print('======================================')
+    # -------------------- print --------------------
+    print("======================================")
+    print(f"PROMPT: {FLAGS.prompt}")
+    print(f"OUTPUT: {output}")
+    print("======================================")
+
 
 if __name__ == "__main__":
-    # It's good practice to parse flags explicitly for absl.
-    # FLAGS(sys.argv) is not needed if app.run is the entry point.
     app.run(main)
