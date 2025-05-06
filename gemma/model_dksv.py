@@ -164,7 +164,7 @@ class DKSVDAttention(nn.Module):
             attn_scores = attn_scores / self.attn_logit_softcapping
             attn_scores = torch.tanh(attn_scores) * self.attn_logit_softcapping
 
-        attn_probs = F.softmax(attn_scores.float(), dim=-1).type_as(attn_scores)
+        attn_probs = F.softmax(attn_scores.float(), dim=-1).type_as(q)
 
         # ------------------------------------------------------------------
         #  Attention output
