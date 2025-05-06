@@ -29,7 +29,7 @@ import torch
 from absl import app, flags
 
 from gemma import config as gemma_config
-from gemma import model_dksvd as gemma_model_dksvd
+import gemma.model_dksv as gemma_model_dksvd
 
 FLAGS = flags.FLAGS
 
