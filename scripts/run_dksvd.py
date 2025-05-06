@@ -69,7 +69,7 @@ def _set_default_tensor_type(dtype: torch.dtype):
 
 def _load_config_from_ckpt(ckpt_path: str, fallback_variant: str) -> gemma_config.GemmaConfig:
     """Loads a GemmaConfig from the checkpoint or derives it from the variant."""
-    chk = torch.load(ckpt_path, map_location="cpu")
+    chk = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "config" in chk:
         cfg = chk["config"]
         # If it was saved as a dict, rebuild GemmaConfig.
