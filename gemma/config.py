@@ -95,6 +95,8 @@ class GemmaConfig:
     vision_config: siglip_vision_config.SiglipVisionModelConfig | None = None
     # The factor by which the rope wave length is divided for global layers.
     rope_scaling_factor: int| None = None
+    use_dksvd: bool = False,   # <-- add
+    dksvd_rank: int | None = None,  # <-- add
 
     def get_dtype(self) -> Optional[torch.dtype]:
         """Gets the torch dtype from the config dtype string."""
