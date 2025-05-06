@@ -247,7 +247,7 @@ class GemmaAttention(nn.Module):
                 quant=config.quant
             )
             # V projection remains similar, outputting num_kv_heads * head_dim (original head_dim for V)
-            self.v_proj_dksvd = Linear(
+            self.v_proj = Linear(
                 self.hidden_size,
                 self.num_kv_heads * self.head_dim, # V uses original head_dim
                 quant=config.quant
@@ -646,9 +646,6 @@ class GemmaForCausalLM(nn.Module):
                 gemma_config.AttentionType.GLOBAL: 10_000,
             }
 
-            # Suffix for DK-SVD specific RoPE tables
-            rope_suffix = "_dksvd" if self.use_dksvd else ""
-
             for attn_type, base_name_stem in [
                 (gemma_config.AttentionType.LOCAL_SLIDING, 'local_freqs_cis'),
                 (gemma_config.AttentionType.GLOBAL, 'global_freqs_cis'),
@@ -656,10 +653,9 @@ class GemmaForCausalLM(nn.Module):
                 theta = rope_lengths.get(attn_type, defaults[attn_type])
                 # Register RoPE tables with appropriate dimension (rope_dim)
                 # Their names will be e.g. local_freqs_cis or local_freqs_cis_dksvd
-                self._register_freqs_cis(f"{base_name_stem}{rope_suffix}", rope_dim, max_seq_len, theta=theta)
+                self._register_freqs_cis(f"{base_name_stem}", rope_dim, max_seq_len, theta=theta)
         else: # Gemma 1 architecture (or older Gemma 2)
-            rope_suffix = "_dksvd" if self.use_dksvd else ""
-            self._register_freqs_cis(f"freqs_cis{rope_suffix}", rope_dim, max_seq_len)
+            self._register_freqs_cis(f"freqs_cis", rope_dim, max_seq_len)
 
 
     def _register_freqs_cis(
