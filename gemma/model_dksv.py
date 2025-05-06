@@ -75,10 +75,10 @@ class DKSVDAttention(nn.Module):
         #  Projections
         # ------------------------------------------------------------------
         quant = getattr(config, "quant", False)
-        self.q_proj = Linear(self.hidden_size, self.rank, quant)
-        self.k_proj = Linear(self.hidden_size, self.rank, quant)
+        self.q_proj_dksvd = Linear(self.hidden_size, self.rank, quant)
+        self.k_proj_dksvd = Linear(self.hidden_size, self.rank, quant)
         self.v_proj = Linear(self.hidden_size, self.v_size, quant)
-        self.o_proj = Linear(self.v_size, self.hidden_size, quant)
+        self.o_proj_dksvd = Linear(self.v_size, self.hidden_size, quant)
 
         # Optional Q/K RMSNorm (same as original Gemma logic)
         self.query_norm = (
@@ -113,8 +113,8 @@ class DKSVDAttention(nn.Module):
         # ------------------------------------------------------------------
         #  Projections
         # ------------------------------------------------------------------
-        q = self.q_proj(hidden_states)  # (B, S, r)
-        k = self.k_proj(hidden_states)  # (B, S, r)
+        q = self.q_proj_dksvd(hidden_states)  # (B, S, r)
+        k = self.k_proj_dksvd(hidden_states)  # (B, S, r)
         v = self.v_proj(hidden_states)  # (B, S, head_dim)
 
         # Optional Q/K norm
@@ -176,7 +176,7 @@ class DKSVDAttention(nn.Module):
         context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.head_dim)
 
         # Output projection to hidden_size
-        output = self.o_proj(context)
+        output = self.o_proj_dksvd(context)
         return output
 
 
