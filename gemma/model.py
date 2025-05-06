@@ -56,7 +56,8 @@ class Sampler(nn.Module):
             logits = logits * self.config.final_logit_softcapping
 
         if temperatures is None:
-            return torch.argmax(logits, dim=-1).squeeze(dim=-1), logits
+            # keep a (batch_size,) tensor even for batch_size==1
+            return torch.argmax(logits, dim=-1), logits
 
         # Apply temperature scaling.
         logits.div_(temperatures.unsqueeze(dim=1))
