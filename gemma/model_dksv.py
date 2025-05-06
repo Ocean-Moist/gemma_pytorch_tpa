@@ -870,7 +870,7 @@ class GemmaForCausalLM(nn.Module):
         # model structure itself is correct based on the config.
 
         if os.path.isfile(model_path):
-            state_dict_container = torch.load(model_path, mmap=True, weights_only=True)
+            state_dict_container = torch.load(model_path, mmap=True, weights_only=False)
             # Check if checkpoint is new format with 'config'
             if 'model_state_dict' in state_dict_container and 'config' in state_dict_container:
                 loaded_config_dict = state_dict_container['config']
