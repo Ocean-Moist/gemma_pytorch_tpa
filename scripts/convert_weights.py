@@ -198,6 +198,16 @@ def convert_checkpoint(
         W_K_all = W_qkv_full_t[:, q_end:k_end]              # (d, n_kv*d_k)
         W_V_all = W_qkv_full_t[:, k_end:v_end]              # (d, n_kv*d_k)  (d_k == d_v)
 
+        q_norm_key = f"model.layers.{layer_idx}.self_attn.query_norm.weight"
+        k_norm_key = f"model.layers.{layer_idx}.self_attn.key_norm.weight"
+
+        scale_q_full = 1.0 + orig_state[q_norm_key].to(dtype)      # (d_k,)
+        scale_k_full = 1.0 + orig_state[k_norm_key].to(dtype)      # (d_k,)
+
+        # Broadcast over the row dimension (d_model)
+        W_Q_all   = W_Q_all   * scale_q_full.unsqueeze(0)
+        W_K_all   = W_K_all   * scale_k_full.unsqueeze(0)
+
         # ---------- Process each GQA group -----------------------------
         for g in range(n_kv_heads):
             # Shared K & V slices.
