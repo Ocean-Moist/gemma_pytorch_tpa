@@ -176,6 +176,8 @@ def convert_checkpoint(
             continue  # replaced by q_linears / k_linears / v_linears
         if ".self_attn.query_norm." in key or ".self_attn.key_norm." in key:
             continue  # dimensions change → freshly initialised later
+        if key.endswith("freqs_cis") or "freqs_cis" in key:
+            continue
         new_state[key] = tensor.clone().to(dtype=dtype)
 
     # ------------------------------------------------------------------
