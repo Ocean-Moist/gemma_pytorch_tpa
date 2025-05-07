@@ -38,6 +38,15 @@ from typing import Dict, Tuple, List
 import torch
 from gemma import config as gemma_config
 
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "fp32":    torch.float32,
+    "float16": torch.float16,
+    "fp16":    torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16":     torch.bfloat16,
+}
+
 # -----------------------------------------------------------------------------
 # ----------  E‑DK‑SVD core ----------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -65,6 +74,7 @@ def _edksvd_factorise(
 
     device = W_k_shared.device
     dtype = W_k_shared.dtype
+
 
     # ------------------------------------------------------------------
     # 1.  Interaction kernels A_i = W_q_i  W_k^T  (d × d)
@@ -128,6 +138,17 @@ def convert_checkpoint(
     model_cfg = gemma_config.get_model_config(variant)
     model_cfg.dtype = dtype
 
+    # -----------------------------------------------------------------
+    # Inside convert_checkpoint(...)
+    # -----------------------------------------------------------------
+    if isinstance(dtype, str):
+        try:
+            dtype = DTYPE_MAP[dtype.lower()]
+        except KeyError:
+            raise ValueError(
+                f"Unknown dtype '{dtype}'. Allowed values: {list(DTYPE_MAP)}"
+            )
+
     d_model      = model_cfg.hidden_size
     d_k_full     = model_cfg.head_dim                      # original Q/K/V dim
     n_heads      = model_cfg.num_attention_heads
@@ -155,7 +176,7 @@ def convert_checkpoint(
             continue  # replaced by q_linears / k_linears / v_linears
         if ".self_attn.query_norm." in key or ".self_attn.key_norm." in key:
             continue  # dimensions change → freshly initialised later
-        new_state[key] = tensor.clone().to(dtype)
+        new_state[key] = tensor.clone().to(dtype=dtype)
 
     # ------------------------------------------------------------------
     # 4.  Per‑layer re‑parameterisation --------------------------------
