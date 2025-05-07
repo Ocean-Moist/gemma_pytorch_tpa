@@ -183,6 +183,8 @@ def _load_edksvd_weights(model: torch.nn.Module, ckpt_path: str) -> None:
             unexpected.extend(u)
             del shard_state  # free RAM
             torch.cuda.empty_cache()
+    missing.remove("local_freqs_cis")
+    missing.remove("global_freqs_cis")
     if missing:
         print("⚠  Missing keys when loading checkpoint (keys exist in model but not in checkpoint):")
         for k in missing:
