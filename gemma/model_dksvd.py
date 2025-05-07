@@ -448,7 +448,7 @@ class GemmaForCausalLMDKSVD(nn.Module):
             next_token_ids, _ = self(
                 input_token_ids=input_token_ids_tensor,
                 input_positions=input_positions_tensor,
-                kv_write_indices=None,
+                kv_write_indices=input_positions_tensor,
                 kv_caches=kv_caches,
                 mask=curr_mask_tensor,
                 output_positions=output_positions_tensor,
