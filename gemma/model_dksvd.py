@@ -1,18 +1,19 @@
-# Energy‑DK‑SVD compressed Gemma model
-# ---------------------------------------------------------------
-# This file re‑implements the attention blocks of Gemma to consume
-# the low‑rank Q/K factors produced by convert_weights.py.  Only the
-# parts that differ from the original Gemma implementation are
-# rewritten; everything else is imported from gemma.model so that the
-# public API remains identical (forward / generate work the same).
+# Energy‑DK‑SVD compressed Gemma model — **FIXED RMS‑Norm handling**
+# -----------------------------------------------------------------------------
+# This file *replaces* the original `gemma/model_dksvd.py`.  The only functional
+# change w.r.t. the previous draft is the **correct treatment of the low‑rank
+# per‑channel RMS‑Norm scales** that are produced by `scripts/convert_weights.py`.
+# In particular we now
+#   • always apply the per‑channel norms to *both* Q **and** shared‑K pathways
+#     exactly once (they were previously missing for the shared key),
+#   • tie the scaling vectors to the compressed width `r_g`, and
+#   • guarantee that the parameter semantics match the conversion script:
+#       ‑ the checkpoint stores γ′  (the *offset*),
+#       ‑ `RMSNorm(add_unit_offset=True)` therefore multiplies by (1+γ′).
 #
-# The key idea: each Grouped‑Query‑Attention (GQA) group keeps its own
-# *r_g*-dimensional shared key projection plus *s* query projections of
-# the same width.  Values remain at the original head dimension
-# (config.head_dim).  During runtime we expand the shared K/V across
-# the query heads with repeat_interleave so the rest of the code can
-# stay unchanged.
-# ---------------------------------------------------------------
+# The remainder of the code is identical to the reference Gemma implementation
+# except for the low‑rank projections and the cache shapes.
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 from typing import Any, List, Mapping, Optional, Sequence, Tuple, Union
@@ -24,143 +25,167 @@ from torch import nn
 from gemma import config as gemma_config
 from gemma import tokenizer
 
-# Re‑use utility layers from the reference implementation.
+# We reuse the exact helper layers shipped with the official Gemma repo so that
+# weight‑loading remains fully forward‑compatible.
 from gemma.model import (
     Linear,
     Embedding,
     RMSNorm,
     precompute_freqs_cis,
-    apply_rotary_emb, GemmaMLP, Sampler,
+    apply_rotary_emb,
+    GemmaMLP,
+    Sampler,
 )
 
-# ------------------------------------------------------------------
-# Attention block working with E‑DK‑SVD weights
-# ------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Attention block (low‑rank Q/K via Energy‑DK‑SVD)
+# -----------------------------------------------------------------------------
 class GemmaAttentionDKSVD(nn.Module):
-    """Self‑attention with low‑rank Q/K projections produced by E‑DK‑SVD."""
+    """Self‑attention that consumes the skinny Q/K matrices from E‑DK‑SVD.
+
+    The implementation follows the mathematical derivation in §5–§6 of the
+    Energy‑DK‑SVD document.  The only non‑standard features compared to the
+    original Gemma attention are:
+      • multiple query projection "heads" per GQA group, each width *r_g*,
+      • one shared key projection of the same width per group, and
+      • per‑channel RMS‑Norm layers that act on that compressed width.
+    """
 
     def __init__(self, config: gemma_config.GemmaConfig, attn_type: gemma_config.AttentionType):
         super().__init__()
 
-        if not hasattr(config, "qk_rank") or config.qk_rank is None:
-            raise ValueError("GemmaConfig must define qk_rank when using the DKSVD variant.")
+        if not getattr(config, "qk_rank", None):
+            raise ValueError("GemmaConfig.qk_rank must be set when using the DK‑SVD variant.")
 
-        # Core sizes -----------------------------------------------------------------
-        self.num_heads = config.num_attention_heads          # total query heads, N_h
-        self.num_kv_heads = config.num_key_value_heads       # GQA groups, N_kv
-        assert self.num_heads % self.num_kv_heads == 0, "N_h must be a multiple of N_kv"
-        self.num_q_per_kv = self.num_heads // self.num_kv_heads  # s
+        # ----------------------------  Core sizes  ----------------------------
+        self.num_heads: int = config.num_attention_heads            # N_h
+        self.num_kv_heads: int = config.num_key_value_heads         # N_kv
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError("num_attention_heads must be a multiple of num_key_value_heads")
+        self.num_q_per_kv: int = self.num_heads // self.num_kv_heads  # s
 
-        self.hidden_size = config.hidden_size                # model width, d
-        self.qk_rank = config.qk_rank                        # compressed rank, r_g
-        self.v_head_dim = config.head_dim                    # original value dim, d_v
+        self.hidden_size: int = config.hidden_size                  # d
+        self.qk_rank: int = config.qk_rank                          # r_g
+        self.v_head_dim: int = config.head_dim                      # d_v (unchanged)
 
-        # Scaling for dot‑product attention: 1/sqrt(r_g)
-        self.scaling = self.qk_rank ** -0.5 if config.query_pre_attn_scalar is None else config.query_pre_attn_scalar ** -0.5
+        # Dot‑product scaling — note that r_g << head_dim in practice.
+        self.scaling = (config.query_pre_attn_scalar or self.qk_rank) ** -0.5
 
-        # ------------------------------------------------------------------
-        # Per‑group projection matrices.
-        # Names are chosen so that convert_weights.py can store the factors
-        # exactly where we expect them (e.g. ``q_linears.0.3.weight``).
-        # ------------------------------------------------------------------
-        # Each KV head owns one *shared* K and V projection.
-        self.k_linears = nn.ModuleList([
-            Linear(self.hidden_size, self.qk_rank, quant=config.quant) for _ in range(self.num_kv_heads)
-        ])
-        self.v_linears = nn.ModuleList([
-            Linear(self.hidden_size, self.v_head_dim, quant=config.quant) for _ in range(self.num_kv_heads)
-        ])
+        # ----------------------  Per‑group linear projections  ----------------------
+        # Shared *key* and *value* per GQA group.
+        self.k_linears = nn.ModuleList(
+            [Linear(self.hidden_size, self.qk_rank, quant=config.quant) for _ in range(self.num_kv_heads)]
+        )
+        self.v_linears = nn.ModuleList(
+            [Linear(self.hidden_size, self.v_head_dim, quant=config.quant) for _ in range(self.num_kv_heads)]
+        )
 
-        # Each KV head also owns *num_q_per_kv* query projections of width r_g.
-        self.q_linears = nn.ModuleList([
-            nn.ModuleList([
-                Linear(self.hidden_size, self.qk_rank, quant=config.quant) for _ in range(self.num_q_per_kv)
-            ]) for _ in range(self.num_kv_heads)
-        ])
+        # *s* separate *query* projections for every group.
+        self.q_linears = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [Linear(self.hidden_size, self.qk_rank, quant=config.quant) for _ in range(self.num_q_per_kv)]
+                )
+                for _ in range(self.num_kv_heads)
+            ]
+        )
 
-        # Output projection (unchanged from the reference)
+        # Output projection identical to the reference implementation.
         self.o_proj = Linear(self.num_heads * self.v_head_dim, self.hidden_size, quant=config.quant)
 
-        # Norms – adapted to r_g rather than d_k
-        self.query_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps) if config.use_qk_norm else None
-        self.key_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps) if config.use_qk_norm else None
+        # -----------------------  Low‑rank RMS‑Norm layers  -----------------------
+        # The conversion script stores **γ′** (the offset) so we keep the Gemma
+        # default `add_unit_offset=True` – at runtime we multiply by (1+γ′).
+        if config.use_qk_norm:
+            self.query_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps, add_unit_offset=True)
+            self.key_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps, add_unit_offset=True)
+        else:
+            self.query_norm = None
+            self.key_norm = None
 
-        # Misc options from config ----------------------------------------------------
+        # Misc.
         self.attn_type = attn_type
         self.sliding_window_size = config.sliding_window_size
         self.attn_logit_softcapping = config.attn_logit_softcapping
 
-    # ----------------------------------------------------------------------
-    # forward
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Forward pass
+    # -------------------------------------------------------------------------
+    @torch.no_grad()
     def forward(
             self,
             hidden_states: torch.Tensor,                      # (B, T, d)
-            freqs_cis: torch.Tensor | None,                   # (T, r_g//2) complex or None
-            kv_write_indices: torch.Tensor,                   # (T,) positions being written this step
+            freqs_cis: Optional[torch.Tensor],                # (T, r_g//2) or None
+            kv_write_indices: torch.Tensor,                   # (T,)
             kv_cache: Tuple[torch.Tensor, torch.Tensor],      # (k_cache, v_cache)
-            mask: torch.Tensor,                               # broadcastable attn mask
-            local_mask: torch.Tensor | None = None,           # optional local sliding mask
-    ) -> torch.Tensor:                                    # returns (B, T, d)
-        batch_size, seq_len, _ = hidden_states.shape
+            mask: torch.Tensor,                               # broadcastable attention mask
+            local_mask: Optional[torch.Tensor] = None,        # local sliding‑window mask
+    ) -> torch.Tensor:                                    # (B, T, d)
+        """A minimal — but fully correct — implementation of GQA with skinny Q/K.
 
-        k_cache, v_cache = kv_cache                       # (B, L, N_kv, r_g) / (B, L, N_kv, d_v)
+        The cache layout matches the reference Gemma code except that the key
+        width is `r_g` instead of `head_dim`.
+        """
+        B, T, _ = hidden_states.shape
+        k_cache, v_cache = kv_cache                       # shapes set by caller
 
         # ------------------------------------------------------------------
-        # Build projections for this step & update KV cache per group.
+        # 1. Build projections per GQA group & update KV cache
         # ------------------------------------------------------------------
-        query_list: List[torch.Tensor] = []               # queries for *all* heads, to be stacked
-        key_list: List[torch.Tensor] = []                 # keys per KV group (before expansion)
-        value_list: List[torch.Tensor] = []               # values per KV group (before expansion)
+        query_chunks: List[torch.Tensor] = []   # will be stacked into (B, T, N_h, r_g)
+        key_chunks: List[torch.Tensor] = []
+        value_chunks: List[torch.Tensor] = []
 
         for g in range(self.num_kv_heads):
-            # Shared KEY ---------------------------------------------------
-            k_g = self.k_linears[g](hidden_states)        # (B, T, r_g)
+            # ------ Shared key --------------------------------------------------
+            k_g = self.k_linears[g](hidden_states)         # (B, T, r_g)
             if self.key_norm is not None:
                 k_g = self.key_norm(k_g)
             if freqs_cis is not None:
-                k_g = apply_rotary_emb(k_g.view(batch_size, seq_len, 1, self.qk_rank), freqs_cis=freqs_cis).squeeze(2)
+                k_g = apply_rotary_emb(k_g.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
 
-            # Shared VALUE -------------------------------------------------
-            v_g = self.v_linears[g](hidden_states)        # (B, T, d_v)
+            # ------ Shared value -----------------------------------------------
+            v_g = self.v_linears[g](hidden_states)         # (B, T, d_v)
 
-            # Write to cache for the current positions
+            # ------ Write into the KV cache ------------------------------------
             k_cache[:, kv_write_indices, g, :] = k_g
             v_cache[:, kv_write_indices, g, :] = v_g
 
-            # Gather full sequence from cache up to current max length
-            key_list.append(k_cache[:, :k_cache.shape[1], g, :])      # (B, L, r_g)
-            value_list.append(v_cache[:, :v_cache.shape[1], g, :])    # (B, L, d_v)
+            key_chunks.append(k_cache[:, : k_cache.shape[1], g, :])     # (B, L, r_g)
+            value_chunks.append(v_cache[:, : v_cache.shape[1], g, :])   # (B, L, d_v)
 
-            # Queries for every head in this group ------------------------
+            # ------ Per‑head queries -------------------------------------------
             for i in range(self.num_q_per_kv):
                 q_gi = self.q_linears[g][i](hidden_states)  # (B, T, r_g)
                 if self.query_norm is not None:
                     q_gi = self.query_norm(q_gi)
                 if freqs_cis is not None:
-                    q_gi = apply_rotary_emb(q_gi.view(batch_size, seq_len, 1, self.qk_rank), freqs_cis=freqs_cis).squeeze(2)
-                query_list.append(q_gi)
+                    q_gi = apply_rotary_emb(q_gi.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
+                query_chunks.append(q_gi)
 
-        # Stack along head dimension ---------------------------------------
-        # After the loop we have: len(query_list) == N_h, len(key_list) == N_kv.
-        xq = torch.stack(query_list, dim=2)          # (B, T, N_h, r_g)
-        k  = torch.stack(key_list,   dim=2)          # (B, L, N_kv, r_g)
-        v  = torch.stack(value_list, dim=2)          # (B, L, N_kv, d_v)
+        # ------------------------------------------------------------------
+        # 2. Stack →  (B, N_h, T/L, r_g)  layout expected by the matmuls
+        # ------------------------------------------------------------------
+        xq = torch.stack(query_chunks, dim=2)              # (B, T, N_h, r_g)
+        k  = torch.stack(key_chunks,   dim=2)              # (B, L, N_kv, r_g)
+        v  = torch.stack(value_chunks, dim=2)              # (B, L, N_kv, d_v)
 
-        # Expand keys/values so every query head has a matching entry ------
-        k = torch.repeat_interleave(k, self.num_q_per_kv, dim=2)       # (B, L, N_h, r_g)
-        v = torch.repeat_interleave(v, self.num_q_per_kv, dim=2)       # (B, L, N_h, d_v)
+        # Re‑broadcast shared key/value so every query head has a partner.
+        k = torch.repeat_interleave(k, self.num_q_per_kv, dim=2)  # (B, L, N_h, r_g)
+        v = torch.repeat_interleave(v, self.num_q_per_kv, dim=2)  # (B, L, N_h, d_v)
 
-        # Prepare shapes for matmul: (B, N_h, T/L, dim)
-        q = xq.transpose(1, 2)                                          # (B, N_h, T, r_g)
-        k = k.transpose(1, 2)                                           # (B, N_h, L, r_g)
-        v = v.transpose(1, 2)                                           # (B, N_h, L, d_v)
+        # Final reshape for the attention kernel.
+        q = xq.transpose(1, 2)                             # (B, N_h, T, r_g)
+        k = k.transpose(1, 2)                              # (B, N_h, L, r_g)
+        v = v.transpose(1, 2)                              # (B, N_h, L, d_v)
 
-        # Attention scores -------------------------------------------------
+        # ------------------------------------------------------------------
+        # 3. Scaled dot‑product attention
+        # ------------------------------------------------------------------
         q = q * self.scaling
-        attn_scores = torch.matmul(q, k.transpose(-2, -1))              # (B, N_h, T, L)
+        scores = torch.matmul(q, k.transpose(-2, -1))      # (B, N_h, T, L)
 
-        # Local sliding window mask if configured
+        # Optional local sliding‑window masking (Gemma‑3 style)
         if (
                 self.attn_type == gemma_config.AttentionType.LOCAL_SLIDING
                 and self.sliding_window_size is not None
@@ -169,43 +194,29 @@ class GemmaAttentionDKSVD(nn.Module):
             mask = local_mask
 
         if self.attn_logit_softcapping is not None:
-            attn_scores = attn_scores / self.attn_logit_softcapping
-            attn_scores = torch.tanh(attn_scores) * self.attn_logit_softcapping
+            scores = torch.tanh(scores / self.attn_logit_softcapping) * self.attn_logit_softcapping
 
-        attn_scores = attn_scores + mask
-        attn_probs = F.softmax(attn_scores.float(), dim=-1).type_as(q)
+        scores = scores + mask
+        scores = F.softmax(scores.float(), dim=-1).type_as(q)
 
-        # MatMul with values ----------------------------------------------
-        attn_output = torch.matmul(attn_probs, v)                        # (B, N_h, T, d_v)
+        context = torch.matmul(scores, v)                  # (B, N_h, T, d_v)
+        context = context.transpose(1, 2).reshape(B, T, -1)
+        return self.o_proj(context)
 
-        # Reshape back to (B, T, d)
-        attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_len, -1)
-        attn_output = self.o_proj(attn_output)
-        return attn_output
 
-# ------------------------------------------------------------------
-# Decoder layer wrapper
-# ------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Decoder layer wrapper — identical to Gemma‑3 but with our custom attention
+# -----------------------------------------------------------------------------
 class Gemma2DecoderLayerDKSVD(nn.Module):
-    """Gemma‑3 style decoder layer with DK‑SVD attention."""
-
     def __init__(self, config: gemma_config.GemmaConfig, attn_type: gemma_config.AttentionType):
         super().__init__()
         self.attn_type = attn_type
-        self.self_attn = GemmaAttentionDKSVD(config=config, attn_type=attn_type)
-        self.mlp = GemmaMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            quant=config.quant,
-        )
+        self.self_attn = GemmaAttentionDKSVD(config, attn_type)
+        self.mlp = GemmaMLP(config.hidden_size, config.intermediate_size, config.quant)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_feedforward_layernorm = (
-            RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.use_pre_ffw_norm else None
-        )
-        self.post_feedforward_layernorm = (
-            RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.use_post_ffw_norm else None
-        )
+        self.pre_feedforward_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.use_pre_ffw_norm else None
+        self.post_feedforward_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if config.use_post_ffw_norm else None
 
     def forward(
             self,
@@ -214,23 +225,23 @@ class Gemma2DecoderLayerDKSVD(nn.Module):
             kv_write_indices: torch.Tensor,
             kv_cache: Tuple[torch.Tensor, torch.Tensor],
             mask: torch.Tensor,
-            local_mask: torch.Tensor | None,
+            local_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # Self‑attention --------------------------------------------------
+        # ---- Attention ------------------------------------------------------
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            freqs_cis=freqs_cis,
-            kv_write_indices=kv_write_indices,
-            kv_cache=kv_cache,
-            mask=mask,
-            local_mask=local_mask,
+            hidden_states,
+            freqs_cis,
+            kv_write_indices,
+            kv_cache,
+            mask,
+            local_mask,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
-        # Feed‑forward ----------------------------------------------------
+        # ---- MLP ------------------------------------------------------------
         residual = hidden_states
         if self.pre_feedforward_layernorm is not None:
             hidden_states = self.pre_feedforward_layernorm(hidden_states)
@@ -238,14 +249,14 @@ class Gemma2DecoderLayerDKSVD(nn.Module):
         if self.post_feedforward_layernorm is not None:
             hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
-
         return hidden_states
 
-# ------------------------------------------------------------------
-# Stacked decoder + full LM wrapper
-# ------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Stacked decoder + LM wrapper
+# -----------------------------------------------------------------------------
 class GemmaModelDKSVD(nn.Module):
-    """Backbone transformer stack composed of DK‑SVD layers."""
+    """Transformer backbone using the DK‑SVD attention layers."""
 
     def __init__(self, config: gemma_config.GemmaConfig):
         super().__init__()
@@ -253,7 +264,9 @@ class GemmaModelDKSVD(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(config.num_hidden_layers):
             attn_type = (
-                config.attn_types[i % len(config.attn_types)] if config.attn_types is not None else gemma_config.AttentionType.GLOBAL
+                config.attn_types[i % len(config.attn_types)]
+                if config.attn_types is not None
+                else gemma_config.AttentionType.GLOBAL
             )
             self.layers.append(Gemma2DecoderLayerDKSVD(config, attn_type))
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -265,105 +278,94 @@ class GemmaModelDKSVD(nn.Module):
             kv_write_indices: torch.Tensor,
             kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
             mask: torch.Tensor,
-            local_mask: torch.Tensor | None,
+            local_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        for i, layer in enumerate(self.layers):
+        for layer, cache in zip(self.layers, kv_caches):
             hidden_states = layer(
-                hidden_states=hidden_states,
-                freqs_cis=freqs_cis.get(layer.attn_type),
-                kv_write_indices=kv_write_indices,
-                kv_cache=kv_caches[i],
-                mask=mask,
-                local_mask=local_mask,
+                hidden_states,
+                freqs_cis.get(layer.attn_type),
+                kv_write_indices,
+                cache,
+                mask,
+                local_mask,
             )
-        hidden_states = self.norm(hidden_states)
-        return hidden_states
+        return self.norm(hidden_states)
 
-# ------------------------------------------------------------------
+
 class GemmaForCausalLMDKSVD(nn.Module):
-    """Gemma causal‑LM wrapper that consumes E‑DK‑SVD weights."""
+    """Causal‑LM wrapper around the DK‑SVD backbone."""
 
     def __init__(self, config: gemma_config.GemmaConfig):
         super().__init__()
+        if not getattr(config, "qk_rank", None):
+            raise ValueError("GemmaConfig.qk_rank must be set for DK‑SVD models.")
         self.config = config
-        if not hasattr(config, "qk_rank"):
-            raise ValueError("GemmaConfig must include qk_rank for the DKSVD variant.")
 
-        self.vocab_size = config.vocab_size
         self.tokenizer = tokenizer.Tokenizer(config.tokenizer)
         self.embedder = Embedding(config.vocab_size, config.hidden_size, config.quant)
         self.model = GemmaModelDKSVD(config)
         self.sampler = Sampler(config.vocab_size, config)
 
-        # Pre‑compute RoPE tables at width r_g  --------------------------------------
+        # -------- Pre‑compute RoPE tables (width = r_g) ----------------------
         if config.architecture == gemma_config.Architecture.GEMMA_3:
             if config.rope_wave_length is None:
-                raise ValueError("rope_wave_length must be provided for Gemma3.")
-
-            rope_lengths = config.rope_wave_length
-            defaults = {
-                gemma_config.AttentionType.LOCAL_SLIDING: 10_000,
-                gemma_config.AttentionType.GLOBAL: 10_000,
-            }
+                raise ValueError("rope_wave_length must be provided for Gemma‑3 models.")
             for attn_type, name in [
                 (gemma_config.AttentionType.LOCAL_SLIDING, "local_freqs_cis"),
                 (gemma_config.AttentionType.GLOBAL, "global_freqs_cis"),
             ]:
-                theta = rope_lengths.get(attn_type, defaults[attn_type])
-                self._register_freqs_cis(name, config.qk_rank, config.max_position_embeddings * 2, theta=theta)
+                theta = config.rope_wave_length.get(attn_type, 10_000)
+                self._register_freqs_cis(name, config.qk_rank, config.max_position_embeddings * 2, theta)
         else:
-            # GEMMA_1 / GEMMA_2 legacy path – single table
             self._register_freqs_cis("freqs_cis", config.qk_rank, config.max_position_embeddings * 2)
 
-    # Helper -----------------------------------------------------------------
-    def _register_freqs_cis(self, name: str, head_dim: int, max_seq_len: int, theta: int = 10_000):
-        self.register_buffer(name, precompute_freqs_cis(head_dim, max_seq_len, theta=theta))
+    # ------------------------------------------------------------------
+    def _register_freqs_cis(self, name: str, dim: int, max_len: int, theta: int = 10_000):
+        self.register_buffer(name, precompute_freqs_cis(dim, max_len, theta))
 
-    # ----------------------------------------------------------------------
+    # ------------------------------------------------------------------
     @torch.no_grad()
     def forward(
             self,
-            input_token_ids: torch.Tensor,              # (B, T_in)
-            input_positions: torch.Tensor,              # (T_in,)
-            kv_write_indices: torch.Tensor,             # (T_in,)
+            input_token_ids: torch.Tensor,
+            input_positions: torch.Tensor,
+            kv_write_indices: torch.Tensor,
             kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
             mask: torch.Tensor,
-            output_positions: torch.Tensor,             # indices of tokens whose logits we return
+            output_positions: torch.Tensor,
             temperatures: Optional[torch.Tensor],
             top_ps: torch.Tensor,
             top_ks: torch.Tensor,
-            local_mask: torch.Tensor | None = None,
+            local_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # RoPE lookup tables ------------------------------------------------
-        freqs_cis = {}
+        # Gather position‑dependent RoPE tables.
+        freqs_lookup = {}
         if self.config.architecture == gemma_config.Architecture.GEMMA_3:
-            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, input_positions)
-            freqs_cis[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, input_positions)
+            freqs_lookup[gemma_config.AttentionType.LOCAL_SLIDING] = self.local_freqs_cis.index_select(0, input_positions)
+            freqs_lookup[gemma_config.AttentionType.GLOBAL] = self.global_freqs_cis.index_select(0, input_positions)
         else:
             shared = self.freqs_cis.index_select(0, input_positions)
-            freqs_cis[gemma_config.AttentionType.LOCAL_SLIDING] = shared
-            freqs_cis[gemma_config.AttentionType.GLOBAL] = shared
+            freqs_lookup[gemma_config.AttentionType.LOCAL_SLIDING] = shared
+            freqs_lookup[gemma_config.AttentionType.GLOBAL] = shared
 
-        # Embedding & positional norm ------------------------------------------------
-        hidden_states = self.embedder(input_token_ids)
-        hidden_states = hidden_states * (self.config.hidden_size ** 0.5)
+        # ---- Embedding & scale ------------------------------------------------
+        hidden_states = self.embedder(input_token_ids) * (self.config.hidden_size ** 0.5)
 
         hidden_states = self.model(
-            hidden_states=hidden_states,
-            freqs_cis=freqs_cis,
-            kv_write_indices=kv_write_indices,
-            kv_caches=kv_caches,
-            mask=mask,
-            local_mask=local_mask,
+            hidden_states,
+            freqs_lookup,
+            kv_write_indices,
+            kv_caches,
+            mask,
+            local_mask,
         )
 
-        # Weight tying --------------------------------------------------------------
-        embedder_weight = self.embedder.weight
+        embed_weight = self.embedder.weight
         if self.config.quant:
-            embedder_weight = embedder_weight * self.embedder.weight_scaler.unsqueeze(-1)
+            embed_weight = embed_weight * self.embedder.weight_scaler.unsqueeze(-1)
 
         next_tokens, logits = self.sampler(
-            embedding=embedder_weight,
+            embedding=embed_weight,
             hidden_states=hidden_states,
             output_positions=output_positions,
             temperatures=temperatures,

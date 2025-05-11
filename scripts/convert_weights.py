@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
-"""convert_weights.py
+"""convert_weights.py (Energy DK‑SVD, *fixed* RMS‑Norm handling)
 
-Utility script that converts an *original* Gemma checkpoint (with full‑size
-Q/K/V projections) into a checkpoint compatible with the *Energy‑DK‑SVD*
-variant of the model (``gemma.model_dksvd``).
+This utility converts an **original** Gemma checkpoint that uses full‑width
+Q/K/V projections **and** (scaled) RMS‑Norm into a checkpoint that is
+consumable by ``gemma.model_dksvd``.  Compared to the initial draft, this
+version *correctly* projects the per‑channel RMS‑Norm scale vectors onto the
+compressed sub‑space, following §5 of the E‑DK‑SVD derivation document.
 
-The script assumes that the **architecture of the original checkpoint is the
-same** as the target model (only the attention projections change).  For
-Gemma‑1B this means:
+Key improvements
+----------------
+*   Projects the original scale vectors (``gamma_Q``, ``gamma_K``) to the new
+    width *r* analytically – no longer initialises them to **zero**.
+*   Stores the projected vectors as the new ``query_norm`` / ``key_norm``
+    parameters so that the runtime model applies them exactly once.
+*   Keeps the projection mathematics self‑contained; we do *not* require the
+    full eigen‑decomposition outside the helper.
 
-*   ``num_attention_heads   = 4``
-*   ``num_key_value_heads   = 1`` (→ one GQA group)
-*   ``head_dim             = 256`` (original Q/K/V width)
-*   ``hidden_size          = 1152``
+The resulting checkpoint can be loaded with:
 
-After the conversion each attention layer stores separate *low‑rank* modules
-(``q_linears``, ``k_linears``, ``v_linears``) whose weights have the usual
-*pytorch* layout ``(out_features, in_features)``.
-
-Only the **Q/K** matrices are re‑parameterised; **V** and **O** projections are
-copied verbatim.  In addition, fresh zero‑initialised ``query_norm`` and
-``key_norm`` parameters (size = ``rank``) are created for every layer if the
-original model used them.
-
-The resulting file has the *same* container structure as the original
-(checkpoint == ``torch.save({'model_state_dict': ...})``) so that
-``GemmaForCausalLMDKSVD.load_weights`` can read it without changes.
+>>> cfg = gemma_config.get_config_for_1b(dtype="float32")
+>>> cfg.qk_rank = RANK
+>>> model = GemmaForCausalLMDKSVD(cfg)
+>>> model.load_weights("/path/to/edksvd_checkpoint.pt")
 """
 
 from __future__ import annotations
@@ -33,18 +29,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Dict, Tuple, List
+from typing import Dict, List, Tuple
 
 import torch
 from gemma import config as gemma_config
 
 DTYPE_MAP = {
     "float32": torch.float32,
-    "fp32":    torch.float32,
+    "fp32": torch.float32,
     "float16": torch.float16,
-    "fp16":    torch.float16,
+    "fp16": torch.float16,
     "bfloat16": torch.bfloat16,
-    "bf16":     torch.bfloat16,
+    "bf16": torch.bfloat16,
 }
 
 # -----------------------------------------------------------------------------
@@ -55,68 +51,81 @@ def _edksvd_factorise(
         W_q_list: List[torch.Tensor],
         W_k_shared: torch.Tensor,
         rank: int,
-        eps: float = 1e-12,
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-    """Energy DK‑SVD compression for a *single* GQA group.
+        eps: float = 1.0e-12,
+) -> Tuple[torch.Tensor, List[torch.Tensor], torch.Tensor, torch.Tensor]:
+    """Energy DK‑SVD for one GQA group *including* eigen‑info.
 
-    Args:
-        W_q_list:  list of *s* **original** full‑width query matrices, each
-                    shape ``(d, d_k)``.
-        W_k_shared: original shared key matrix, shape ``(d, d_k)``.
-        rank:       target low rank *r*.
-        eps:        minimal eigen‑value clamp for numerical stability.
-
-    Returns:
-        W_k_tilde:          optimal shared low‑rank key,  shape ``(d, r)``.
-        W_q_tilde_list:     list of *s* optimal low‑rank queries, each
-                             ``(d, r)``.
+    Returns
+    -------
+    W_k_tilde : ``(d, r)``
+        Optimal shared *skinny* key.
+    W_q_tilde_list : list[Tensor]
+        Optimal skinny queries for the *s* heads (each ``(d, r)``).
+    lambda_r : ``(r,)``
+        Eigen‑values λ_1 … λ_r (already **clamped** ≥ eps).
+    U_r : ``(d, r)``
+        Corresponding orthonormal eigen‑vectors.
     """
+    device, dtype = W_k_shared.device, W_k_shared.dtype
 
-    device = W_k_shared.device
-    dtype = W_k_shared.dtype
-
-
-    # ------------------------------------------------------------------
-    # 1.  Interaction kernels A_i = W_q_i  W_k^T  (d × d)
-    # ------------------------------------------------------------------
+    # 1) A_i = W_q_i  W_k^T
     A_list = [W_q @ W_k_shared.T for W_q in W_q_list]
 
-    # ------------------------------------------------------------------
-    # 2.  Energy matrix  C = Σ_i A_i^T A_i  (d × d)
-    # ------------------------------------------------------------------
-    C = torch.zeros((W_k_shared.shape[0], W_k_shared.shape[0]), dtype=dtype, device=device)
+    # 2) C = Σ_i  A_i^T A_i
+    d = W_k_shared.shape[0]
+    C = torch.zeros((d, d), dtype=dtype, device=device)
     for A in A_list:
-        C = C + A.T @ A
+        C.add_(A.T @ A)
 
-    # ------------------------------------------------------------------
-    # 3.  Eigen‑decomposition  C = U Λ U^T   (ascending eigen‑values)
-    # ------------------------------------------------------------------
-    eigvals, eigvecs = torch.linalg.eigh(C)                 # eigvals: (d,)
-    # Select *rank* largest eigen‑pairs (descending order)
-    topk = torch.topk(eigvals, k=rank, largest=True, sorted=True)
-    lambda_r = topk.values.clamp(min=eps)                   # (r,)
-    U_r = eigvecs[:, topk.indices]                          # (d, r)
+    # 3) top‑*r* eigenspace of C – torch.linalg.eigh returns ascending order
+    eigvals, eigvecs = torch.linalg.eigh(C)
+    lambda_r, idx = torch.topk(eigvals, k=rank, largest=True, sorted=True)
+    lambda_r = lambda_r.clamp_min(eps)
+    U_r = eigvecs[:, idx]
 
-    # ------------------------------------------------------------------
-    # 4.  Optimal shared key   W_k^* = U_r  Λ_r^{1/2}
-    # ------------------------------------------------------------------
-    sqrt_lambda = torch.sqrt(lambda_r)
-    W_k_tilde = U_r * sqrt_lambda.unsqueeze(0)              # broadcast columns
+    # 4) W_K^* = U_r Λ_r^{1/2}
+    W_k_tilde = U_r * lambda_r.sqrt().unsqueeze(0)
 
-    # ------------------------------------------------------------------
-    # 5.  Optimal queries  W_q_i^* = A_i W_k^* Λ_r^{-1}
-    # ------------------------------------------------------------------
-    inv_lambda = 1.0 / lambda_r                             # (r,)
-    W_q_tilde_list: List[torch.Tensor] = []
-    for A in A_list:
-        W_q_i = (A @ W_k_tilde) * inv_lambda.unsqueeze(0)
-        W_q_tilde_list.append(W_q_i)
+    # 5) W_Q,i^* = A_i W_K^* Λ_r^{-1}
+    inv_lambda = lambda_r.reciprocal().unsqueeze(0)  # broadcast over rows
+    W_q_tilde_list = [(A @ W_k_tilde) * inv_lambda for A in A_list]
 
-    return W_k_tilde, W_q_tilde_list
+    return W_k_tilde, W_q_tilde_list, lambda_r, U_r
 
 
 # -----------------------------------------------------------------------------
-# ----------  Conversion routine ---------------------------------------------
+# ----------  γ′ projection helper --------------------------------------------
+# -----------------------------------------------------------------------------
+
+def _project_rms_scale(
+        gamma: torch.Tensor,  # original γ  (d_k,)
+        W_k_shared_f: torch.Tensor,  # fused shared K (d, d_k)
+        U_r: torch.Tensor,          # (d, r)
+        lambda_r: torch.Tensor,     # (r,)
+        eps: float = 1e-6,
+) -> torch.Tensor:               # returns γ′  (r,)
+    """Implements eq. (γ′) from §5.4 of the E‑DK‑SVD doc.
+
+    γ′ = ((Π ⊙ Π)^T (1+γ)) ⊙ Λ^{-1} − 1.
+    """
+    d_k = gamma.shape[0]
+    ones_plus_gamma = 1.0 + gamma  # (d_k,)
+
+    # Π = W_K_f^T U_r    (d_k × r)
+    Pi = W_k_shared_f.T @ U_r     # (d_k, r)
+    Pi_sq = Pi.pow(2)             # element‑wise square
+
+    # (Π²)^T @ (1+γ)    → (r,)
+    gamma_plus_1_prime = (Pi_sq.T @ ones_plus_gamma) / lambda_r
+
+    # numerical safety   (1+γ′) ≥ eps → γ′ ≥ eps−1
+    gamma_plus_1_prime = torch.clamp(gamma_plus_1_prime, min=eps)
+    gamma_prime = gamma_plus_1_prime - 1.0
+    return gamma_prime
+
+
+# -----------------------------------------------------------------------------
+# ----------  Main conversion routine ----------------------------------------
 # -----------------------------------------------------------------------------
 
 def convert_checkpoint(
@@ -124,139 +133,167 @@ def convert_checkpoint(
         output_ckpt: str,
         variant: str,
         rank: int,
-        dtype: str = "float32",
-        eigen_clamp_min: float = 1e-12,
+        *,
+        dtype: str | torch.dtype = "float32",
+        eigen_clamp_min: float = 1.0e-12,
 ):
-    """Main entry: loads ``input_ckpt``, performs E‑DK‑SVD, writes ``output_ckpt``."""
+    """Converts *input_ckpt* (original Gemma) → *output_ckpt* (E‑DK‑SVD)."""
 
-    assert os.path.isfile(input_ckpt), f"Input checkpoint not found: {input_ckpt}"
-    os.makedirs(os.path.dirname(os.path.abspath(output_ckpt)), exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # 1.  Load model config (for shapes) & constants --------------------
-    # ------------------------------------------------------------------
-    model_cfg = gemma_config.get_model_config(variant)
-    model_cfg.dtype = dtype
-
-    # -----------------------------------------------------------------
-    # Inside convert_checkpoint(...)
-    # -----------------------------------------------------------------
     if isinstance(dtype, str):
         try:
-            dtype = DTYPE_MAP[dtype.lower()]
-        except KeyError:
+            dtype_t = DTYPE_MAP[dtype.lower()]
+        except KeyError as err:
             raise ValueError(
-                f"Unknown dtype '{dtype}'. Allowed values: {list(DTYPE_MAP)}"
-            )
+                f"Unknown dtype '{dtype}'. Choose from {list(DTYPE_MAP)}"
+            ) from err
+    else:
+        dtype_t = dtype
 
-    d_model      = model_cfg.hidden_size
-    d_k_full     = model_cfg.head_dim                      # original Q/K/V dim
-    n_heads      = model_cfg.num_attention_heads
-    n_kv_heads   = model_cfg.num_key_value_heads
-    s_per_group  = n_heads // n_kv_heads                   # queries per group
+    if not os.path.isfile(input_ckpt):
+        raise FileNotFoundError(input_ckpt)
+    os.makedirs(os.path.dirname(os.path.abspath(output_ckpt)), exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 2.  Load *original* state‑dict -----------------------------------
-    # ------------------------------------------------------------------
+    # 1) model config ----------------------------------------------------------------
+    if variant == "1b":
+        model_cfg: gemma_config.GemmaConfig = gemma_config.get_config_for_1b(dtype="float32")
+    else:
+        model_cfg = gemma_config.get_model_config(variant)
+    model_cfg.dtype = str(dtype) if isinstance(dtype, str) else str(dtype_t)
+
+    d_model = model_cfg.hidden_size
+    d_k_full = model_cfg.head_dim          # 256 for Gemma‑1B
+    n_heads = model_cfg.num_attention_heads
+    n_kv_heads = model_cfg.num_key_value_heads
+    s_per_group = n_heads // n_kv_heads
+
+    # 2) load checkpoint --------------------------------------------------------------
     raw = torch.load(input_ckpt, map_location="cpu")
-    if "model_state_dict" in raw:           # <== common layout from run.py
+    orig_state: Dict[str, torch.Tensor]
+    if isinstance(raw, dict) and "model_state_dict" in raw:
         orig_state = raw["model_state_dict"]
     else:
-        orig_state = raw
+        orig_state = raw  # sharded‑style single file
 
-    # New state dict we will populate.
     new_state: Dict[str, torch.Tensor] = {}
 
-    # ------------------------------------------------------------------
-    # 3.  Copy *unchanged* parameters ----------------------------------
-    # ------------------------------------------------------------------
-    for key, tensor in orig_state.items():
-        # Skip parameters that are re‑factorised / change size.
-        if ".self_attn.qkv_proj." in key:
-            continue  # replaced by q_linears / k_linears / v_linears
-        if ".self_attn.query_norm." in key or ".self_attn.key_norm." in key:
-            continue  # dimensions change → freshly initialised later
-        if key.endswith("freqs_cis") or "freqs_cis" in key:
+    # 3) copy *unchanged* tensors -----------------------------------------------------
+    SKIP_SUBSTRINGS = {
+        ".self_attn.qkv_proj.",
+        ".self_attn.query_norm.",
+        ".self_attn.key_norm.",
+        "freqs_cis",
+    }
+    for name, tensor in orig_state.items():
+        if any(s in name for s in SKIP_SUBSTRINGS):
             continue
-        new_state[key] = tensor.clone().to(dtype=dtype)
+        new_state[name] = tensor.to(dtype_t).clone()
 
-    # ------------------------------------------------------------------
-    # 4.  Per‑layer re‑parameterisation --------------------------------
-    # ------------------------------------------------------------------
+    # 4) per‑layer refactorisation ----------------------------------------------------
     for layer_idx in range(model_cfg.num_hidden_layers):
-        # ---------- Fetch original concatenated QKV weight -------------
-        w_qkv_key = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
-        W_qkv_full = orig_state[w_qkv_key].to(dtype)        # (out, in)  = ((n_h+2*n_kv)*d_k, d_model)
-        W_qkv_full_t = W_qkv_full.T.contiguous()            # (d_model, out)
+        # original concatenated QKV weight (out_features, in_features)
+        qkv_key = f"model.layers.{layer_idx}.self_attn.qkv_proj.weight"
+        W_qkv_full = orig_state[qkv_key].to(dtype_t)              # ((n_h+2*n_kv)*d_k, d)
+        W_qkv_full_t = W_qkv_full.T.contiguous()                  # (d, out)
 
-        # Slicing indices ------------------------------------------------
-        q_end   = n_heads * d_k_full
-        k_end   = q_end + n_kv_heads * d_k_full
-        v_end   = k_end + n_kv_heads * d_k_full
+        # slices ------------------------------------------------------------------
+        q_end = n_heads * d_k_full
+        k_end = q_end + n_kv_heads * d_k_full
 
-        W_Q_all = W_qkv_full_t[:, 0:q_end]                  # (d, n_h*d_k)
-        W_K_all = W_qkv_full_t[:, q_end:k_end]              # (d, n_kv*d_k)
-        W_V_all = W_qkv_full_t[:, k_end:v_end]              # (d, n_kv*d_k)  (d_k == d_v)
+        W_Q_all = W_qkv_full_t[:, :q_end]                         # (d, n_h*d_k)
+        W_K_all = W_qkv_full_t[:, q_end:k_end]                    # (d, n_kv*d_k)
+        W_V_all = W_qkv_full_t[:, k_end:k_end + n_kv_heads * d_k_full]  # (d, n_kv*d_k)
 
-        # ------------------------------------------------------------------
-        #   Fold query/key RMSNorm scales *into* the full-width Q/K
-        # ------------------------------------------------------------------
+        # 4‑a) fuse original RMS scales -------------------------------------
         q_norm_key = f"model.layers.{layer_idx}.self_attn.query_norm.weight"
         k_norm_key = f"model.layers.{layer_idx}.self_attn.key_norm.weight"
+        gamma_q = orig_state[q_norm_key].to(dtype_t)             # (d_k,)
+        gamma_k = orig_state[k_norm_key].to(dtype_t)             # (d_k,)
 
-        scale_q_head = 1.0 + orig_state[q_norm_key].to(dtype)   # (d_k,)
-        scale_k_head = 1.0 + orig_state[k_norm_key].to(dtype)   # (d_k,)
+        # repeat per head / kv‑head so dimensions align with concatenation
+        scale_q_vec = (1.0 + gamma_q).repeat(n_heads)            # (n_h*d_k,)
+        scale_k_vec = (1.0 + gamma_k).repeat(n_kv_heads)         # (n_kv*d_k,)
 
-        # --- NEW: repeat per head so the length matches the concatenated blocks
-        scale_q_vec = scale_q_head.repeat(n_heads)              # (n_heads*d_k,)
-        scale_k_vec = scale_k_head.repeat(n_kv_heads)           # (n_kv_heads*d_k,)
+        W_Q_all.mul_(scale_q_vec.unsqueeze(0))
+        W_K_all.mul_(scale_k_vec.unsqueeze(0))
 
-        # Broadcast over the row dimension (d_model) and multiply
-        W_Q_all = W_Q_all * scale_q_vec.unsqueeze(0)            # (d_model, n_heads*d_k)
-        W_K_all = W_K_all * scale_k_vec.unsqueeze(0)            # (d_model, n_kv_heads*d_k)
+        # 4‑b) process each GQA group --------------------------------------
+        # For Gemma‑1B there is *exactly* one group; but code supports >1.
+        projected_gamma_q_group: List[torch.Tensor] = []
+        projected_gamma_k_group: List[torch.Tensor] = []
 
-
-        # ---------- Process each GQA group -----------------------------
         for g in range(n_kv_heads):
-            # Shared K & V slices.
             K_slice = slice(g * d_k_full, (g + 1) * d_k_full)
-            W_K_shared = W_K_all[:, K_slice]
+            W_K_shared_f = W_K_all[:, K_slice]                   # (d, d_k)
             W_V_shared = W_V_all[:, K_slice]
 
-            # All queries belonging to this group.
-            W_q_list: List[torch.Tensor] = []
+            # gather queries belonging to this group
+            W_q_list = []
             for i in range(s_per_group):
-                q_col_start = (g * s_per_group + i) * d_k_full
-                q_slice = slice(q_col_start, q_col_start + d_k_full)
-                W_q_list.append(W_Q_all[:, q_slice])
+                q_start = (g * s_per_group + i) * d_k_full
+                W_q_list.append(W_Q_all[:, q_start:q_start + d_k_full])
 
-            # -------- E‑DK‑SVD ----------------------------------------
-            W_K_tilde, W_Q_tilde_list = _edksvd_factorise(
-                W_q_list,W_K_shared,rank,eps=eigen_clamp_min)
+            # Energy DK‑SVD --------------------------------------------
+            W_K_tilde, W_Q_tilde_list, lambda_r, U_r = _edksvd_factorise(
+                W_q_list,
+                W_K_shared_f,
+                rank,
+                eps=eigen_clamp_min,
+            )
 
-            # -------- Store new parameters (transpose!) ---------------
+            # store K / V ------------------------------------------------
             k_weight_key = f"model.layers.{layer_idx}.self_attn.k_linears.{g}.weight"
             new_state[k_weight_key] = W_K_tilde.T.contiguous()
 
             v_weight_key = f"model.layers.{layer_idx}.self_attn.v_linears.{g}.weight"
             new_state[v_weight_key] = W_V_shared.T.contiguous()
 
-            # Per‑head query linears
+            # store Q_i --------------------------------------------------
             for i, W_q_tilde in enumerate(W_Q_tilde_list):
-                q_weight_key = (
-                    f"model.layers.{layer_idx}.self_attn.q_linears.{g}.{i}.weight"
-                )
+                q_weight_key = f"model.layers.{layer_idx}.self_attn.q_linears.{g}.{i}.weight"
                 new_state[q_weight_key] = W_q_tilde.T.contiguous()
 
-        # -------- Fresh query/key norm parameters ----------------------
-        query_norm_key = f"model.layers.{layer_idx}.self_attn.query_norm.weight"
-        key_norm_key   = f"model.layers.{layer_idx}.self_attn.key_norm.weight"
-        new_state[query_norm_key] = torch.zeros(rank, dtype=torch.float32)
-        new_state[key_norm_key]   = torch.zeros(rank, dtype=torch.float32)
+            # γ′ projection for this group ------------------------------
+            gamma_q_prime = _project_rms_scale(
+                gamma_q,
+                W_K_shared_f,
+                U_r,
+                lambda_r,
+            )
+            gamma_k_prime = _project_rms_scale(
+                gamma_k,
+                W_K_shared_f,
+                U_r,
+                lambda_r,
+            )
+            projected_gamma_q_group.append(gamma_q_prime)
+            projected_gamma_k_group.append(gamma_k_prime)
 
-    # ------------------------------------------------------------------
-    # 5.  Save ----------------------------------------------------------
-    # ------------------------------------------------------------------
+        # 4‑c) validate/aggregate γ′ across groups -------------------------
+        # If multiple groups exist we expect the projected vectors to be
+        # (near‑)identical.  Otherwise we raise to avoid silent misuse.
+        if n_kv_heads == 1:
+            gamma_q_prime_layer = projected_gamma_q_group[0]
+            gamma_k_prime_layer = projected_gamma_k_group[0]
+        else:
+            for idx in range(1, n_kv_heads):
+                dq = (projected_gamma_q_group[idx] - projected_gamma_q_group[0]).abs().max()
+                dk = (projected_gamma_k_group[idx] - projected_gamma_k_group[0]).abs().max()
+                if dq > 1e-4 or dk > 1e-4:
+                    raise RuntimeError(
+                        "Projected RMS‑Norm scales differ between GQA groups (layer {}, Δ={:.2e}/{:.2e}).".format(
+                            layer_idx, dq, dk
+                        )
+                    )
+            gamma_q_prime_layer = projected_gamma_q_group[0]
+            gamma_k_prime_layer = projected_gamma_k_group[0]
+
+        # store γ′ as new norm weights (size r)
+        query_norm_key_new = f"model.layers.{layer_idx}.self_attn.query_norm.weight"
+        key_norm_key_new = f"model.layers.{layer_idx}.self_attn.key_norm.weight"
+        new_state[query_norm_key_new] = gamma_q_prime_layer.to(dtype_t).clone()
+        new_state[key_norm_key_new] = gamma_k_prime_layer.to(dtype_t).clone()
+
+    # 5) save -------------------------------------------------------------------------
     torch.save({"model_state_dict": new_state}, output_ckpt)
     print(f"[✓]  Saved E‑DK‑SVD checkpoint → {output_ckpt}")
 
@@ -266,17 +303,17 @@ def convert_checkpoint(
 # -----------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Convert Gemma checkpoint to E‑DK‑SVD form.")
-    p.add_argument("--input_ckpt", required=True, help="Path to *original* Gemma checkpoint (single .pt / .ckpt file).")
-    p.add_argument("--output_ckpt", required=True, help="Destination path for converted checkpoint.")
-    p.add_argument("--variant", default="1b", choices=["1b"], help="Gemma model variant (only '1b' tested so far).")
-    p.add_argument("--rank", type=int, required=True, help="Target low rank r for Q/K projections.")
-    p.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"], help="Data type for computations & saved tensors.")
-    p.add_argument("--eigen_clamp_min", type=float, default=1e-12, help="Smallest eigen‑value allowed before sqrt/inversion.")
+    p = argparse.ArgumentParser("Convert Gemma checkpoint → Energy DK‑SVD format")
+    p.add_argument("--input_ckpt", required=True, help="Path to *original* Gemma checkpoint (.pt/.bin)")
+    p.add_argument("--output_ckpt", required=True, help="Destination path for the converted checkpoint")
+    p.add_argument("--variant", default="1b", choices=["1b"], help="Gemma variant (currently only 1b tested)")
+    p.add_argument("--rank", type=int, required=True, help="Target rank r for Q/K projections")
+    p.add_argument("--dtype", default="float32", choices=list(DTYPE_MAP), help="Computation / save dtype")
+    p.add_argument("--eigen_clamp_min", type=float, default=1.0e-12, help="Minimal eigen‑value before inversion")
     return p.parse_args()
 
 
-def main():
+def main() -> None:
     args = _parse_args()
     torch.set_grad_enabled(False)
 
