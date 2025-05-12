@@ -328,13 +328,25 @@ def main(argv: list[str]) -> None:
         print("\n--- Comparing Attention Scores (pre-softmax) ---")
         if not print_diff("Scores", scores_ref, scores_edk, tol=args.intermediate_tol): all_intermediate_passed = False
 
-    # ---------------------------------------------------------------- Final Logit Check
+    # --- Final Logit Comparison ---
     print("\n--- Final Logit Comparison ---")
     # Use the KV caches populated during the intermediate checks pass for the target layer
     # For other layers, they are zero, which is fine for a single prompt pass.
     # Reset kv_write_indices for the final full pass.
     kv_write_indices_final = torch.arange(T, device=device)
-    output_positions_final = torch.tensor([T-1], device=device)
+    output_positions_final = torch.tensor([T - 1], device=device)
+
+    # Corrected mask for final logit pass:
+    max_seq_len = cfg.max_position_embeddings # Or cfg_edk, should be same
+    # Create a mask of shape (1, 1, T_query, max_seq_len_kv_cache)
+    # This mask should be causal for the actual prompt length T_query
+    # and allow attention to all T_query key/value entries.
+    final_input_mask = torch.full((1, 1, T, max_seq_len), 0.0, dtype=torch_dtype, device=device)
+    # Apply causal masking only for the T_query x T_query part
+    causal_mask_part = torch.triu(torch.full((T, T), torch.finfo(torch_dtype).min, device=device), diagonal=1)
+    final_input_mask[:, :, :T, :T] = causal_mask_part
+    # The rest of the mask (:, :, :T, T_query:max_seq_len) remains 0, allowing attention to
+    # the K/V cache entries beyond the current query, which are padding for prefill but part of the tensor dimension.
 
     # Use fresh KV caches for final logit check to ensure clean comparison
     final_kv_caches_ref: List[Tuple[torch.Tensor, torch.Tensor]] = []
