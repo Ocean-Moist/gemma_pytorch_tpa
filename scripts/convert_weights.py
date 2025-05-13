@@ -265,8 +265,25 @@ def convert_checkpoint(
                 U_r,
                 lambda_r,
             )
+            # ---- A½ (colour)  — eq. (5-1) & (5-2) ----------------------
+            Pi   = W_K_shared_f.T @ U_r                                   # (d_k, r)
+            Pi   = Pi * lambda_r.rsqrt().unsqueeze(0)                     # Λ^{-½}
+
+            T_q  = Pi * (1.0 + gamma_q).unsqueeze(1)                      # Γ_Q·…
+            T_k  = Pi * (1.0 + gamma_k).unsqueeze(1)                      # Γ_K·…
+
+            A_q  = (T_q.T @ T_q) / d_k_full                               # (r,r)
+            A_k  = (T_k.T @ T_k) / d_k_full
+
+            A_q_half = torch.linalg.cholesky(A_q).T.contiguous()          # upper-tri
+            A_k_half = torch.linalg.cholesky(A_k).T.contiguous()
+
             projected_gamma_q_group.append(gamma_q_prime)
             projected_gamma_k_group.append(gamma_k_prime)
+
+            # store A½ ------------------------------------------------------------
+            new_state[f"model.layers.{layer_idx}.self_attn.query_colour.{g}"] = A_q_half
+            new_state[f"model.layers.{layer_idx}.self_attn.key_colour.{g}"]   = A_k_half
 
         # 4‑c) validate/aggregate γ′ across groups -------------------------
         # If multiple groups exist we expect the projected vectors to be

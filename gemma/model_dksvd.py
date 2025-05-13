@@ -99,10 +99,20 @@ class GemmaAttentionDKSVD(nn.Module):
         if config.use_qk_norm:
             self.query_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps, add_unit_offset=True)
             self.key_norm = RMSNorm(self.qk_rank, eps=config.rms_norm_eps, add_unit_offset=True)
+            # --- § 5.2  “colour”  A½ -------------------------------------------------
+            # One SPD root per GQA group, separate for Q and K.
+            eye = torch.eye(self.qk_rank)
+            self.query_colour = nn.ParameterList(
+                    [nn.Parameter(eye.clone(),  requires_grad=False) for _ in range(self.num_kv_heads)]
+                )
+            self.key_colour   = nn.ParameterList(
+                    [nn.Parameter(eye.clone(),  requires_grad=False) for _ in range(self.num_kv_heads)]
+                )
         else:
             self.query_norm = None
             self.key_norm = None
-
+            self.query_colour = None
+            self.key_colour   = None
         # Misc.
         self.attn_type = attn_type
         self.sliding_window_size = config.sliding_window_size
@@ -141,6 +151,7 @@ class GemmaAttentionDKSVD(nn.Module):
             k_g = self.k_linears[g](hidden_states)         # (B, T, r_g)
             if self.key_norm is not None:
                 k_g = self.key_norm(k_g)
+                k_g = torch.matmul(k_g, self.key_colour[g])
             if freqs_cis is not None:
                 k_g = apply_rotary_emb(k_g.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
 
@@ -159,6 +170,7 @@ class GemmaAttentionDKSVD(nn.Module):
                 q_gi = self.q_linears[g][i](hidden_states)  # (B, T, r_g)
                 if self.query_norm is not None:
                     q_gi = self.query_norm(q_gi)
+                    q_gi = torch.matmul(q_gi, self.query_colour[g])      #  colour ✓
                 if freqs_cis is not None:
                     q_gi = apply_rotary_emb(q_gi.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
                 query_chunks.append(q_gi)
