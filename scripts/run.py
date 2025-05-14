@@ -22,7 +22,6 @@ from absl import app, flags
 
 from gemma import config
 from gemma import model as gemma_model
-from scripts.debug_wrap import attach_probes
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -84,6 +83,7 @@ def main(_):
         model.load_weights(FLAGS.ckpt)
         model = model.to(device).eval()
     print("Model loading done")
+    from debug_wrap import attach_probes
 
     # Generate the response.
     with attach_probes(model, every_layer=False):   # set True to dump all 26 layers
