@@ -85,6 +85,11 @@ class Sampler(nn.Module):
         next_token_ids = torch.multinomial(probs,
                                            num_samples=1,
                                            replacement=True).squeeze(dim=-1)
+
+        print(f"DEBUG SAMPLER: Final top 5 probs: {probs_sort[0, :5].tolist()}")
+        print(f"DEBUG SAMPLER: Final top 5 indices: {probs_idx[0, :5].tolist()}")
+
+
         return next_token_ids, logits
 
 
