@@ -90,7 +90,7 @@ class Sampler(nn.Module):
         print(f"DEBUG SAMPLER: Final top 5 indices: {probs_idx[0, :5].tolist()}")
         for idx in probs_idx[0, :5]:
             # use tokenizer to get the token
-            token = self.tokenizer.decode(idx.item())
+            token = self.config.tokenizer.decode(idx.item())
             print(f"DEBUG SAMPLER: Final top 5 tokens: {token}")
         return next_token_ids, logits
 
