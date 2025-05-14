@@ -272,11 +272,20 @@ def convert_checkpoint(
             T_q  = Pi * (1.0 + gamma_q).unsqueeze(1)                      # Γ_Q·…
             T_k  = Pi * (1.0 + gamma_k).unsqueeze(1)                      # Γ_K·…
 
-            A_q  = (T_q.T @ T_q) / d_k_full                               # (r,r)
+            A_q  = (T_q.T @ T_q) / d_k_full                               # (r,r)  PSD
             A_k  = (T_k.T @ T_k) / d_k_full
 
-            A_q_half = torch.linalg.cholesky(A_q).T.contiguous()          # upper-tri
-            A_k_half = torch.linalg.cholesky(A_k).T.contiguous()
+            def _safe_cholesky(M: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+                """Cholesky with auto-jitter for PSD inputs."""
+                try:
+                    return torch.linalg.cholesky(M)
+                except RuntimeError:              # 1st try failed → add jitter
+                    jitter = eps * torch.trace(M).div(M.shape[0])
+                    M_jit = M + torch.eye(M.shape[0], dtype=M.dtype, device=M.device) * jitter
+                    return torch.linalg.cholesky(M_jit)
+
+            A_q_half = _safe_cholesky(A_q).T.contiguous()                 # upper-tri
+            A_k_half = _safe_cholesky(A_k).T.contiguous()
 
             projected_gamma_q_group.append(gamma_q_prime)
             projected_gamma_k_group.append(gamma_k_prime)
