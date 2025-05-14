@@ -735,7 +735,6 @@ class GemmaForCausalLM(nn.Module):
         trimmed_output = trimmed_output[:eos_index]
       results.append(self.tokenizer.decode(trimmed_output))
 
-    print("DEBUG TOP 5 TOKS: ", results[0][:5])
     # If a string was provided as input, return a string as output.
     return results[0] if is_str_prompt else results
 
