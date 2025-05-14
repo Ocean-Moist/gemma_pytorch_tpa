@@ -22,6 +22,7 @@ from absl import app, flags
 
 from gemma import config
 from gemma import model as gemma_model
+from scripts.debug_wrap import attach_probes
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -85,7 +86,8 @@ def main(_):
     print("Model loading done")
 
     # Generate the response.
-    result = model.generate(FLAGS.prompt, device, output_len=FLAGS.output_len)
+    with attach_probes(model, every_layer=False):   # set True to dump all 26 layers
+        result = model.generate(FLAGS.prompt, device, output_len=FLAGS.output_len)
 
     # Print the prompts and results.
     print('======================================')
