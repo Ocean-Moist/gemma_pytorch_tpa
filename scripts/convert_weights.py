@@ -275,17 +275,18 @@ def convert_checkpoint(
             A_q  = (T_q.T @ T_q) / d_k_full                               # (r,r)  PSD
             A_k  = (T_k.T @ T_k) / d_k_full
 
-            def _safe_cholesky(M: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-                """Cholesky with auto-jitter for PSD inputs."""
-                try:
-                    return torch.linalg.cholesky(M)
-                except RuntimeError:              # 1st try failed → add jitter
-                    jitter = eps * torch.trace(M).div(M.shape[0])
-                    M_jit = M + torch.eye(M.shape[0], dtype=M.dtype, device=M.device) * jitter
-                    return torch.linalg.cholesky(M_jit)
+            def _sqrt_psd(M: torch.Tensor) -> torch.Tensor:
+                """Symmetric square-root of a PSD matrix M."""
+                # 1) eigendecomposition  (ascending order)
+                evals, evecs = torch.linalg.eigh(M)
+                # 2) clamp tiny negatives that come from numerical noise
+                evals.clamp_(min=0.0)
+                # 3) build the root  U √Λ Uᵀ
+                root = evecs @ (evals.sqrt().unsqueeze(0) * evecs.T)
+                return root
 
-            A_q_half = _safe_cholesky(A_q).T.contiguous()                 # upper-tri
-            A_k_half = _safe_cholesky(A_k).T.contiguous()
+            A_q_half = _sqrt_psd(A_q).T.contiguous()                 # upper-tri
+            A_k_half = _sqrt_psd(A_k).T.contiguous()
 
             projected_gamma_q_group.append(gamma_q_prime)
             projected_gamma_k_group.append(gamma_k_prime)
