@@ -8,7 +8,8 @@ def _probe(name):
         if isinstance(out, tuple):                       # (next_tokens, logits) head
             out = out[1]
         t = out.detach()
-        print(f"{name:30} | shape {tuple(t.shape):18} "
+        shape = str(tuple(t.shape))           # cast to str first
+        print(f"{name:30} | shape {shape:18} "
               f"min {t.min():8.3g}  max {t.max():8.3g}  "
               f"mean {t.mean():8.3g}  std {t.std():8.3g}")
     return hook
