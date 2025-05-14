@@ -133,14 +133,17 @@ def main(_: Any) -> None:
     # 4.  Perform generation
     # ------------------------------------------------------------------
     temperature = None if FLAGS.temperature in (0, 0.0, None) else float(FLAGS.temperature)
-    generated = model.generate(
-        prompts=FLAGS.prompt,
-        device=device,
-        output_len=FLAGS.output_len,
-        temperature=temperature,
-        top_p=float(FLAGS.top_p),
-        top_k=int(FLAGS.top_k),
-    )
+    from debug_wrap import attach_probes
+
+    with attach_probes(model, every_layer=False):   # set True to dump all 26 layers
+        generated = model.generate(
+            prompts=FLAGS.prompt,
+            device=device,
+            output_len=FLAGS.output_len,
+            temperature=temperature,
+            top_p=float(FLAGS.top_p),
+            top_k=int(FLAGS.top_k),
+        )
 
     print("\n=== PROMPT ===\n" + FLAGS.prompt)
     print("\n=== COMPLETION ===\n" + generated)
