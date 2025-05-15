@@ -56,6 +56,12 @@ class Sampler(nn.Module):
             logits = logits * self.config.final_logit_softcapping
 
         if temperatures is None:
+            # ----- extra debug prints ---------------------------------------
+            probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+            probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+            print(f"DEBUG SAMPLER: Final top 5 probs: {probs_sort[0, :5].tolist()}")
+            print(f"DEBUG SAMPLER: Final top 5 indices: {probs_idx[0, :5].tolist()}")
+            # -----------------------------------------------------------------
             return torch.argmax(logits, dim=-1).squeeze(dim=-1), logits
 
         # Apply temperature scaling.
