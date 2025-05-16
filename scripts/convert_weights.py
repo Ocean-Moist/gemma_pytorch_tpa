@@ -213,8 +213,8 @@ def convert_checkpoint(
         scale_q_vec = (1.0 + gamma_q).repeat(n_heads)            # (n_h*d_k,)
         scale_k_vec = (1.0 + gamma_k).repeat(n_kv_heads)         # (n_kv*d_k,)
 
-        W_Q_all.mul_(scale_q_vec.unsqueeze(0))
-        W_K_all.mul_(scale_k_vec.unsqueeze(0))
+        # Keep Q/K *un-scaled* – Γ will be applied analytically at run time
+        # through query_norm/key_norm (whitening) and the A½ colour matrices.
 
         # 4‑b) process each GQA group --------------------------------------
         # For Gemma‑1B there is *exactly* one group; but code supports >1.
