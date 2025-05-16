@@ -221,6 +221,9 @@ def convert_checkpoint(
         projected_gamma_q_group: List[torch.Tensor] = []
         projected_gamma_k_group: List[torch.Tensor] = []
 
+        query_halves = []
+        key_halves   = []
+
         for g in range(n_kv_heads):
             K_slice = slice(g * d_k_full, (g + 1) * d_k_full)
             W_K_shared_f = W_K_all[:, K_slice]                   # (d, d_k)
@@ -291,9 +294,11 @@ def convert_checkpoint(
             projected_gamma_q_group.append(gamma_q_prime)
             projected_gamma_k_group.append(gamma_k_prime)
 
-            # store A½ ------------------------------------------------------------
-            new_state[f"model.layers.{layer_idx}.self_attn.query_colour.{g}"] = A_q_half
-            new_state[f"model.layers.{layer_idx}.self_attn.key_colour.{g}"]   = A_k_half
+            query_halves.append(torch.from_numpy(A_q_half))
+            key_halves.append(torch.from_numpy(A_k_half))
+
+        new_state[f"model.layers.{layer_idx}.self_attn.query_colour"] = torch.stack(query_halves)
+        new_state[f"model.layers.{layer_idx}.self_attn.key_colour"]   = torch.stack(key_halves)
 
         # 4‑c) validate/aggregate γ′ across groups -------------------------
         # If multiple groups exist we expect the projected vectors to be

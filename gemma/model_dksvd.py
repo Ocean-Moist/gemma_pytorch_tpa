@@ -68,8 +68,10 @@ class GemmaAttentionDKSVD(nn.Module):
         self.qk_rank: int = config.qk_rank                          # r_g
         self.v_head_dim: int = config.head_dim                      # d_v (unchanged)
 
-        # Dot‑product scaling — note that r_g << head_dim in practice.
-        self.scaling = (config.query_pre_attn_scalar or self.qk_rank) ** -0.5
+        # Dot-product scaling – **always** use the original head width.
+        # This is exactly what the reference implementation does:
+        #   scaling = (query_pre_attn_scalar or head_dim) ** -0.5
+        self.scaling = (config.query_pre_attn_scalar or self.v_head_dim) ** -0.5
 
         # ----------------------  Per‑group linear projections  ----------------------
         # Shared *key* and *value* per GQA group.
@@ -102,12 +104,12 @@ class GemmaAttentionDKSVD(nn.Module):
             # --- § 5.2  “colour”  A½ -------------------------------------------------
             # One SPD root per GQA group, separate for Q and K.
             eye = torch.eye(self.qk_rank)
-            self.query_colour = nn.ParameterList(
-                    [nn.Parameter(eye.clone(),  requires_grad=False) for _ in range(self.num_kv_heads)]
-                )
-            self.key_colour   = nn.ParameterList(
-                    [nn.Parameter(eye.clone(),  requires_grad=False) for _ in range(self.num_kv_heads)]
-                )
+            #   · they must *not* appear in model.parameters()
+            #   · register as buffers keeps dtype / device correct
+            self.register_buffer("query_colour",
+                                 torch.stack([eye] * self.num_kv_heads))   # (G, r, r)
+            self.register_buffer("key_colour",
+                                 torch.stack([eye] * self.num_kv_heads))    # (G, r, r)
         else:
             self.query_norm = None
             self.key_norm = None
@@ -151,10 +153,10 @@ class GemmaAttentionDKSVD(nn.Module):
             k_g = self.k_linears[g](hidden_states)         # (B, T, r_g)
             if self.key_norm is not None:
                 k_g = self.key_norm(k_g)
-                k_g = torch.matmul(k_g, self.key_colour[g])
             if freqs_cis is not None:
                 k_g = apply_rotary_emb(k_g.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
-
+            if self.key_norm is not None:
+                k_g = torch.matmul(k_g, self.key_colour[g])
             # ------ Shared value -----------------------------------------------
             v_g = self.v_linears[g](hidden_states)         # (B, T, d_v)
 
@@ -170,9 +172,11 @@ class GemmaAttentionDKSVD(nn.Module):
                 q_gi = self.q_linears[g][i](hidden_states)  # (B, T, r_g)
                 if self.query_norm is not None:
                     q_gi = self.query_norm(q_gi)
-                    q_gi = torch.matmul(q_gi, self.query_colour[g])      #  colour ✓
                 if freqs_cis is not None:
-                    q_gi = apply_rotary_emb(q_gi.view(B, T, 1, self.qk_rank), freqs_cis).squeeze(2)
+                    q_gi = apply_rotary_emb(q_gi.view(B, T, 1, self.qk_rank),
+                                            freqs_cis).squeeze(2)
+                if self.query_norm is not None:      # colour **after** RoPE
+                    q_gi = torch.matmul(q_gi, self.query_colour[g])
                 query_chunks.append(q_gi)
 
         # ------------------------------------------------------------------
