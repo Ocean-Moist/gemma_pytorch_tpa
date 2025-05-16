@@ -294,8 +294,8 @@ def convert_checkpoint(
             projected_gamma_q_group.append(gamma_q_prime)
             projected_gamma_k_group.append(gamma_k_prime)
 
-            query_halves.append(torch.from_numpy(A_q_half))
-            key_halves.append(torch.from_numpy(A_k_half))
+            query_halves.append(A_q_half)
+            key_halves.append(A_k_half)
 
         new_state[f"model.layers.{layer_idx}.self_attn.query_colour"] = torch.stack(query_halves)
         new_state[f"model.layers.{layer_idx}.self_attn.key_colour"]   = torch.stack(key_halves)
